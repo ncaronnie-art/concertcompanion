@@ -1,0 +1,68 @@
+CONCERT COMPASS — CURRENT PLAN (clean export, 2026-08-28)
+==========================================================
+
+1. WHAT WE'RE BUILDING
+---------------------
+A web app where a user uploads many raw concert videos (long, shaky, repetitive phone recordings) and gets back a polished vertical highlight reel. 2.0 (owner-endorsed) makes it an AI-assisted editing engine, not a clip-concatenator: it analyzes footage at the moment/segment level — a 60s clip may contain one useful 1.8s moment; extract that moment — and selects/edits like a skilled social-video editor would for TikTok/Reels/Shorts.
+
+Quality standard (the non-negotiable): the output must feel like "someone who understands social video watched all my footage and edited this for me" — NOT "software combined videos and added transitions." Clean, well-paced, excellent moments with intentional cuts beat mediocre footage with elaborate effects. Nothing choppy is ever acceptable.
+
+2. THE 2.0 CORE PRODUCT BEHAVIOR (OWNER'S PLAN)
+-----------------------------------------------
+1. Segment-level analysis of every upload -> per-segment metadata: start/end, duration, sharpness, stability, exposure, performer visibility, framing, motion, stage-light change, crowd, audio energy, applause/cheer, beat/onset, uniqueness, highlight score. Reject/penalize floor/ceiling, shake, obstruction, blur, near-black, duplicates, static, redundant composition.
+2. Diversity-aware highlight selection across ALL media: rank by quality AND variety (wide / close performer / crowd / lighting / high-energy / quiet cinematic), never two consecutive near-identical shots.
+3. Editorial story arc: HOOK -> ESTABLISH -> BUILD -> PEAK -> PAYOFF -> END. No black screen / logo / title card at open; branding only subtle at the end.
+4. Professional pacing: default ~30s (15/30/45/60). 0.5-1.5s rapid, 1.5-3s normal, 3-5s hero only. Cuts intentional, timed to beats/movements/lighting/crowd.
+5. Audio-driven editing: cuts near beats/onsets/chorus/screams/applause; coherent audio bed.
+6. Transitions sparingly; default hard cut; optional only when visually motivated (subtle crossfade / match / motion / whip / flash). Never novelty slideshow. Nearly invisible.
+7. 9:16 smart reframing (subject-aware, not blind center-crop), gentle animated follow.
+8. Edit Modes: Cinematic / Hype / Memory / Music Video / Surprise Me.
+9. User control after generation: regenerate, replace segment, lock segment, shorten/lengthen, change style, adjust energy, reorder, choose hook, choose ending, mute source audio, export. Regeneration must be a meaningfully different edit.
+10. Architecture - CLIENT-SIDE (owner decision, Aug 2026): analysis + selection run in the browser. No server/FFmpeg pipeline now. The EDL + optional server render is a documented, deferred path only. Fast, private (footage never leaves device), zero infra cost.
+
+3. STATUS OF THE BUILD (STEP A-D: SHIPPED; THEN QUALITY ISSUE SURFACED)
+----------------------------------------------------------------------
+- STEP A - Segment-level analysis: DONE, shipped. segments.ts: 12 attributes + 9 reject flags + highlight score + uniqueness + EDL builder. Harness green (20/20).
+- STEP B - Diversity-aware selection: DONE, shipped. selection.ts: arc-driven greedy, quality+variety, tours many clips, no adjacent near-identical frames. Harness green (18/18). Gated behind a "Segment-level picks (2.0)" toggle.
+- STEP C - Editorial corrections + Edit Modes: DONE, shipped. No opening title card, hard-cut default, ~30s, 5 Edit Modes, mode migration. Harness green (31/31).
+- STEP D - User editing control: DONE, shipped. edl.ts editing engine + UI (replace/lock/reorder/hook/ending/energy/shorten/mute/regenerate). Persists in sessiondb. Harness green (33/33).
+- STEP E - Server pipeline: RESOLVED client-side, not built.
+- QA + publish: 2.0 published live (bundle index-BC6XJofu.js, /create 200, no error templates).
+- P0 fixed: a /create mount crash (TDZ, segSelect) was caught by QA pre-publish, fixed, verified in real browser, and live is clean.
+
+4. CURRENT REALITY - THE OWNER'S JUDGMENT (WHAT MATTERS NOW)
+-----------------------------------------------------------
+The owner has made it unmistakably clear the product is not acceptable:
+- "The output is trash. People won't pay for this." It looks like software pasted clips together.
+- Choppy 4-second hard-cut slices; nothing smooth.
+- "Same 2 songs/clips every time" - selection/collapse; coverage/variety slider doesn't meaningfully change what's featured.
+- "I start over every time and it just keeps giving the output" - regenerate/start-over isn't producing a different edit.
+- "Loads forever" - decode/analysis too slow (serial per-clip, fallback capture), no clear progress.
+- Root self-inflicted cause: the good 2.0 segment engine is behind a default-OFF toggle, so the live default is the OLD whole-clip engine - the exact thing 2.0 was meant to replace. The real product was hidden behind a switch most users would never flip.
+
+5. THE REBUILD (OUTPUT QUALITY IS THE ONLY BAR)
+-----------------------------------------------
+The senior-most owner instruction: "Rebuild the actual output until it's a reel that looks professionally edited - smooth, on-beat, great moments, no choppy cuts - and only come back with a real video I can watch and judge." Nothing is published until I bring you a watchable rendered video.
+
+The five fixes being executed (not going in circles):
+1. Make segment-level 2.0 the DEFAULT - no hidden-off toggle. The moment-level AI engine IS the product.
+2. Smooth, on-beat, intentional cuts - kill the rigid 4s hard-cut string; cuts land on beats/motion/light; motivating smooth transitions at natural points. Nothing choppy.
+3. Fix selection collapse - genuinely tour many clips/songs; make the coverage slider actually change what's featured.
+4. Fix regenerate/start-over - consecutive regenerates produce distinct edits; start-over fully resets.
+5. Speed + honest progress - parallelize decode/analysis; per-clip progress so it never looks frozen.
+
+The new success bar: the code is NOT done when harnesses are green. It is done when the rendered MP4 reel looks professionally edited - a real person would pay for it. Bring the owner a real, watchable video (rendered from their actual footage) and they will judge it with their own eyes. Only then do we publish.
+
+6. NEXT ACTIONS (IN ORDER)
+-------------------------
+1. Get the footage: the owner's iCloud share link is being pulled (the team is extracting the actual media from the share). If that link is difficult, the owner drops the originals (or copies) into /home/team/shared/ - that's the fastest, most reliable path.
+2. Run the output-quality rebuild with the engineer against the real footage (the five fixes above), iterating on the rendered video - not on tests.
+3. Render a watchable MP4 of the concert reel. The owner watches it. The owner judges it.
+4. Iterate until the owner would pay for it. Only then publish.
+5. Once the output is right: device QA (audible export, 1-audio, phone) + the TDZ lint guard (so this bug class can't silently regress again).
+
+7. KNOWN FOLLOW-UPS (QUEUED, AFTER THE OUTPUT IS RIGHT)
+-------------------------------------------------------
+- Real-device spot-checks (audible export, 1-audio, VR-headset capture; headless AudioContext stays suspended).
+- Visual taste pass on the rendered reel (no opening scrim, subtle end wordmark, sparse transitions).
+- TDZ-hardening lint/CI rule (third instance of this crash class: segSelect, setExportInfo x2).

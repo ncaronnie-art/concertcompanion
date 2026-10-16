@@ -1,0 +1,12 @@
+.build/
+.derivedData/
+.swiftpm/
+.DS_Store
+qa/macos/
+iOS/ConcertCompassTests/Fixtures/*.mp4
+iOS/ConcertCompassTests/Fixtures/*.mov
+iOS/ConcertCompass/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+*.xcuserstate
+xcuserdata/
+*.p12
+*.mobileprovision

@@ -1,0 +1,75 @@
+name: Concert Compass - native Apple verification
+
+on:
+  push:
+    branches: ['native/ios-alpha-0.1']
+    paths:
+      - 'native/ConcertCompass/**'
+      - '.github/workflows/native-verification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compass-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apple-verification:
+    # Standard hosted macOS is free in public repos. Refuse private-repo billing.
+    if: github.event.repository.private == false && github.ref == 'refs/heads/native/ios-alpha-0.1'
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+    steps:
+      - name: Check out this exact revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Prepare synthetic-fixture tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          if ! command -v ffmpeg >/dev/null; then
+            brew install ffmpeg
+          fi
+          ffmpeg -version | head -n 1
+      - name: Compile and test the actual native renderer
+        shell: bash
+        run: bash native/ConcertCompass/tools/verify-macos.sh
+      - name: Surface compiler and integration errors
+        if: failure()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          messages = []
+          for path in Path('native/ConcertCompass/qa/macos').glob('*.log'):
+              for line in path.read_text(errors='replace').splitlines():
+                  if ' error:' in line or 'failed -' in line or 'error: ' in line:
+                      messages.append(line)
+          for message in list(dict.fromkeys(messages))[:25]:
+              escaped = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print('::error::' + escaped)
+          PY
+      - name: Keep verification evidence for one day
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-apple-verification-${{ github.run_number }}
+          path: native/ConcertCompass/qa/macos/
+          if-no-files-found: warn
+          retention-days: 1
+      - name: Record scope
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### Concert Compass native verification'
+            echo 'Apple SDK compilation and synthetic iPhone-simulator tests only.'
+            echo 'This job does not sign an iPhone app, deploy a site, submit to Apple, or use personal footage.'
+            echo 'A physical iPhone test and owner review of a real concert reel are separate release gates.'
+          } >> "$GITHUB_STEP_SUMMARY"

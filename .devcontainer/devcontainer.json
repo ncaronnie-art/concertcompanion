@@ -1,0 +1,11 @@
+{
+  "name": "Concert Compass private quality test",
+  "build": {"dockerfile": "Dockerfile", "context": ".."},
+  "hostRequirements": {"cpus": 2, "memory": "8gb"},
+  "forwardPorts": [8765],
+  "portsAttributes": {"8765": {"label": "Concert Compass PRIVATE quality test", "onAutoForward": "openBrowser", "protocol": "http"}},
+  "otherPortsAttributes": {"onAutoForward": "ignore"},
+  "postCreateCommand": "bash devtest/prepare.sh",
+  "postStartCommand": "bash devtest/start.sh",
+  "waitFor": "postCreateCommand"
+}

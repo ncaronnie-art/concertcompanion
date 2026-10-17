@@ -1,69 +1,57 @@
-# Concert Compass private quality test: verification report
+# Concert Compass 0.2: local verification report
 
-Date: October 17, 2026 UTC
-Status: LOCAL LINUX BACKEND VERIFIED; CODESPACES AND IPHONE NOT YET VERIFIED
+17 October 2026. Local code and generated media only. No live deployment, Codespace creation, billing changes, user footage or Apple signing.
 
-## What was reused
+## Results for this checkpoint
 
-The existing portable Swift package was recovered from the delivered native alpha archive. Its Package.swift, CompassCore source files, existing CLI and 45-test source were checked against the Git blob hashes on native/ios-alpha-0.1 at commit 2e681891fcb15fc5901c95a69acd249ae37f6b1c. They matched. The native source was not modified.
+- Existing CompassCore tests: **45 passed, zero failures**, 0.448 seconds of test execution. Native source and test files were not changed.
+- QualityCLI: **Swift release build passed**. It imports the same portable package; its only planner extension is a seed for regeneration.
+- Python: **35 passed, zero failures**, 123.479 seconds. This includes all 13 original tests unchanged, 20 new guardrail tests and 2 new temporal-assembly stress tests.
+- JavaScript and Python source syntax checked separately.
+- UI/API bridge: **8 checks passed, zero JavaScript page errors** after the final renderer changes. Actual HTML/CSS fit 320, 390 and 1280 pixel viewports. The actual UI uploaded generated files through its chunk protocol, planned, edited, saved, rendered, prepared sharing and deleted test media through the real backend. The resulting 15-second file decoded and reached its end in Chromium using a test Blob.
 
-A separate adapter imports CompassCore for prompt rules, highlight planning, timeline generation and validation. FFmpeg performs the new Linux rendering. A small development UI is separate from both the native app and existing React app; the existing serve.ts was not reused or changed. This avoids modifying the current browser-rendering code for a temporary test.
+**Do not confuse these with device evidence.** Direct Chromium navigation failed with ERR_BLOCKED_BY_ADMINISTRATOR; policy was not disabled. The separately labeled bridge runs the real UI offline and transfers API calls through an explicit test binding. Direct browser networking, Codespaces private-port authentication, iPhone Safari, operating-system sharing and Photos saving remain untested. No subjective concert-quality verdict exists.
 
-## Verified in this execution
+## Reproducing the tests
 
-| Gate | Result | Evidence |
-| --- | --- | --- |
-| Existing portable Swift tests | PASS: 45 tests, 0 failures | swift test release log; 0.260 seconds of test execution, excluding build |
-| QualityCLI adapter compilation | PASS | Swift release build log |
-| New synthetic-media and HTTP tests | PASS: 13 tests | Python unittest log; final run 42.561 seconds |
-| Browser JavaScript syntax | PASS | node --check devtest/static/app.js |
-| Actual browser interaction | NOT VERIFIED | Chromium navigation was blocked by the execution environment policy: ERR_BLOCKED_BY_ADMINISTRATOR. No workaround was attempted. |
-| Docker/devcontainer build and Codespaces start | NOT RUN | No Codespace or Docker build was launched. |
-| iPhone upload, playback, share and Photos save | NOT RUN | No device or real concert footage was supplied for this harness. |
-| Native AVFoundation regression run | NOT RUN in this execution | Historical GitHub native verification and unsigned-device workflows were checked as successful, but this harness does not exercise AVFoundation. |
+Run only in an already authorized developer environment. These are maintainer commands, not work for the owner:
 
-Environment: Linux x86_64; Swift 6.2.1; Python 3.13.5; FFmpeg 7.1.5; Node 22.16.0. The intended remote image uses Swift 6.2.4/Noble and its package-manager FFmpeg. The tests rerun during Codespaces setup; local success is not proof of that image's compatibility.
+```sh
+cd native/ConcertCompass && swift test -c release
+cd ../../devtest && swift build -c release
+python -m unittest discover -s tests -v
+node --check static/app.js
+python -m py_compile engine.py server.py tests/*.py tools/*.py
+```
 
-## Thirteen new test cases
+Optional Playwright scripts in `tools/` require an existing permitted Chromium/Playwright installation. `browser_smoke.py` exercises direct networking; it is blocked in this environment. `ui_bridge_check.py` is the isolated transport test described above. Write all evidence outside the repository. Neither script is served to the owner or loaded by the studio.
 
-1. Existing Swift prompt interpreter and planner produce a supported edit list from analyzed synthetic media.
-2. Hard-cut export preserves expected first/last picture and 440/880 Hz test-tone order, correct duration, and deletes sources after completion.
-3. Dissolves and gentle rumble filtering finish with the expected duration and retained sound.
-4. A silent source stays silent in a mixed-source reel.
-5. Cancellation does not return a completed shareable reel.
-6. The existing Swift validator rejects an out-of-bounds trim.
-7. A stabilization request is explicitly rejected rather than faked.
-8. Real local HTTP requests upload, analyze, plan, render, serve authenticated byte ranges, reject invalid ranges, and delete a test.
-9. Session, CSRF, host/origin and upload-size guards reject selected invalid requests; navigation from GitHub to the landing page remains permitted.
-10. Synthetic HEVC Main10 with PQ transfer tags is decoded and rendered to H.264 with BT.709 output tags.
-11. Locked source ranges survive regeneration through the existing planner.
-12. A complete 15-second, multi-shot dissolve edit renders within the duration tolerance.
-13. Expired sessions remove their test-media directories.
+## Bugs discovered and repaired, not just new screens
 
-These are functional tests, not a security audit, performance guarantee or judgment of artistic quality. The HEVC/PQ fixture is generated test imagery, not a real iPhone Dolby Vision capture. Longer 30/45/60-second Linux renders, sustained uploads and production-like load remain untested.
+**Cumulative timing:** a 40-shot test exposed half-frame disagreement between the Swift cursor's 600-Hz rounding and independently rounded source lengths. The Linux adapter now rounds absolute canonical boundaries to 30 fps, carries approved source durations separately and pads only fractional tails. Every midpoint in a 40-cut edit is checked for the correct colored picture and 440/660/880-Hz tone. This is stronger than checking only the first and last frame, but it is not a natural-speech lip-sync evaluation.
 
-## Fixes made before the passing run
+**Long-reel memory:** the prior all-input crossfade graph was killed during a 60-second test in a 4 GiB container; the container recorded an OOM kill. The new assembler decodes at most two shots at once, renders the body/transition pieces, and concatenates them. PCM intermediates prevent adding AAC encoder padding at every splice. The final complete MP4 encodes AAC once and preserves the piece boundaries. The previously failing 60-second test now passes. The final test command reported peak RSS of 369,136 KiB, versus 3,572,436 KiB in the earlier failing command. These are this synthetic test environment's process metrics, not a promise of real 4K/8K memory use.
 
-FFmpeg frame-rate/timebase handling at crossfades was corrected after an initial rendering failure. Explicit encoder color metadata was added so the HDR conversion test checks real stream metadata rather than relying on requested container tags. An asynchronous upload-worker closure was fixed. The request guard now allows a normal top-level navigation from GitHub while continuing to reject cross-site API requests. Polling does not continue indefinitely while the app is idle.
+**Upload reliability:** bounded 2 MiB pieces, idempotent replay, confirmed offsets, mismatch/hole rejection, safe cancellation, and a single reservation held through the analysis handoff replace a fragile single-request path. The legacy route remains for regression coverage. Retry across server restarts is not promised.
 
-## Scope and controls
+**Edit safety:** saved review precedes rendering; stale revisions cannot overwrite newer edits; locks protect source/trim/framing until explicit unlock; unsupported booleans, non-finite values and out-of-range trims are refused. The UI opens one source player rather than one decoder per moment. Source aspect is preserved in the proxy so manual framing is not previewed through pre-baked black bars.
 
-All inputs were generated colors, patterns and tones. No personal footage was used, uploaded, committed or included in test artifacts. No public service, Codespace, billing change, signing credential, enrollment or paid third-party service was created. Changes are confined to .devcontainer and devtest on a separate native-prefixed development branch. The existing deployment guard, workflows and native app remain unchanged.
+**Honest success:** output checks include codecs, dimensions, duration, audio/video endpoint agreement, sampled frames, complete-file decoding and size. A partial output is not exposed as a finished reel. The session receipt explicitly says physical-phone testing is unverified; Photos saving and owner taste are separate user-entered answers. Source cleanup, explicit deletion and expiry are tested locally, not assumed from /tmp.
 
-Source copies are removed after a successful render; remaining media requires explicit deletion, running-server expiry, next-start cleanup or Codespace deletion. Stopping the Codespace does not guarantee deletion or stop storage quota use. No claim of secure erasure is made.
+## Coverage and exclusions
 
-## What must happen before calling the route usable
+Generated colors, moving test patterns, sine waves, silence, mixed aspect ratios and a tagged HEVC Main10/PQ fixture exercise the processing path. The latter is not a real iPhone Dolby Vision recording. Tested export cases include short cuts, short dissolves, 15-second multi-shot dissolves, 40 irregular cuts and a 60-second dissolve reel. Not every style/length/source combination or failure mode has been tested.
 
-Verify remaining personal-account compute/storage and a no-paid-overage boundary. Create one private 2-core Codespace only after that check, confirm its setup tests and authenticated private forwarding, then try two or three short phone clips and a 15-second reel. Pass only when the complete result plays with sound, saves and replays in Photos, the owner likes the edit, and the Codespace is deleted. Any break is a failed gate, not a finished app.
+No security audit, production load test, accessibility certification, licensed-song recognition, performer tracking, stabilization, crowd-vocal isolation or real concert evaluation has occurred. Gentle cleanup is low-rumble filtering only. The native app and old Apple workflows were not modified or rerun. Historical Apple build success is separate evidence and does not validate this Linux renderer.
 
-## Evidence and documentation
+## Cost and access boundary
 
-- Repository base: https://github.com/ncaronnie-art/concertcompanion/tree/2e681891fcb15fc5901c95a69acd249ae37f6b1c
-- Historical Apple verification: https://github.com/ncaronnie-art/concertcompanion/actions/runs/38950269578
-- Historical unsigned ARM64 package: https://github.com/ncaronnie-art/concertcompanion/actions/runs/38963825164
-- Included usage/storage: https://docs.github.com/en/codespaces/troubleshooting/troubleshooting-included-usage
-- Budget enforcement: https://docs.github.com/en/billing/how-tos/set-up-budgets
-- Forwarding/privacy: https://docs.github.com/en/codespaces/developing-in-a-codespace/forwarding-ports-in-your-codespace
-- Development-only terms: https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features
+No Codespace was created. Its actual quota, spending protection, image build, startup, private forwarding and iPhone behavior are still open gates. Do not make a port public or introduce a paid fallback. The current code remains a private-development test, not a product launch.
 
-No native installation has been unblocked. This verifies a separate development renderer around reused editing logic, not an installable or released iPhone app.
+GitHub primary documentation for the next gate:
+- https://docs.github.com/en/codespaces/troubleshooting/troubleshooting-included-usage
+- https://docs.github.com/en/billing/how-tos/set-up-budgets
+- https://docs.github.com/en/codespaces/developing-in-a-codespace/forwarding-ports-in-your-codespace
+- https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features
+
+Canonical decisions, constraints and next action: PROJECT_CONTROL.md.

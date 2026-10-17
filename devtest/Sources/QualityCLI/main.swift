@@ -6,6 +6,7 @@ struct Request: Codable {
     var action: String
     var plan: EditPlan?
     var previous: EditPlan?
+    var seed: UInt64?
 }
 struct Response: Codable { var plan: EditPlan; var timeline: [TimelineShot] }
 do {
@@ -15,7 +16,7 @@ do {
     if r.action == "plan" {
         let direction = PromptDirector.interpret(r.settings.prompt, base: r.settings)
         guard !direction.settings.stabilize else { throw CompassError.invalid("Stabilization is not part of this Linux quality test. Remove that direction.") }
-        plan = try Planner.propose(clips: r.clips, settings: direction.settings, previous: r.previous)
+        plan = try Planner.propose(clips: r.clips, settings: direction.settings, previous: r.previous, seed: r.seed ?? 0)
         plan.warnings += direction.understood + direction.warnings
         plan.director = "Existing CompassCore rules and signal planner; separate Linux renderer"
     } else if r.action == "validate", let proposed = r.plan {

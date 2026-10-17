@@ -1,6 +1,6 @@
 """Private development renderer. Reuses CompassCore; never invokes a remote model."""
 from __future__ import annotations
-import array, json, math, os, signal, subprocess, sys, time, uuid
+import array, copy, json, math, os, signal, subprocess, sys, time, uuid
 from pathlib import Path
 from threading import Event
 
@@ -48,7 +48,7 @@ def ff(args, cancel=None, timeout=180):
 
 
 def inp(path: Path):
-    return ['-protocol_whitelist', 'file,pipe', '-i', str(path)]
+    return ['-protocol_whitelist', 'file,pipe', '-threads', '2', '-i', str(path)]
 
 
 def probe(path: Path, cancel=None):
@@ -63,7 +63,11 @@ def color_filter(video):
 
 
 def analyze(path: Path, number: int, cancel: Event):
-    info = probe(path, cancel)
+    # Restrict the demuxer before inspecting untrusted uploads. Playlists must
+    # not be able to reference files elsewhere in this development container.
+    info = json.loads(run(['ffprobe', '-v', 'error', '-protocol_whitelist', 'file,pipe',
+                          '-format_whitelist', 'mov', '-show_streams', '-show_format',
+                          '-of', 'json', str(path)], cancel, 30))
     videos = [s for s in info['streams'] if s['codec_type'] == 'video' and not s.get('disposition', {}).get('attached_pic')]
     if not videos or not {'mov', 'mp4', 'm4v'}.intersection(info.get('format', {}).get('format_name', '').split(',')):
         raise TestError('Choose a camera MOV or MP4 video, not a playlist or another file type.')
@@ -108,26 +112,42 @@ def analyze(path: Path, number: int, cancel: Event):
                 audio=audio, visual=visual, warnings=['Linux image difference is a motion proxy, not camera-shake recognition.'])
     proxy = path.with_suffix('.preview.mp4')
     ff(inp(path) + ['-t', str(duration), '-map', '0:v:0', '-map', '0:a:0?',
-        '-vf', color_filter(video)+'scale=540:960:force_original_aspect_ratio=decrease,pad=540:960:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p',
+        '-vf', color_filter(video)+'scale=540:960:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,fps=30,format=yuv420p',
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24', '-threads', '2', '-c:a', 'aac', '-ar', '48000', '-ac', '2',
         '-map_metadata', '-1', '-movflags', '+faststart', str(proxy)], cancel)
+    # The proxy keeps its natural aspect ratio. CSS cover + object-position
+    # therefore previews the same framing fractions as the final crop.
+    ff(['-ss', str(min(duration / 2, 1))] + inp(proxy) + ['-frames:v', '1',
+        '-vf', 'scale=180:320:force_original_aspect_ratio=decrease', '-q:v', '5',
+        '-an', str(path.with_suffix('.poster.jpg'))], cancel)
     return clip
 
 
 def settings_from(data):
+    if not isinstance(data, dict):
+        raise TestError('Expected an edit settings object.')
     result = dict(mode='highlight', style='memory', targetSeconds=15, transitions='automatic',
                   gentleCleanup=False, stabilize=False, prompt='')
     for key in result:
-        if key in data: result[key] = data[key]
+        if key in data:
+            result[key] = data[key]
+    allowed = {'mode': ('highlight', 'trailer'),
+               'style': ('cinematic', 'hype', 'memory', 'musicVideo', 'surprise'),
+               'transitions': ('automatic', 'cuts', 'dissolves')}
+    for key, values in allowed.items():
+        if not isinstance(result[key], str) or result[key] not in values:
+            raise TestError('Unsupported edit option: ' + key)
+    if type(result['targetSeconds']) not in (int, float) or result['targetSeconds'] not in (15, 30, 45, 60):
+        raise TestError('Choose a 15-, 30-, 45-, or 60-second target.')
     if not isinstance(result['prompt'], str) or len(result['prompt']) > 1500:
         raise TestError('Keep your direction under 1,500 characters.')
-    if result['gentleCleanup'] not in (True, False) or result['stabilize'] is not False:
+    if type(result['gentleCleanup']) is not bool or result['stabilize'] is not False:
         raise TestError('Unsupported cleanup or stabilization setting.')
     return result
 
 
-def direct(root, clips, settings, cancel, plan=None, previous=None):
-    request = dict(clips=clips, settings=settings, action='validate' if plan is not None else 'plan', plan=plan, previous=previous)
+def direct(root, clips, settings, cancel, plan=None, previous=None, seed=0):
+    request = dict(clips=clips, settings=settings, action='validate' if plan is not None else 'plan', plan=plan, previous=previous, seed=seed)
     source, target = root/'request.json', root/'response.json'
     source.write_text(json.dumps(request, allow_nan=False))
     try:
@@ -138,55 +158,148 @@ def direct(root, clips, settings, cancel, plan=None, previous=None):
 
 
 def render(root, clips, directed, cancel, progress):
-    shots = directed['timeline']
-    if len(shots) > 40: raise TestError('This first test supports up to 40 moments.')
+    """Publish only verified output; on failure keep originals but delete partials."""
+    for p in list(root.glob('segment-*.*')) + list(root.glob('piece-*.*')) + [root / 'pending.mp4', root / 'assembly.ffconcat']:
+        p.unlink(missing_ok=True)
+    try:
+        return _render(root, clips, directed, cancel, progress)
+    except BaseException:
+        for p in list(root.glob('segment-*.*')) + list(root.glob('piece-*.*')) + [root / 'pending.mp4', root / 'assembly.ffconcat']:
+            p.unlink(missing_ok=True)
+        raise
+
+
+def frame_timeline(timeline):
+    """Round absolute boundaries, not each length, to avoid cumulative drift.
+
+    The edit remains on its original timebase outside this rendering adapter.
+    A boundary shifts at most half an output frame. Source reads never extend
+    beyond an approved trim; any fractional tail is padded, not newly selected.
+    """
+    shots = copy.deepcopy(timeline)
+    previous_end = 0
+    for index, shot in enumerate(shots):
+        # CompassCore rounds its cursor to 1/600 s after each shot. Reuse
+        # the next canonical boundary rather than re-adding unrounded input
+        # durations; a half-frame tie can otherwise create a phantom gap.
+        raw_end = shot['at'] + shot['moment']['duration']
+        canonical_end = (timeline[index+1]['at'] + timeline[index+1]['overlap']) if index+1 < len(shots) else raw_end
+        if abs(canonical_end - raw_end) > .004:
+            raise TestError('The edit has an actual timing gap or overlap mismatch.')
+        start_ticks = int(math.floor(shot['at']*600 + .5 + 1e-8))
+        end_ticks = int(math.floor(canonical_end*600 + .5 + 1e-8))
+        start = (start_ticks + 10) // 20
+        end = (end_ticks + 10) // 20
+        if end <= start or start < 0 or (index and start > previous_end):
+            raise TestError('This edit cannot be aligned to output video frames.')
+        shot['_sourceDuration'] = shot['moment']['duration']
+        shot['at'] = start / 30
+        shot['moment']['duration'] = (end - start) / 30
+        shot['overlap'] = (previous_end - start) / 30 if index else 0
+        if shot['overlap'] == 0:
+            shot['incoming'] = 'cut'
+        previous_end = end
+    return shots
+
+
+def _render(root, clips, directed, cancel, progress):
+    shots = frame_timeline(directed['timeline'])
+    if not shots or len(shots) > 40: raise TestError('This first test supports up to 40 moments.')
     by_id = {c['id']: c for c in clips}
     segments = []
     duration = shots[-1]['at'] + shots[-1]['moment']['duration']
     settings = directed['plan']['settings']
+    if settings.get('stabilize') or settings.get('masterAudioClipID'):
+        raise TestError('This test does not implement stabilization or a continuous replacement audio bed.')
     for i, shot in enumerate(shots):
         moment = shot['moment']; clip = by_id[moment['clipID']]
         source = root / clip['fileName']
         length = moment['duration']
+        source_length = shot['_sourceDuration']
         video = next(s for s in probe(source, cancel)['streams'] if s['codec_type'] == 'video')
-        target = root / f'segment-{i}.mp4'
+        target = root / f'segment-{i}.mkv'
         args = ['-ss', str(moment['start'])] + inp(source)
         audible = clip['hasAudio'] and not moment['muted']
         if not audible: args += ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']
-        vf = color_filter(video)+f'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(iw-ow)*{moment["focusX"]}:(ih-oh)*{moment["focusY"]},setsar=1,fps=30,format=yuv420p'
-        af = 'aresample=48000:async=1:first_pts=0,apad'
+        vf = f'trim=duration={source_length},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=0.067,'+color_filter(video)+f'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(iw-ow)*{moment["focusX"]}:(ih-oh)*{moment["focusY"]},setsar=1,fps=30,format=yuv420p'
+        af = f'atrim=duration={source_length},asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0,apad,atrim=duration={length}'
         if settings['gentleCleanup']: af += ',highpass=f=70:mix=0.45'
         args += ['-map','0:v:0','-map','0:a:0' if audible else '1:a:0', '-t',str(length), '-vf',vf, '-af',af,
                  '-c:v','libx264','-preset','veryfast','-crf','20','-threads','2','-x264-params','colorprim=bt709:transfer=bt709:colormatrix=bt709',
-                 '-c:a','aac','-b:a','192k','-ar','48000','-ac','2','-map_metadata','-1',
-                 '-color_primaries','bt709','-color_trc','bt709','-colorspace','bt709','-movflags','+faststart',str(target)]
+                 '-c:a','pcm_s16le','-ar','48000','-ac','2','-map_metadata','-1',
+                 '-color_primaries','bt709','-color_trc','bt709','-colorspace','bt709',str(target)]
         ff(args,cancel); segments.append(target); progress((i+1)/len(shots)*.65, 'Rendering selected moments')
-    args, graph = [], []
-    for i, source in enumerate(segments):
-        args += inp(source)
-        graph += [f'[{i}:v]setpts=PTS-STARTPTS,fps=30,settb=AVTB[v{i}]', f'[{i}:a]asetpts=PTS-STARTPTS[a{i}]']
-    v,a = 'v0','a0'
-    for i, shot in enumerate(shots[1:],1):
-        nv,na = f'mv{i}',f'ma{i}'
-        if shot['incoming']=='dissolve' and shot['overlap']>0:
-            graph += [f'[{v}][v{i}]xfade=transition=fade:duration={shot["overlap"]}:offset={shot["at"]}[pre{nv}]', f'[pre{nv}]fps=30,settb=AVTB[{nv}]',
-                      f'[{a}][a{i}]acrossfade=d={shot["overlap"]}:c1=tri:c2=tri[{na}]']
-        else:
-            graph += [f'[{v}][v{i}]concat=n=2:v=1:a=0[pre{nv}]', f'[pre{nv}]fps=30,settb=AVTB[{nv}]', f'[{a}][a{i}]concat=n=2:v=0:a=1[{na}]']
-        v,a=nv,na
-    graph += [f'[{v}]fps=30,format=yuv420p,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709[video]', f'[{a}]apad[audio]']
-    pending = root/'pending.mp4'
-    progress(.7, 'Assembling the complete reel')
-    ff(args+['-filter_complex',';'.join(graph),'-map','[video]','-map','[audio]','-t',str(duration),
-             '-c:v','libx264','-preset','veryfast','-crf','20','-threads','2','-x264-params','colorprim=bt709:transfer=bt709:colormatrix=bt709','-c:a','aac','-b:a','192k','-ar','48000',
-             '-map_metadata','-1','-color_primaries','bt709','-color_trc','bt709','-colorspace','bt709','-movflags','+faststart',str(pending)],cancel,360)
+    pending = assemble_bounded(root, segments, shots, duration, cancel, progress)
+    progress(.94, 'Decoding the complete output and checking sound timing')
     verify(pending,duration,cancel)
+    if cancel.is_set():
+        raise TestError('Stopped safely. No partial reel is shareable.')
     final=root/'reel.mp4'; pending.replace(final)
     # Once the completed reel exists, source copies/proxies/intermediates are unnecessary.
     for p in root.iterdir():
         if p.is_file() and p != final: p.unlink()
     progress(1, 'Full reel ready. Source copies have been deleted.')
     return final
+
+
+def assemble_bounded(root, segments, shots, duration, cancel, progress):
+    """Render nonoverlapping bodies and transition windows, then stream-concat.
+
+    At most TWO decoded videos are live at once. The prior all-input graph
+    failed the 60-second test in a 4 GiB container with an OOM kill recorded. PCM intermediates avoid an AAC padding error at every splice.
+    Only generated relative filenames enter the concat manifest.
+    """
+    pieces = []
+    encoder = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-threads', '2',
+               '-x264-params', 'colorprim=bt709:transfer=bt709:colormatrix=bt709',
+               '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2', '-map_metadata', '-1',
+               '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709']
+
+    def video_trim(index, first, last, label):
+        return f'[{index}:v]trim=start_frame={first}:end_frame={last},setpts=PTS-STARTPTS,fps=30,settb=AVTB[{label}]'
+
+    def audio_trim(index, first, last, label):
+        return f'[{index}:a]atrim=start_sample={first*1600}:end_sample={last*1600},asetpts=PTS-STARTPTS[{label}]'
+
+    def piece(args, graph, frames):
+        if frames <= 0:
+            return
+        target = root / f'piece-{len(pieces):03d}.mkv'
+        ff(args + ['-filter_complex', ';'.join(graph), '-map', '[v]', '-map', '[a]',
+                   '-t', str(frames/30)] + encoder + [str(target)], cancel, 180)
+        pieces.append((target, frames))
+
+    for i, shot in enumerate(shots):
+        incoming = round(shot['overlap']*30)
+        length = round(shot['moment']['duration']*30)
+        outgoing = round(shots[i+1]['overlap']*30) if i+1 < len(shots) else 0
+        if incoming:
+            previous_length = round(shots[i-1]['moment']['duration']*30)
+            graph = [video_trim(0, previous_length-incoming, previous_length, 'va'),
+                     video_trim(1, 0, incoming, 'vb'),
+                     f'[va][vb]xfade=transition=fade:duration={incoming/30}:offset=0,fps=30,format=yuv420p[v]',
+                     audio_trim(0, previous_length-incoming, previous_length, 'aa'),
+                     audio_trim(1, 0, incoming, 'ab'),
+                     f'[aa][ab]acrossfade=d={incoming/30}:c1=tri:c2=tri[a]']
+            piece(inp(segments[i-1])+inp(segments[i]), graph, incoming)
+        graph = [video_trim(0, incoming, length-outgoing, 'v'),
+                 audio_trim(0, incoming, length-outgoing, 'a')]
+        piece(inp(segments[i]), graph, length-incoming-outgoing)
+        progress(.65 + .25*(i+1)/len(shots), 'Finishing transitions with bounded memory')
+    total_frames = sum(frames for _, frames in pieces)
+    if abs(total_frames/30-duration) > .001:
+        raise TestError('Piece assembly did not preserve the complete edit length.')
+    manifest = root / 'assembly.ffconcat'
+    manifest.write_text('ffconcat version 1.0\n' + ''.join(
+        f"file '{path.name}'\nduration {frames/30:.12f}\n" for path,frames in pieces))
+    pending = root / 'pending.mp4'
+    ff(['-f', 'concat', '-safe', '1'] + inp(manifest) +
+       ['-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy',
+        '-af', f'aresample=48000:async=1:first_pts=0,apad,atrim=duration={duration}',
+        '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+        '-t', str(duration), '-map_metadata', '-1', '-video_track_timescale', '90000',
+        '-movflags', '+faststart', str(pending)], cancel, 180)
+    return pending
 
 
 def verify(path, expected, cancel):
@@ -200,3 +313,13 @@ def verify(path, expected, cancel):
     for t in (0,expected/2,max(0,expected-.15)):
         frame=ff(['-ss',str(t)]+inp(path)+['-frames:v','1','-vf','scale=32:32','-an','-f','rawvideo','-pix_fmt','rgb24','pipe:1'],cancel)
         if len(frame)!=3072: raise TestError('A first, middle or final frame failed to decode.')
+
+    # A few thumbnail samples are not proof that the full output decodes.
+    ff(['-xerror'] + inp(path) + ['-map', '0:v:0', '-map', '0:a:0',
+        '-f', 'null', '-'], cancel, 120)
+    vd = float(v.get('duration', expected))
+    ad = float(a.get('duration', expected))
+    if not all(math.isfinite(t) for t in (vd, ad)) or abs(vd-ad) > .12:
+        raise TestError('Video and audio end times disagree. This reel was not published.')
+    if path.stat().st_size > 160 * 1024**2:
+        raise TestError('The completed reel is too large for this phone test.')

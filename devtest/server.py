@@ -255,8 +255,12 @@ class Handler(BaseHTTPRequestHandler):
         if name:
             allowed.add(f'https://{name}-{PORT}.{domain}')
         landing = self.command in ('GET', 'HEAD') and urlsplit(self.path).path == '/' and self.headers.get('Sec-Fetch-Mode') == 'navigate'
-        if ((self.headers.get('Sec-Fetch-Site') == 'cross-site' and not landing)
-                or (origin and origin not in allowed)):
+        # Codespaces' authenticated port proxy can label a browser request
+        # cross-site even when its explicit Origin is our exact private host.
+        # Trust only an exact allowed Origin, never Sec-Fetch-Site alone.
+        # Requests without Origin still reject cross-site fetch metadata.
+        if ((origin is not None and origin not in allowed)
+                or (origin is None and self.headers.get('Sec-Fetch-Site') == 'cross-site' and not landing)):
             self.send_json({'error': 'Cross-site requests are blocked.'}, 403)
             return False
         if self.headers.get('Host', '') not in {urlsplit(x).netloc for x in allowed}:

@@ -134,6 +134,15 @@ class GuardrailTests(unittest.TestCase):
         self.assertIn("script-src 'self'",headers['Content-Security-Policy'])
         self.assertIn('microphone=()',headers['Permissions-Policy'])
         self.assertEqual(self.call('PUT','/api/upload-chunk/fake',b'abc',{**self.h,'Origin':'https://evil.invalid'})[0],403)
+    def test_15b_private_proxy_allows_exact_origin_despite_cross_site_metadata(self):
+        # Simulates Codespaces proxy metadata without trusting arbitrary origins.
+        local=f'http://127.0.0.1:{self.http.server_port}'
+        headers={**self.h,'Origin':local,'Sec-Fetch-Site':'cross-site'}
+        self.assertEqual(self.call('POST','/api/cancel','{}',headers)[0],200)
+        self.assertEqual(self.call('POST','/api/cancel','{}',{**headers,'Origin':'https://evil.invalid'})[0],403)
+        self.assertEqual(self.call('POST','/api/cancel','{}',{**self.h,'Sec-Fetch-Site':'cross-site'})[0],403)
+        self.assertEqual(self.call('POST','/api/cancel','{}',{**headers,'X-Compass-CSRF':'invalid'})[0],403)
+
     def test_16_untrusted_playlist_is_rejected_before_media_processing(self):
         with tempfile.TemporaryDirectory() as td:
             p=Path(td)/(str(uuid.uuid4())+'.mov');p.write_text('#EXTM3U\n#EXTINF:3,\nfile:///etc/passwd\n')

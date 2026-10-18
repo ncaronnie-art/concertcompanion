@@ -28,20 +28,23 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Check preinstalled toolchain
+      - name: Check Swift executable
         run: |
-          set -euo pipefail
-          for tool in swift ffmpeg ffprobe python3 node; do
-            if ! command -v "$tool" >/dev/null 2>&1; then
-              echo "::error title=Missing toolchain component::$tool is unavailable on this runner"
-              exit 1
-            fi
-            echo "Found $tool at $(command -v "$tool")"
-          done
+          command -v swift
           swift --version
+      - name: Check FFmpeg executable
+        run: |
+          command -v ffmpeg
           ffmpeg -version
+      - name: Check FFprobe executable
+        run: |
+          command -v ffprobe
           ffprobe -version
+      - name: Check Python and Node executables
+        run: |
+          command -v python3
           python3 --version
+          command -v node
           node --version
       - name: Portable Swift planner tests
         run: swift test --package-path native/ConcertCompass -c release -j 2

@@ -3,6 +3,7 @@ from __future__ import annotations
 import array, copy, json, math, os, signal, subprocess, sys, time, uuid
 from pathlib import Path
 from threading import Event
+from audio.policy import AudioPolicy
 
 HERE = Path(__file__).resolve().parent
 CLI = HERE / '.build/release/QualityCLI'
@@ -127,7 +128,7 @@ def settings_from(data):
     if not isinstance(data, dict):
         raise TestError('Expected an edit settings object.')
     result = dict(mode='highlight', style='memory', targetSeconds=15, transitions='automatic',
-                  gentleCleanup=False, stabilize=False, prompt='')
+                  gentleCleanup=False, seamSmoothing=False, stabilize=False, prompt='')
     for key in result:
         if key in data:
             result[key] = data[key]
@@ -141,7 +142,8 @@ def settings_from(data):
         raise TestError('Choose a 15-, 30-, 45-, or 60-second target.')
     if not isinstance(result['prompt'], str) or len(result['prompt']) > 1500:
         raise TestError('Keep your direction under 1,500 characters.')
-    if type(result['gentleCleanup']) is not bool or result['stabilize'] is not False:
+    if (type(result['gentleCleanup']) is not bool or type(result['seamSmoothing']) is not bool
+            or result['stabilize'] is not False):
         raise TestError('Unsupported cleanup or stabilization setting.')
     return result
 
@@ -209,6 +211,7 @@ def _render(root, clips, directed, cancel, progress):
     segments = []
     duration = shots[-1]['at'] + shots[-1]['moment']['duration']
     settings = directed['plan']['settings']
+    audio_policy = AudioPolicy.from_settings(settings)
     if settings.get('stabilize') or settings.get('masterAudioClipID'):
         raise TestError('This test does not implement stabilization or a continuous replacement audio bed.')
     for i, shot in enumerate(shots):
@@ -223,13 +226,13 @@ def _render(root, clips, directed, cancel, progress):
         if not audible: args += ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']
         vf = f'trim=duration={source_length},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=0.067,'+color_filter(video)+f'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(iw-ow)*{moment["focusX"]}:(ih-oh)*{moment["focusY"]},setsar=1,fps=30,format=yuv420p'
         af = f'atrim=duration={source_length},asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0,apad,atrim=duration={length}'
-        if settings['gentleCleanup']: af += ',highpass=f=70:mix=0.45'
+        af += audio_policy.segment_suffix()
         args += ['-map','0:v:0','-map','0:a:0' if audible else '1:a:0', '-t',str(length), '-vf',vf, '-af',af,
                  '-c:v','libx264','-preset','veryfast','-crf','20','-threads','2','-x264-params','colorprim=bt709:transfer=bt709:colormatrix=bt709',
                  '-c:a','pcm_s16le','-ar','48000','-ac','2','-map_metadata','-1',
                  '-color_primaries','bt709','-color_trc','bt709','-colorspace','bt709',str(target)]
         ff(args,cancel); segments.append(target); progress((i+1)/len(shots)*.65, 'Rendering selected moments')
-    pending = assemble_bounded(root, segments, shots, duration, cancel, progress)
+    pending = assemble_bounded(root, segments, shots, duration, cancel, progress, audio_policy)
     progress(.94, 'Decoding the complete output and checking sound timing')
     verify(pending,duration,cancel)
     if cancel.is_set():
@@ -242,7 +245,7 @@ def _render(root, clips, directed, cancel, progress):
     return final
 
 
-def assemble_bounded(root, segments, shots, duration, cancel, progress):
+def assemble_bounded(root, segments, shots, duration, cancel, progress, audio_policy=None):
     """Render nonoverlapping bodies and transition windows, then stream-concat.
 
     At most TWO decoded videos are live at once. The prior all-input graph
@@ -250,6 +253,10 @@ def assemble_bounded(root, segments, shots, duration, cancel, progress):
     Only generated relative filenames enter the concat manifest.
     """
     pieces = []
+    # Keep raw source audio as the default.  The policy can only refine an
+    # overlap already selected by the approved visual timeline; it must never
+    # manufacture an audio overlap at a hard cut.
+    audio_policy = audio_policy or AudioPolicy()
     encoder = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-threads', '2',
                '-x264-params', 'colorprim=bt709:transfer=bt709:colormatrix=bt709',
                '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2', '-map_metadata', '-1',
@@ -280,7 +287,7 @@ def assemble_bounded(root, segments, shots, duration, cancel, progress):
                      f'[va][vb]xfade=transition=fade:duration={incoming/30}:offset=0,fps=30,format=yuv420p[v]',
                      audio_trim(0, previous_length-incoming, previous_length, 'aa'),
                      audio_trim(1, 0, incoming, 'ab'),
-                     f'[aa][ab]acrossfade=d={incoming/30}:c1=tri:c2=tri[a]']
+                     f'[aa][ab]{audio_policy.seam_filter(incoming/30) or f"acrossfade=d={incoming/30}:c1=tri:c2=tri"}[a]']
             piece(inp(segments[i-1])+inp(segments[i]), graph, incoming)
         graph = [video_trim(0, incoming, length-outgoing, 'v'),
                  audio_trim(0, incoming, length-outgoing, 'a')]

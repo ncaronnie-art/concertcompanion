@@ -9,6 +9,32 @@ function clearError(){$('error').textContent='';$('error').hidden=true;}
 function text(tag,value,className){const el=document.createElement(tag);el.textContent=value;if(className)el.className=className;return el;}
 function button(label,fn,className=''){const b=text('button',label,className);b.type='button';b.onclick=fn;return b;}
 function timecode(value){return `${Math.floor(value/60)}:${(value%60).toFixed(1).padStart(4,'0')}`;}
+function savedSettingsLabel(settings){
+ const mode=settings.mode==='trailer'?'Trailer':'Highlights';
+ const style={cinematic:'Cinematic',hype:'Hype',memory:'Memory',musicVideo:'Music video',surprise:'Surprise me'}[settings.style]||settings.style;
+ const transitions={automatic:'Automatic transitions',cuts:'Cuts only',dissolves:'Dissolves'}[settings.transitions]||settings.transitions;
+ return `${mode} · ${style} · ${settings.targetSeconds} sec · ${transitions}${settings.gentleCleanup?' · gentle cleanup':''}`;
+}
+function restoreSavedSettings(settings){
+ if(!settings)return;
+ const values={mode:settings.mode,style:settings.style,length:String(settings.targetSeconds),transitions:settings.transitions,prompt:settings.prompt||''};
+ for(const [id,value] of Object.entries(values)){
+  const control=$(id);
+  if(control&&(id==='prompt'||[...control.options].some(option=>option.value===value)))control.value=value;
+ }
+ $('cleanup').checked=settings.gentleCleanup===true;
+ $('savedSettings').textContent=`Saved edit settings restored: ${savedSettingsLabel(settings)}.`;
+}
+function renderEditorialProposal(proposal){
+ const panel=$('editorialProposal'), summary=$('editorialProposalSummary'), detail=$('editorialProposalDetail');
+ if(!proposal){panel.hidden=true;summary.textContent='';detail.textContent='';return;}
+ const metrics=proposal.metrics||{}, before=metrics.before||{}, after=metrics.after||{};
+ const transitions=(proposal.transitions||[]).map(item=>item.kind==='dissolve'?'short dissolve':'clean cut');
+ const transitionSummary=transitions.length?[...new Set(transitions)].join(', '):'no boundary changes';
+ summary.textContent=`Review-only suggestion: ${after.adjacentSourceRepeats??0} adjacent repeat${after.adjacentSourceRepeats===1?'':'s'} after ordering (${before.adjacentSourceRepeats??0} before); ${transitionSummary}.`;
+ detail.textContent=[...(proposal.notes||[]),...(proposal.conflicts||[])].join('\n\n');
+ panel.hidden=false;
+}
 async function decode(response){
  if(!response.headers.get('content-type')?.includes('application/json'))throw Error('GitHub login expired. Reopen the private forwarded link. Never make the port public.');
  const data=await response.json();if(!response.ok)throw Error(data.error||'The request did not complete.');return data;
@@ -22,9 +48,9 @@ async function refresh(){
  state=next;expiryAt=Date.now()+next.expiresIn*1000;
  if(next.directed&&next.revision!==draftRevision){
   if(dirty&&!running)throw Error('A newer edit was saved in another tab. Reload this page before making changes.');
-  draft=structuredClone(next.directed.plan.moments);draftRevision=next.revision;dirty=false;renderMoments();
+  draft=structuredClone(next.directed.plan.moments);draftRevision=next.revision;dirty=false;restoreSavedSettings(next.directed.plan.settings);renderMoments();
  }
- if(!next.directed){draft=[];draftRevision=-1;$('moments').replaceChildren();}
+ if(!next.directed){draft=[];draftRevision=-1;$('moments').replaceChildren();$('savedSettings').textContent='Your saved edit settings will appear here after you make a first cut.';}
  show();return next;
 }
 function show(){
@@ -48,10 +74,13 @@ function show(){
  }));
  if(state.directed&&!state.ready){
   const d=state.directed;$('summary').textContent=`${draft.filter(m=>m.approved).length} moments / ${d.seconds.toFixed(1)} seconds saved`;
+  if(!$('savedSettings').textContent.startsWith('Saved edit settings restored:'))restoreSavedSettings(d.plan.settings);
+  renderEditorialProposal(d.editorialProposal);
   const omitted=d.coverage?.omitted||[];$('coverage').textContent=omitted.length?`Not in the saved edit: ${omitted.join(', ')}. Replace a moment to include that source.`:`All ${state.clips.length} source clips are represented in the saved edit.`;
   $('coverage').classList.toggle('warning',!!omitted.length);
   $('explanation').textContent=[d.plan.director,...d.plan.warnings].join('\n\n');
  }
+ else renderEditorialProposal(null);
  if(state.ready){
   if(!$('reel').getAttribute('src'))$('reel').src='/api/reel';
   $('reelTime').textContent=`${state.receipt.seconds.toFixed(1)}s`;

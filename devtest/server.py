@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 import engine
+from editorial.refine import propose_editorial_refinement
 
 PORT = 8765
 VERSION = '0.2.0'
@@ -203,6 +204,11 @@ def annotate(directed, clips):
     directed['coverage'] = dict(used=len(used), total=len(clips),
                                omitted=[c['name'] for c in clips if c['id'] not in used])
     directed['seconds'] = directed['timeline'][-1]['at'] + directed['timeline'][-1]['moment']['duration']
+    # This is intentionally a review-only recommendation.  It gives the
+    # client a measurable alternate story order without silently moving a
+    # reviewed trim, rejection, lock, mute choice, or manual framing.
+    directed['editorialProposal'] = propose_editorial_refinement(
+        directed['plan'], clips).as_dict()
     return directed
 
 

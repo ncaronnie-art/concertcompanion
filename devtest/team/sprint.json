@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "repository": "ncaronnie-art/concertcompanion",
+  "branch": "native/codespaces-quality-test",
+  "baseline_commit": "da21e5dd98482daf27075195b2fb5f50477f1f1d",
+  "status": "prepared_not_started",
+  "active_agent_ids": [],
+  "max_parallel_workers": 3,
+  "new_spending_authorized_usd": 0,
+  "lead_owns": [
+    "devtest/engine.py",
+    "devtest/server.py",
+    "devtest/Sources/QualityCLI/main.swift",
+    "devtest/PROJECT_CONTROL.md",
+    "devtest/QA_REPORT.md",
+    "devtest/team/**"
+  ],
+  "roles": [
+    {
+      "name": "cc_editor",
+      "title": "Concert editor and pacing engineer",
+      "config": ".codex/agents/cc_editor.toml",
+      "owned_paths": [
+        "devtest/editorial/**",
+        "devtest/tests/test_editorial_*.py"
+      ],
+      "status": "not_started"
+    },
+    {
+      "name": "cc_audio",
+      "title": "Concert audio engineer",
+      "config": ".codex/agents/cc_audio.toml",
+      "owned_paths": [
+        "devtest/audio/**",
+        "devtest/tests/test_audio_*.py"
+      ],
+      "status": "not_started"
+    },
+    {
+      "name": "cc_picture",
+      "title": "Framing and camera-motion engineer",
+      "config": ".codex/agents/cc_picture.toml",
+      "owned_paths": [
+        "devtest/picture/**",
+        "devtest/tests/test_picture_*.py"
+      ],
+      "status": "not_started"
+    },
+    {
+      "name": "cc_mobile",
+      "title": "Mobile editor and reliability engineer",
+      "config": ".codex/agents/cc_mobile.toml",
+      "owned_paths": [
+        "devtest/static/**",
+        "devtest/tests/test_mobile_*.py"
+      ],
+      "status": "not_started"
+    },
+    {
+      "name": "cc_qa",
+      "title": "Independent quality and investment reviewer",
+      "config": ".codex/agents/cc_qa.toml",
+      "owned_paths": [
+        "devtest/tests/test_acceptance_*.py",
+        "devtest/team/review-notes.md"
+      ],
+      "status": "not_started"
+    }
+  ]
+}

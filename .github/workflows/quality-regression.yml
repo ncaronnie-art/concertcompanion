@@ -31,10 +31,18 @@ jobs:
       - name: Check preinstalled toolchain
         run: |
           set -euo pipefail
+          for tool in swift ffmpeg ffprobe python3 node; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error title=Missing toolchain component::$tool is unavailable on this runner"
+              exit 1
+            fi
+            echo "Found $tool at $(command -v "$tool")"
+          done
           swift --version
-          ffmpeg -version | head -n 1
-          ffprobe -version | head -n 1
+          ffmpeg -version
+          ffprobe -version
           python3 --version
+          node --version
       - name: Portable Swift planner tests
         run: swift test --package-path native/ConcertCompass -c release -j 2
       - name: Build quality-test CLI

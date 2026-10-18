@@ -1,0 +1,56 @@
+name: Concert Compass full regression
+
+on:
+  push:
+    branches:
+      - native/codespaces-quality-test
+    paths:
+      - 'devtest/**'
+      - 'native/ConcertCompass/Sources/CompassCore/**'
+      - '.github/workflows/quality-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compass-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generated-media-regression:
+    # Standard Linux runner in a public repository only. Never bill private runners.
+    if: github.event.repository.private == false && github.ref == 'refs/heads/native/codespaces-quality-test'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out source without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check preinstalled toolchain
+        run: |
+          set -euo pipefail
+          swift --version
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
+          python3 --version
+      - name: Portable Swift planner tests
+        run: swift test --package-path native/ConcertCompass -c release -j 2
+      - name: Build quality-test CLI
+        run: swift build --package-path devtest -c release -j 2
+      - name: Check JavaScript syntax
+        run: node --check devtest/static/app.js
+      - name: Full generated-media and guardrail suite
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s devtest/tests -v
+      - name: Evidence summary
+        if: always()
+        run: |
+          {
+            echo '### Concert Compass regression'
+            echo 'Scope: portable Swift planner and Linux FFmpeg synthetic-media tests only.'
+            echo 'No Codespace, real footage, public deployment, signing, billing or physical iPhone testing.'
+            echo 'Use the step conclusions above for pass/fail. A green result is not approval to host or pay.'
+          } >> "$GITHUB_STEP_SUMMARY"

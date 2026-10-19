@@ -143,6 +143,20 @@ class GuardrailTests(unittest.TestCase):
         self.assertEqual(self.call('POST','/api/cancel','{}',{**self.h,'Sec-Fetch-Site':'cross-site'})[0],403)
         self.assertEqual(self.call('POST','/api/cancel','{}',{**headers,'X-Compass-CSRF':'invalid'})[0],403)
 
+    def test_15c_private_proxy_accepts_its_actual_same_origin_host(self):
+        # Some Codespaces proxy routes use a browser host that does not match
+        # CODESPACE_NAME. Same-origin requests for the private forwarded port
+        # must work, while a different Origin remains blocked.
+        host = 'actual-private-test-8765.app.github.dev'
+        headers = {**self.h, 'Host': host, 'Origin': f'https://{host}',
+                   'Sec-Fetch-Site': 'cross-site'}
+        with patch.dict(server.os.environ, {
+                'CODESPACE_NAME': 'different-codespace',
+                'GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN': 'app.github.dev'}):
+            self.assertEqual(self.call('POST','/api/cancel','{}',headers)[0],200)
+            self.assertEqual(self.call('POST','/api/cancel','{}',
+                             {**headers, 'Origin': 'https://evil.invalid'})[0],403)
+
     def test_16_untrusted_playlist_is_rejected_before_media_processing(self):
         with tempfile.TemporaryDirectory() as td:
             p=Path(td)/(str(uuid.uuid4())+'.mov');p.write_text('#EXTM3U\n#EXTINF:3,\nfile:///etc/passwd\n')

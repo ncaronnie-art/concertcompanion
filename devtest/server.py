@@ -250,21 +250,27 @@ class Handler(BaseHTTPRequestHandler):
     def guard(self, write=False):
         origin = self.headers.get('Origin')
         name = os.environ.get('CODESPACE_NAME')
-        domain = os.environ.get('GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN', 'app.github.dev')
+        domain = os.environ.get('GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN', 'app.github.dev').lower()
+        host = self.headers.get('Host', '').lower()
         allowed = {f'http://127.0.0.1:{self.server.server_port}', f'http://localhost:{self.server.server_port}'}
         if name:
             allowed.add(f'https://{name}-{PORT}.{domain}')
+        # A Codespaces port URL is normally derived from CODESPACE_NAME. In
+        # some private-proxy routes that environment value is not the public
+        # host used by the browser. Accept only an exact same-origin request
+        # for this port on the configured Codespaces forwarding domain.
+        proxy_pattern = rf'[a-z0-9][a-z0-9-]*-{PORT}\.{re.escape(domain)}'
+        if re.fullmatch(proxy_pattern, host):
+            allowed.add(f'https://{host}')
+        trusted_hosts = {urlsplit(x).netloc for x in allowed}
         landing = self.command in ('GET', 'HEAD') and urlsplit(self.path).path == '/' and self.headers.get('Sec-Fetch-Mode') == 'navigate'
-        # Codespaces' authenticated port proxy can label a browser request
-        # cross-site even when its explicit Origin is our exact private host.
-        # Trust only an exact allowed Origin, never Sec-Fetch-Site alone.
-        # Requests without Origin still reject cross-site fetch metadata.
         if ((origin is not None and origin not in allowed)
                 or (origin is None and self.headers.get('Sec-Fetch-Site') == 'cross-site' and not landing)):
             self.send_json({'error': 'Cross-site requests are blocked.'}, 403)
             return False
-        if self.headers.get('Host', '') not in {urlsplit(x).netloc for x in allowed}:
+        if host not in trusted_hosts:
             self.send_json({'error': 'Unrecognized test host.'}, 403)
+            return False
             return False
         if write:
             s = self.session()

@@ -37,15 +37,23 @@ final class CompassCoreTests: XCTestCase {
     func testDuplicateSourceIDsRejected() { let c = source(); XCTAssertThrowsError(try Planner.propose(clips: [c, c], settings: makeSettings())) }
     func testTooManySourcesRejected() { XCTAssertThrowsError(try Planner.propose(clips: (0..<13).map { _ in source(1) }, settings: makeSettings())) }
     func testTargetsWhenEnoughFootage() throws {
-        for target in [15.0, 30, 45, 60] {
+        for target in Timeline.supportedTargetSeconds {
             for transition in TransitionPreference.allCases {
-                let clips = [source(45), source(40), source(55)]
+                let clips = [source(105), source(105), source(105)]
                 let plan = try Planner.propose(clips: clips, settings: makeSettings(target, transition: transition))
                 XCTAssertEqual(Timeline.duration(plan), target, accuracy: 0.08, "target \(target), \(transition)")
                 try Timeline.validate(plan, clips: clips)
                 assertNoRepeatedSourceRanges(plan)
             }
         }
+    }
+    func testFiveMinuteCompilationCanUseMoreThanSixtyNaturalMoments() throws {
+        let clips = [source(105), source(105), source(105)]
+        let plan = try Planner.propose(clips: clips, settings: makeSettings(300, style: .hype, transition: .dissolves))
+        XCTAssertGreaterThan(plan.moments.filter(\.approved).count, 60)
+        XCTAssertLessThanOrEqual(plan.moments.filter(\.approved).count, Timeline.maximumMoments)
+        XCTAssertEqual(Timeline.duration(plan), 300, accuracy: 0.08)
+        try Timeline.validate(plan, clips: clips)
     }
     func testDefaultPlanUsesSeveralSources() throws {
         let clips = [source(20), source(20), source(20)]
@@ -166,6 +174,11 @@ final class CompassCoreTests: XCTestCase {
         let r = PromptDirector.interpret("45 seconds, cinematic with soft transitions; reduce crowd and stabilize", base: makeSettings())
         XCTAssertEqual(r.settings.targetSeconds, 45); XCTAssertEqual(r.settings.style, .cinematic)
         XCTAssertEqual(r.settings.transitions, .dissolves); XCTAssertTrue(r.settings.gentleCleanup); XCTAssertTrue(r.settings.stabilize)
+    }
+    func testPromptRecognizesFiveMinuteCompilation() {
+        let r = PromptDirector.interpret("5 minutes, cinematic with soft transitions", base: makeSettings())
+        XCTAssertEqual(r.settings.targetSeconds, 300)
+        XCTAssertTrue(r.understood.contains("5-minute compilation"))
     }
     func testPromptNegationWinsForCutsAndCleanup() {
         let r = PromptDirector.interpret("cinematic, crossfade, but cuts only. Clean the audio? No cleanup. Don't stabilize.", base: makeSettings())

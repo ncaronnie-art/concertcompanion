@@ -139,7 +139,7 @@ class QualityTests(unittest.TestCase):
     def test_m_cleanup_expired_session(self):
         with server.SESSIONS_LOCK:
             sessions=list(server.SESSIONS.values())
-            for s in sessions:s.created-=server.TTL+1
+            for s in sessions:s.last_active-=server.TTL+1
         server.reap();self.assertTrue(all(not s.root.exists() for s in sessions));self.assertFalse(server.SESSIONS)
 
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -23,6 +23,41 @@ class GuardrailTests(unittest.TestCase):
     def setUp(self):
         code,meta,data=self.call('GET','/api/state');self.assertEqual(code,200)
         d=json.loads(data);self.h={'Cookie':meta['Set-Cookie'].split(';')[0], 'X-Compass-CSRF':d['csrf'],'Content-Type':'application/json'}
+
+    def test_00_desktop_compilation_limits_preserve_full_song_sections(self):
+        self.assertEqual(engine.MAX_CLIP_SECONDS, 300.0)
+        self.assertEqual(server.MAX_UPLOAD, 750 * 1024**2)
+        self.assertEqual(server.MAX_PROJECT, 2 * 1024**3)
+        limits=self.state()['limits']
+        self.assertEqual(limits['secondsPerClip'], 300.0)
+        self.assertEqual(limits['bytesPerClip'], 750 * 1024**2)
+        self.assertEqual(limits['outputBytes'], 350 * 1024**2)
+        self.assertIn("version=0.3.0", (Path(engine.HERE) / 'start.sh').read_text())
+        self.assertIn("printf '0.3.0\\n'", (Path(engine.HERE) / 'prepare.sh').read_text())
+
+    def test_00b_compilation_targets_and_profiles_require_intent(self):
+        for seconds in (15, 30, 45, 60, 90, 120, 180, 300):
+            settings=engine.settings_from({'targetSeconds':seconds})
+            if seconds > 60:
+                self.assertEqual(engine.output_profile(seconds)['width'],720)
+                with self.assertRaises(engine.TestError):server.require_compilation_approval(settings,False)
+                server.require_compilation_approval(settings,True)
+            else:
+                self.assertEqual(engine.output_profile(seconds)['width'],1080)
+                server.require_compilation_approval(settings,None)
+        with self.assertRaises(engine.TestError):engine.settings_from({'targetSeconds':301})
+        prompted=dict(plan=dict(settings=dict(targetSeconds=300)))
+        with self.assertRaises(engine.TestError):server.require_directed_compilation_approval(prompted,None)
+        server.require_directed_compilation_approval(prompted,True)
+
+    def test_00c_five_minute_timeline_keeps_all_one_hundred_twenty_boundaries(self):
+        timeline=[]
+        for index in range(120):
+            timeline.append(dict(at=index*2.5, incoming='cut', overlap=0,
+                                 moment=dict(duration=2.5)))
+        shots=engine.frame_timeline(timeline)
+        self.assertEqual(len(shots),engine.MAX_RENDER_MOMENTS)
+        self.assertAlmostEqual(shots[-1]['at']+shots[-1]['moment']['duration'],300)
     def tearDown(self):
         self.call('POST','/api/cancel','{}',self.h)
         for _ in range(150):

@@ -12,14 +12,18 @@ import engine
 from editorial.refine import propose_editorial_refinement
 
 PORT = 8765
-VERSION = '0.2.1'
+VERSION = '0.3.0'
 BASE = Path('/tmp') / ('concert-compass-quality-' + str(os.getuid()))
 SESSIONS = {}
 SESSIONS_LOCK = threading.Lock()
-MAX_UPLOAD = 160 * 1024**2
-MAX_PROJECT = 400 * 1024**2
+MAX_CLIPS = 3
+MAX_UPLOAD = 750 * 1024**2
+MAX_PROJECT = 2 * 1024**3
+LONG_RENDER_RESERVE = 2 * 1024**3
 CHUNK_BYTES = 2 * 1024**2
 TTL = 3600
+MAX_SESSION_AGE = 3 * TTL
+RENDER_GATE = threading.BoundedSemaphore(value=1)
 
 
 class Session:
@@ -28,11 +32,12 @@ class Session:
         self.root = BASE / uuid.uuid4().hex
         self.root.mkdir(mode=0o700, parents=True)
         self.created = time.monotonic()
+        self.last_active = self.created
         self.lock = threading.RLock()
         self.cancel = threading.Event()
         self.busy = False
         self.progress = 0
-        self.status = 'Choose two or three short clips.'
+        self.status = 'Choose up to three concert clips, up to five minutes each.'
         self.phase = 'choose'
         self.error = ''
         self.clips = []
@@ -45,8 +50,14 @@ class Session:
         self.receipt = None
         self.started = None
 
+    def touch(self):
+        self.last_active = time.monotonic()
+
     def state(self):
         with self.lock:
+            self.touch()
+            remaining = min(MAX_SESSION_AGE - (time.monotonic() - self.created),
+                            TTL - (time.monotonic() - self.last_active))
             return copy.deepcopy(dict(
                 version=VERSION, csrf=self.csrf, busy=self.busy,
                 progress=self.progress, status=self.status, phase=self.phase,
@@ -54,8 +65,10 @@ class Session:
                 clips=[{k: c[k] for k in ('id', 'name', 'duration', 'hasAudio', 'width', 'height')} for c in self.clips],
                 directed=self.directed, upload=self.upload_state(),
                 feedback=self.feedback, receipt=self.receipt,
-                expiresIn=max(0, int(TTL - (time.monotonic() - self.created))),
-                limits=dict(clips=3, bytesPerClip=MAX_UPLOAD, secondsPerClip=30, chunkBytes=CHUNK_BYTES)))
+                expiresIn=max(0, int(remaining)),
+                limits=dict(clips=MAX_CLIPS, bytesPerClip=MAX_UPLOAD, projectBytes=MAX_PROJECT,
+                            secondsPerClip=engine.MAX_CLIP_SECONDS, outputBytes=engine.MAX_OUTPUT_BYTES,
+                            chunkBytes=CHUNK_BYTES)))
 
     def upload_state(self):
         if not self.upload:
@@ -71,6 +84,7 @@ class Session:
             self.busy, self.error, self.progress = True, '', 0
             if not reserved:
                 self.cancel.clear()
+            self.touch()
         def task():
             try:
                 fn()
@@ -85,26 +99,29 @@ class Session:
                 with self.lock:
                     self.busy = False
                     self.phase = 'ready' if self.ready else 'review' if self.directed else 'choose'
+                    self.touch()
         threading.Thread(target=task, daemon=True).start()
 
     def update(self, amount, message):
         with self.lock:
             self.progress, self.status = amount, message
+            self.touch()
 
     def reserve_upload(self, size):
         with self.lock:
             if type(size) is not int or not 0 < size <= MAX_UPLOAD:
-                raise engine.TestError('Choose a video smaller than 160 MB.')
-            if self.busy or self.ready or self.upload or len(self.clips) >= 3:
+                raise engine.TestError('Choose a video smaller than 750 MB.')
+            if self.busy or self.ready or self.upload or len(self.clips) >= MAX_CLIPS:
                 raise engine.TestError('Use up to three clips. Wait for analysis or clear a finished test.')
-            if self.bytes + size > MAX_PROJECT or shutil.disk_usage(BASE).free < size + 1024**3:
-                raise engine.TestError('Not enough test storage. Clear this test and use smaller clips.')
+            if self.bytes + size > MAX_PROJECT or shutil.disk_usage(BASE).free < size + LONG_RENDER_RESERVE:
+                raise engine.TestError('Not enough private workspace for the source and a safe compilation render. Clear this test and use smaller clips.')
             self.busy = True
             self.cancel.clear()
             self.error = ''
             self.phase = 'upload'
             self.progress = 0
             self.status = 'Receiving your clip in small, retryable pieces'
+            self.touch()
             identifier = str(uuid.uuid4()).upper()
             self.upload = dict(id=identifier, size=size, received=0, receiving=False)
             (self.root / (identifier + '.mov')).touch(mode=0o600)
@@ -152,8 +169,11 @@ class Session:
 def reap():
     with SESSIONS_LOCK:
         for token, s in list(SESSIONS.items()):
-            if time.monotonic() - s.created > TTL:
-                with s.lock:
+            with s.lock:
+                now = time.monotonic()
+                expired = (now - s.created > MAX_SESSION_AGE
+                           or (not s.busy and now - s.last_active > TTL))
+                if expired:
                     s.cancel.set()
                     s.discard_upload()
                     if not s.busy:
@@ -212,6 +232,24 @@ def annotate(directed, clips):
     return directed
 
 
+def require_render_workspace(session, settings):
+    """Reserve room for bounded segment/piece files before a heavy render."""
+    profile = engine.output_profile(settings['targetSeconds'])
+    reserve = LONG_RENDER_RESERVE if profile['width'] == 720 else 1024**3
+    if shutil.disk_usage(session.root).free < reserve:
+        raise engine.TestError('Not enough free private workspace for this render. Clear another test or choose a shorter compilation.')
+    return profile
+
+
+def require_compilation_approval(settings, approved):
+    if settings['targetSeconds'] > 60 and approved is not True:
+        raise engine.TestError('Confirm the longer 720p compilation before planning it.')
+
+
+def require_directed_compilation_approval(directed, approved):
+    require_compilation_approval(directed['plan']['settings'], approved)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = 'CompassQualityTest'
     def log_message(self, *args):
@@ -245,7 +283,14 @@ class Handler(BaseHTTPRequestHandler):
         token = cookie['compass'].value if 'compass' in cookie else ''
         with SESSIONS_LOCK:
             s = SESSIONS.get(token)
-        return s if s and time.monotonic() - s.created < TTL else None
+        now = time.monotonic()
+        if not s or now - s.created >= MAX_SESSION_AGE:
+            return None
+        with s.lock:
+            if not s.busy and now - s.last_active >= TTL:
+                return None
+            s.touch()
+        return s
 
     def guard(self, write=False):
         origin = self.headers.get('Origin')
@@ -316,7 +361,7 @@ class Handler(BaseHTTPRequestHandler):
                         s = Session()
                         SESSIONS[s.token] = s
                     secure = '; Secure' if os.environ.get('CODESPACE_NAME') else ''
-                    extra = {'Set-Cookie': f'compass={s.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={TTL}{secure}'}
+                    extra = {'Set-Cookie': f'compass={s.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={MAX_SESSION_AGE}{secure}'}
                 self.send_json(s.state(), extra=extra)
                 return
             s = self.session()
@@ -448,11 +493,16 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     if path == '/api/plan':
                         settings = engine.settings_from(body)
+                        require_compilation_approval(settings, body.get('compilationApproved'))
                         previous = patch_plan(s, body['previousMoments']) if s.directed and body.get('previousMoments') is not None else (s.directed['plan'] if s.directed else None)
                         def operation():
                             if previous and any(m['approved'] for m in previous['moments']):
                                 engine.direct(s.root, s.clips, previous['settings'], s.cancel, plan=previous)
                             result = engine.direct(s.root, s.clips, settings, s.cancel, previous=previous, seed=s.revision)
+                            # The bounded prompt interpreter can request a longer target.
+                            # Recheck its visible result so wording cannot bypass the UI's
+                            # explicit long-compilation confirmation.
+                            require_directed_compilation_approval(result, body.get('compilationApproved'))
                             with s.lock:
                                 s.directed = annotate(result, s.clips)
                                 s.revision += 1
@@ -471,16 +521,22 @@ class Handler(BaseHTTPRequestHandler):
                             if not rendering:
                                 s.update(1, 'Edits saved in this session. Refreshing the page keeps them.')
                                 return
-                            before = time.monotonic()
-                            result = engine.render(s.root, s.clips, checked, s.cancel, s.update)
-                            with s.lock:
-                                s.ready, s.bytes = True, 0
-                                s.receipt = dict(codec='H.264 / AAC', width=1080, height=1920,
-                                    seconds=round(checked['seconds'], 3), bytes=result.stat().st_size,
-                                    moments=len(checked['timeline']), coverage=checked['coverage'],
-                                    renderSeconds=round(time.monotonic()-before, 2),
-                                    completeDecode=True, sourceCopiesDeleted=True,
-                                    nativeTest=False, physicalPhoneTest='unverified')
+                            if not RENDER_GATE.acquire(blocking=False):
+                                raise engine.TestError('Another private compilation is rendering. Wait for it to finish, then render this reviewed edit again.')
+                            try:
+                                profile = require_render_workspace(s, checked['plan']['settings'])
+                                before = time.monotonic()
+                                result = engine.render(s.root, s.clips, checked, s.cancel, s.update)
+                                with s.lock:
+                                    s.ready, s.bytes = True, 0
+                                    s.receipt = dict(codec='H.264 / AAC', width=profile['width'], height=profile['height'],
+                                        profile=profile['name'], seconds=round(checked['seconds'], 3), bytes=result.stat().st_size,
+                                        moments=len(checked['timeline']), coverage=checked['coverage'],
+                                        renderSeconds=round(time.monotonic()-before, 2),
+                                        completeDecode=True, sourceCopiesDeleted=True,
+                                        nativeTest=False, physicalPhoneTest='unverified')
+                            finally:
+                                RENDER_GATE.release()
                         s.phase = 'render' if rendering else 'review'
                     s.work(operation)
                 self.send_json({'ok': True}, 202)
@@ -516,7 +572,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise engine.TestError('Session expired.')
             n = int(self.headers.get('Content-Length', '0'))
             if self.headers.get('Transfer-Encoding') or not 0 < n <= MAX_UPLOAD:
-                raise engine.TestError('Choose a video smaller than 160 MB.')
+                raise engine.TestError('Choose a video smaller than 750 MB.')
             legacy = path == '/api/upload'
             if not legacy and not path.startswith('/api/upload-chunk/'):
                 self.send_json({'error': 'Not found.'}, 404)

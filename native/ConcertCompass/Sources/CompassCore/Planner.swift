@@ -30,7 +30,7 @@ public enum Planner {
         let available = free.values.flatMap { $0 }.reduce(0) { $0 + $1.duration } + locks.values.reduce(0) { $0 + $1.duration }
         guard available >= 0.1 else { throw CompassError.invalid("All footage is rejected. Restore a moment or add another clip.") }
         let desiredCount = Int((min(settings.targetSeconds, available) / settings.style.averageShot).rounded())
-        let count = min(60, max(1, max(desiredCount, (locks.keys.max() ?? -1) + 1)))
+        let count = min(Timeline.maximumMoments, max(1, max(desiredCount, (locks.keys.max() ?? -1) + 1)))
         let roles = Timeline.roles(count: count, mode: settings.mode)
         let lockedDuration = locks.values.reduce(0) { $0 + $1.duration }
         let estimatedOverlap = settings.transitions == .dissolves ? 0.32 : settings.transitions == .automatic && (settings.style == .cinematic || settings.style == .memory) ? 0.07 : 0

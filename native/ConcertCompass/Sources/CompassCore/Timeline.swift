@@ -1,11 +1,15 @@
 import Foundation
 
 public enum Timeline {
+    public static let supportedTargetSeconds: [Double] = [15, 30, 45, 60, 90, 120, 180, 300]
+    public static let maximumReelSeconds = 300.0
+    public static let maximumMoments = 120
+
     public static func build(_ plan: EditPlan) throws -> [TimelineShot] {
         try validateSettings(plan.settings)
         let moments = plan.moments.filter(\.approved)
         guard !moments.isEmpty else { throw CompassError.invalid("Approve at least one moment before rendering.") }
-        guard moments.count <= 60 else { throw CompassError.invalid("This alpha supports up to 60 moments per reel.") }
+        guard moments.count <= maximumMoments else { throw CompassError.invalid("This desktop compilation supports up to \(maximumMoments) moments per reel.") }
         var output: [TimelineShot] = []
         var cursor = 0.0
         for (index, moment) in moments.enumerated() {
@@ -33,7 +37,7 @@ public enum Timeline {
             output.append(TimelineShot(moment: moment, at: at, incoming: kind, overlap: overlap))
             cursor = frameRound(at + moment.duration)
         }
-        guard cursor <= 120.01 else { throw CompassError.invalid("This alpha limits one reel to two minutes. Shorten your edit.") }
+        guard cursor <= maximumReelSeconds + 0.01 else { throw CompassError.invalid("This desktop compilation limits one reel to five minutes. Shorten your edit.") }
         return output
     }
 
@@ -65,8 +69,8 @@ public enum Timeline {
         }
     }
     public static func validateSettings(_ settings: EditSettings) throws {
-        guard [15.0, 30.0, 45.0, 60.0].contains(settings.targetSeconds) else {
-            throw CompassError.invalid("Choose a 15-, 30-, 45-, or 60-second target.")
+        guard supportedTargetSeconds.contains(settings.targetSeconds) else {
+            throw CompassError.invalid("Choose a 15-, 30-, 45-, 60-, 90-, 120-, 180-, or 300-second target.")
         }
     }
 

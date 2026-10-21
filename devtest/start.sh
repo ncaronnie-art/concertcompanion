@@ -3,10 +3,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # No public hosting, billing changes, or background model services.
 # This runs only after the owner explicitly creates/starts the Codespace.
-test -f devtest/.build/quality-verified || { echo 'Setup tests have not passed; refusing to start.'; exit 1; }
+version=0.3.0
+marker=$(cat devtest/.build/quality-verified 2>/dev/null || true)
+test "$marker" = "$version" || { echo 'This private test needs its matching setup checks. Run: bash devtest/prepare.sh'; exit 1; }
 log=/tmp/compass-quality-start.log
 pidfile=/tmp/compass-quality-server.pid
-version=0.2.1
 
 healthy() {
   python3 - "$version" <<'PY'

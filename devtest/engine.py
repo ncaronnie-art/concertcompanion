@@ -7,7 +7,13 @@ from audio.policy import AudioPolicy
 
 HERE = Path(__file__).resolve().parent
 CLI = HERE / '.build/release/QualityCLI'
-MAX_CLIP_SECONDS = 30.0
+# Desktop-first intake: enough source duration to preserve a complete song
+# section without asking the owner to pre-trim on their phone. The desktop
+# shell can also make a deliberately selected five-minute compilation.
+MAX_CLIP_SECONDS = 300.0
+SUPPORTED_TARGET_SECONDS = (15, 30, 45, 60, 90, 120, 180, 300)
+MAX_RENDER_MOMENTS = 120
+MAX_OUTPUT_BYTES = 350 * 1024**2
 
 class TestError(Exception):
     pass
@@ -76,16 +82,17 @@ def analyze(path: Path, number: int, cancel: Event):
     duration = float(video.get('duration') or info['format'].get('duration', 0))
     width, height = int(video['width']), int(video['height'])
     if not math.isfinite(duration) or not 0.15 <= duration <= MAX_CLIP_SECONDS + 0.04:
-        raise TestError('For this first test, each clip must be between 0.15 and 30 seconds.')
-    if width <= 0 or height <= 0 or max(width, height) > 8192:
-        raise TestError('This test supports camera video up to 8K dimensions.')
+        raise TestError('Each source must be between 0.15 seconds and 5 minutes.')
+    if width <= 0 or height <= 0 or max(width, height) > 4096:
+        raise TestError('This desktop test supports camera video up to 4K dimensions.')
     rotation = next((float(s.get('rotation', 0)) for s in video.get('side_data_list', []) if 'rotation' in s), 0)
     if round(rotation) % 180 != 0:
         width, height = height, width
     has_audio = any(s['codec_type'] == 'audio' for s in info['streams'])
     audio = []
     if has_audio:
-        raw = ff(inp(path) + ['-t', str(duration), '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-f', 'f32le', 'pipe:1'], cancel)
+        analysis_timeout = max(180, min(720, math.ceil(duration * 4)))
+        raw = ff(inp(path) + ['-t', str(duration), '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-f', 'f32le', 'pipe:1'], cancel, analysis_timeout)
         samples = array.array('f'); samples.frombytes(raw)
         if sys.byteorder != 'little': samples.byteswap()
         bins = [samples[i:i + 1600] for i in range(0, len(samples), 1600)]
@@ -97,8 +104,9 @@ def analyze(path: Path, number: int, cancel: Event):
             audio.append(dict(time=i*.1, energy=energy, onset=0 if i == 0 else min(1, max(0, energy-last)*3),
                               clipping=sum(abs(x)>.985 for x in bins[i])/max(1, len(bins[i]))))
             last = energy
+    analysis_timeout = max(180, min(720, math.ceil(duration * 4)))
     raw = ff(inp(path) + ['-t', str(duration), '-vf', color_filter(video)+'fps=1,scale=64:64,format=gray',
-                         '-an', '-f', 'rawvideo', 'pipe:1'], cancel)
+                         '-an', '-f', 'rawvideo', 'pipe:1'], cancel, analysis_timeout)
     visual, previous = [], None
     for i in range(0, len(raw)-4095, 4096):
         pixels = raw[i:i+4096]
@@ -115,7 +123,7 @@ def analyze(path: Path, number: int, cancel: Event):
     ff(inp(path) + ['-t', str(duration), '-map', '0:v:0', '-map', '0:a:0?',
         '-vf', color_filter(video)+'scale=540:960:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,fps=30,format=yuv420p',
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24', '-threads', '2', '-c:a', 'aac', '-ar', '48000', '-ac', '2',
-        '-map_metadata', '-1', '-movflags', '+faststart', str(proxy)], cancel)
+        '-map_metadata', '-1', '-movflags', '+faststart', str(proxy)], cancel, analysis_timeout)
     # The proxy keeps its natural aspect ratio. CSS cover + object-position
     # therefore previews the same framing fractions as the final crop.
     ff(['-ss', str(min(duration / 2, 1))] + inp(proxy) + ['-frames:v', '1',
@@ -138,8 +146,8 @@ def settings_from(data):
     for key, values in allowed.items():
         if not isinstance(result[key], str) or result[key] not in values:
             raise TestError('Unsupported edit option: ' + key)
-    if type(result['targetSeconds']) not in (int, float) or result['targetSeconds'] not in (15, 30, 45, 60):
-        raise TestError('Choose a 15-, 30-, 45-, or 60-second target.')
+    if type(result['targetSeconds']) not in (int, float) or result['targetSeconds'] not in SUPPORTED_TARGET_SECONDS:
+        raise TestError('Choose a 15-, 30-, 45-, 60-, 90-, 120-, 180-, or 300-second target.')
     if not isinstance(result['prompt'], str) or len(result['prompt']) > 1500:
         raise TestError('Keep your direction under 1,500 characters.')
     if (type(result['gentleCleanup']) is not bool or type(result['seamSmoothing']) is not bool
@@ -148,12 +156,27 @@ def settings_from(data):
     return result
 
 
+def output_profile(target_seconds):
+    """Return the declared export profile for an allowed user selection.
+
+    Long form stays vertical and 30fps, but uses 720p so a private two-core
+    Codespace can finish a five-minute compilation without silently reducing
+    fidelity after the user has already reviewed the edit.
+    """
+    if target_seconds not in SUPPORTED_TARGET_SECONDS:
+        raise TestError('Choose a supported target before selecting an export profile.')
+    if target_seconds > 60:
+        return dict(name='720p compilation', width=720, height=1280, crf=22)
+    return dict(name='1080p highlight', width=1080, height=1920, crf=20)
+
+
 def direct(root, clips, settings, cancel, plan=None, previous=None, seed=0):
     request = dict(clips=clips, settings=settings, action='validate' if plan is not None else 'plan', plan=plan, previous=previous, seed=seed)
     source, target = root/'request.json', root/'response.json'
     source.write_text(json.dumps(request, allow_nan=False))
     try:
-        run([str(CLI), str(source), str(target)], cancel, 30)
+        planner_timeout = max(30, min(120, math.ceil(float(settings['targetSeconds']) / 2)))
+        run([str(CLI), str(source), str(target)], cancel, planner_timeout)
         return json.loads(target.read_text())
     finally:
         source.unlink(missing_ok=True); target.unlink(missing_ok=True)
@@ -204,17 +227,34 @@ def frame_timeline(timeline):
     return shots
 
 
+def render_deadline(duration):
+    # Bound total work while leaving enough time for the intentionally
+    # lower-resolution five-minute profile on two CPU cores.
+    return time.monotonic() + max(600, min(2700, math.ceil(duration * 8)))
+
+
+def remaining_render_time(deadline, floor=1):
+    remaining = math.ceil(deadline - time.monotonic())
+    if remaining < floor:
+        raise TestError('This render exceeded its safe time budget. Try a shorter compilation.')
+    return remaining
+
+
 def _render(root, clips, directed, cancel, progress):
     shots = frame_timeline(directed['timeline'])
-    if not shots or len(shots) > 40: raise TestError('This first test supports up to 40 moments.')
+    if not shots or len(shots) > MAX_RENDER_MOMENTS:
+        raise TestError(f'This desktop test supports up to {MAX_RENDER_MOMENTS} moments.')
     by_id = {c['id']: c for c in clips}
     segments = []
     duration = shots[-1]['at'] + shots[-1]['moment']['duration']
     settings = directed['plan']['settings']
+    profile = output_profile(settings['targetSeconds'])
+    deadline = render_deadline(duration)
     audio_policy = AudioPolicy.from_settings(settings)
     if settings.get('stabilize') or settings.get('masterAudioClipID'):
         raise TestError('This test does not implement stabilization or a continuous replacement audio bed.')
     for i, shot in enumerate(shots):
+        progress(i/len(shots)*.65, f'Rendering selected moments ({i+1} of {len(shots)})')
         moment = shot['moment']; clip = by_id[moment['clipID']]
         source = root / clip['fileName']
         length = moment['duration']
@@ -224,17 +264,18 @@ def _render(root, clips, directed, cancel, progress):
         args = ['-ss', str(moment['start'])] + inp(source)
         audible = clip['hasAudio'] and not moment['muted']
         if not audible: args += ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']
-        vf = f'trim=duration={source_length},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=0.067,'+color_filter(video)+f'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(iw-ow)*{moment["focusX"]}:(ih-oh)*{moment["focusY"]},setsar=1,fps=30,format=yuv420p'
+        vf = f'trim=duration={source_length},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=0.067,'+color_filter(video)+f'scale={profile["width"]}:{profile["height"]}:force_original_aspect_ratio=increase,crop={profile["width"]}:{profile["height"]}:(iw-ow)*{moment["focusX"]}:(ih-oh)*{moment["focusY"]},setsar=1,fps=30,format=yuv420p'
         af = f'atrim=duration={source_length},asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0,apad,atrim=duration={length}'
         af += audio_policy.segment_suffix()
         args += ['-map','0:v:0','-map','0:a:0' if audible else '1:a:0', '-t',str(length), '-vf',vf, '-af',af,
-                 '-c:v','libx264','-preset','veryfast','-crf','20','-threads','2','-x264-params','colorprim=bt709:transfer=bt709:colormatrix=bt709',
+                 '-c:v','libx264','-preset','veryfast','-crf',str(profile['crf']),'-threads','2','-x264-params','colorprim=bt709:transfer=bt709:colormatrix=bt709',
                  '-c:a','pcm_s16le','-ar','48000','-ac','2','-map_metadata','-1',
                  '-color_primaries','bt709','-color_trc','bt709','-colorspace','bt709',str(target)]
-        ff(args,cancel); segments.append(target); progress((i+1)/len(shots)*.65, 'Rendering selected moments')
-    pending = assemble_bounded(root, segments, shots, duration, cancel, progress, audio_policy)
+        segment_timeout = min(remaining_render_time(deadline), max(180, min(600, math.ceil(length * 30))))
+        ff(args,cancel,segment_timeout); segments.append(target); progress((i+1)/len(shots)*.65, 'Rendering selected moments')
+    pending = assemble_bounded(root, segments, shots, duration, cancel, progress, audio_policy, profile, deadline)
     progress(.94, 'Decoding the complete output and checking sound timing')
-    verify(pending,duration,cancel)
+    verify(pending,duration,cancel,profile,deadline)
     if cancel.is_set():
         raise TestError('Stopped safely. No partial reel is shareable.')
     final=root/'reel.mp4'; pending.replace(final)
@@ -245,7 +286,7 @@ def _render(root, clips, directed, cancel, progress):
     return final
 
 
-def assemble_bounded(root, segments, shots, duration, cancel, progress, audio_policy=None):
+def assemble_bounded(root, segments, shots, duration, cancel, progress, audio_policy=None, profile=None, deadline=None):
     """Render nonoverlapping bodies and transition windows, then stream-concat.
 
     At most TWO decoded videos are live at once. The prior all-input graph
@@ -257,7 +298,8 @@ def assemble_bounded(root, segments, shots, duration, cancel, progress, audio_po
     # overlap already selected by the approved visual timeline; it must never
     # manufacture an audio overlap at a hard cut.
     audio_policy = audio_policy or AudioPolicy()
-    encoder = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-threads', '2',
+    profile = profile or output_profile(15)
+    encoder = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(profile['crf']), '-threads', '2',
                '-x264-params', 'colorprim=bt709:transfer=bt709:colormatrix=bt709',
                '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2', '-map_metadata', '-1',
                '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709']
@@ -272,8 +314,11 @@ def assemble_bounded(root, segments, shots, duration, cancel, progress, audio_po
         if frames <= 0:
             return
         target = root / f'piece-{len(pieces):03d}.mkv'
+        timeout = max(180, min(600, math.ceil(frames / 30 * 30)))
+        if deadline is not None:
+            timeout = min(timeout, remaining_render_time(deadline))
         ff(args + ['-filter_complex', ';'.join(graph), '-map', '[v]', '-map', '[a]',
-                   '-t', str(frames/30)] + encoder + [str(target)], cancel, 180)
+                   '-t', str(frames/30)] + encoder + [str(target)], cancel, timeout)
         pieces.append((target, frames))
 
     for i, shot in enumerate(shots):
@@ -300,33 +345,41 @@ def assemble_bounded(root, segments, shots, duration, cancel, progress, audio_po
     manifest.write_text('ffconcat version 1.0\n' + ''.join(
         f"file '{path.name}'\nduration {frames/30:.12f}\n" for path,frames in pieces))
     pending = root / 'pending.mp4'
+    final_timeout = max(180, min(900, math.ceil(duration * 2)))
+    if deadline is not None:
+        final_timeout = min(final_timeout, remaining_render_time(deadline))
     ff(['-f', 'concat', '-safe', '1'] + inp(manifest) +
        ['-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy',
         '-af', f'aresample=48000:async=1:first_pts=0,apad,atrim=duration={duration}',
         '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
         '-t', str(duration), '-map_metadata', '-1', '-video_track_timescale', '90000',
-        '-movflags', '+faststart', str(pending)], cancel, 180)
+        '-movflags', '+faststart', str(pending)], cancel, final_timeout)
     return pending
 
 
-def verify(path, expected, cancel):
+def verify(path, expected, cancel, profile=None, deadline=None):
+    profile = profile or output_profile(15)
     info=probe(path,cancel)
     v=next((s for s in info['streams'] if s['codec_type']=='video'),{})
     a=next((s for s in info['streams'] if s['codec_type']=='audio'),{})
-    if (v.get('codec_name'),v.get('width'),v.get('height'),a.get('codec_name')) != ('h264',1080,1920,'aac'):
+    if (v.get('codec_name'),v.get('width'),v.get('height'),a.get('codec_name')) != ('h264',profile['width'],profile['height'],'aac'):
         raise TestError('Output codec or dimensions failed validation. No reel was published.')
     if abs(float(info['format']['duration'])-expected)>.16:
         raise TestError('The full duration failed verification. No partial reel was published.')
     for t in (0,expected/2,max(0,expected-.15)):
-        frame=ff(['-ss',str(t)]+inp(path)+['-frames:v','1','-vf','scale=32:32','-an','-f','rawvideo','-pix_fmt','rgb24','pipe:1'],cancel)
+        sample_timeout = 30 if deadline is None else min(30, remaining_render_time(deadline))
+        frame=ff(['-ss',str(t)]+inp(path)+['-frames:v','1','-vf','scale=32:32','-an','-f','rawvideo','-pix_fmt','rgb24','pipe:1'],cancel,sample_timeout)
         if len(frame)!=3072: raise TestError('A first, middle or final frame failed to decode.')
 
     # A few thumbnail samples are not proof that the full output decodes.
+    decode_timeout = max(120, min(900, math.ceil(expected * 2)))
+    if deadline is not None:
+        decode_timeout = min(decode_timeout, remaining_render_time(deadline))
     ff(['-xerror'] + inp(path) + ['-map', '0:v:0', '-map', '0:a:0',
-        '-f', 'null', '-'], cancel, 120)
+        '-f', 'null', '-'], cancel, decode_timeout)
     vd = float(v.get('duration', expected))
     ad = float(a.get('duration', expected))
     if not all(math.isfinite(t) for t in (vd, ad)) or abs(vd-ad) > .12:
         raise TestError('Video and audio end times disagree. This reel was not published.')
-    if path.stat().st_size > 160 * 1024**2:
-        raise TestError('The completed reel is too large for this phone test.')
+    if path.stat().st_size > MAX_OUTPUT_BYTES:
+        raise TestError('The completed reel is too large for this private desktop export.')

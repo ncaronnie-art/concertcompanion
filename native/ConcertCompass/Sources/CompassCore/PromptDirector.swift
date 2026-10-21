@@ -51,8 +51,18 @@ public enum PromptDirector {
         if has(#"\b(raw audio|untouched audio|no cleanup|do not clean|don't clean|no audio cleanup)\b"#) {
             settings.gentleCleanup = false; understood.append("Original audio")
         }
-        for duration in [15, 30, 45, 60] where has("\\b\(duration)\\s*(s|sec|secs|second|seconds)\\b") {
-            settings.targetSeconds = Double(duration); understood.append("\(duration)-second target")
+        let durationPatterns: [(Int, String, String)] = [
+            (300, #"\b(300\s*(s|sec|secs|second|seconds)|5\s*(m|min|mins|minute|minutes))\b"#, "5-minute compilation"),
+            (180, #"\b(180\s*(s|sec|secs|second|seconds)|3\s*(m|min|mins|minute|minutes))\b"#, "3-minute compilation"),
+            (120, #"\b(120\s*(s|sec|secs|second|seconds)|2\s*(m|min|mins|minute|minutes))\b"#, "2-minute compilation"),
+            (90, #"\b90\s*(s|sec|secs|second|seconds)\b"#, "90-second compilation"),
+            (60, #"\b60\s*(s|sec|secs|second|seconds)\b"#, "60-second target"),
+            (45, #"\b45\s*(s|sec|secs|second|seconds)\b"#, "45-second target"),
+            (30, #"\b30\s*(s|sec|secs|second|seconds)\b"#, "30-second target"),
+            (15, #"\b15\s*(s|sec|secs|second|seconds)\b"#, "15-second target")
+        ]
+        if let match = durationPatterns.first(where: { has($0.1) }) {
+            settings.targetSeconds = Double(match.0); understood.append(match.2)
         }
         if has(#"\b(remove|erase|eliminate|isolate|separate|drown out)\b"#) && has(#"\b(crowd|screaming|singing|vocals|voice)\b"#) {
             warnings.append("Nearby singing and overlapping crowd voices cannot be cleanly removed by this build. Gentle cleanup is limited.")
@@ -69,7 +79,7 @@ public enum PromptDirector {
     public static func applyModel(style: String, mode: String, transition: String, seconds: Int,
                                   cleanup: Bool, stabilization: Bool, to base: EditSettings) throws -> EditSettings {
         guard let s = EditStyle(rawValue: style), let m = EditMode(rawValue: mode),
-              let t = TransitionPreference(rawValue: transition), [15, 30, 45, 60].contains(seconds) else {
+              let t = TransitionPreference(rawValue: transition), Timeline.supportedTargetSeconds.contains(Double(seconds)) else {
             throw CompassError.invalid("The AI suggested an unsupported edit. Your settings were not changed.")
         }
         var result = base

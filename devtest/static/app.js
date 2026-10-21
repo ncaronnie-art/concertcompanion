@@ -9,11 +9,18 @@ function clearError(){$('error').textContent='';$('error').hidden=true;}
 function text(tag,value,className){const el=document.createElement(tag);el.textContent=value;if(className)el.className=className;return el;}
 function button(label,fn,className=''){const b=text('button',label,className);b.type='button';b.onclick=fn;return b;}
 function timecode(value){return `${Math.floor(value/60)}:${(value%60).toFixed(1).padStart(4,'0')}`;}
+function durationLabel(seconds){
+ if(seconds===300)return '5 min compilation';
+ if(seconds===180)return '3 min compilation';
+ if(seconds===120)return '2 min compilation';
+ if(seconds===90)return '90 sec compilation';
+ return `${seconds} sec`;
+}
 function savedSettingsLabel(settings){
  const mode=settings.mode==='trailer'?'Trailer':'Highlights';
  const style={cinematic:'Cinematic',hype:'Hype',memory:'Memory',musicVideo:'Music video',surprise:'Surprise me'}[settings.style]||settings.style;
  const transitions={automatic:'Automatic transitions',cuts:'Cuts only',dissolves:'Dissolves'}[settings.transitions]||settings.transitions;
- return `${mode} · ${style} · ${settings.targetSeconds} sec · ${transitions}${settings.gentleCleanup?' · gentle cleanup':''}`;
+ return `${mode} · ${style} · ${durationLabel(settings.targetSeconds)} · ${transitions}${settings.gentleCleanup?' · gentle cleanup':''}`;
 }
 function restoreSavedSettings(settings){
  if(!settings)return;
@@ -57,7 +64,8 @@ function show(){
  if(!state)return;
  const busy=state.busy||running||uploading;
  $('work').hidden=!busy;$('status').textContent=state.status;$('progress').value=state.progress;
- $('files').disabled=busy||state.ready||state.clips.length>=3;
+ const clipLimit=state.limits?.clips||3;
+ $('files').disabled=busy||state.ready||state.clips.length>=clipLimit;
  $('plan').disabled=busy||state.ready||!state.clips.length;$('clear').disabled=busy;
  for(const id of ['prompt','mode','style','length','transitions','cleanup'])$(id).disabled=busy||state.ready;
  document.querySelectorAll('[data-prompt]').forEach(b=>b.disabled=busy);
@@ -83,8 +91,9 @@ function show(){
  else renderEditorialProposal(null);
  if(state.ready){
   if(!$('reel').getAttribute('src'))$('reel').src='/api/reel';
-  $('reelTime').textContent=`${state.receipt.seconds.toFixed(1)}s`;
-  $('receipt').textContent=`${state.receipt.moments} moments rendered. Complete-file decoding passed. Uploaded source copies deleted. Phone playback and saving still need your test.`;
+  $('reelDimensions').textContent=`${state.receipt.width} × ${state.receipt.height}`;
+  $('reelTime').textContent=durationLabel(Math.round(state.receipt.seconds));
+  $('receipt').textContent=`${state.receipt.moments} moments rendered in the ${state.receipt.profile}. Complete-file decoding passed. Uploaded source copies deleted. Download it, put it in iCloud Drive, then test playback on your phone.`;
   for(const k of Object.keys(labels))if(typeof state.feedback[k]==='boolean')$('fb-'+k).value=String(state.feedback[k]);
  }
  if(state.error)error(Error(state.error));
@@ -156,12 +165,17 @@ async function upload(file){
 }
 $('files').onchange=()=>operate(async()=>{
  const files=[...$('files').files];$('files').value='';
- if(files.length+state.clips.length>3)throw Error('Choose up to three clips for this test.');
- if(files.some(f=>f.size>160*1024*1024||f.size===0))throw Error('Each clip must be nonempty and smaller than 160 MB.');
+ const maxClips=state.limits?.clips||3;
+ if(files.length+state.clips.length>maxClips)throw Error(`Choose up to ${maxClips} clips for this test.`);
+ const maxBytes=state.limits?.bytesPerClip||750*1024*1024;
+ if(files.some(f=>f.size>maxBytes||f.size===0))throw Error(`Each clip must be nonempty and smaller than ${Math.floor(maxBytes/1024/1024)} MB.`);
  uploading=true;show();for(const f of files){if(cancelled)break;await upload(f);}await refresh();
 });
 $('plan').onclick=()=>operate(async()=>{
- await request('/api/plan',{revision:state.revision,mode:$('mode').value,style:$('style').value,targetSeconds:Number($('length').value),transitions:$('transitions').value,gentleCleanup:$('cleanup').checked,prompt:$('prompt').value,previousMoments:state.directed?draft:null});
+ const targetSeconds=Number($('length').value);
+ const compilationApproved=targetSeconds<=60||confirm(`This ${durationLabel(targetSeconds)} stays vertical at 720 × 1280 and can take longer to render. Keep this private page open, then download the MP4 to iCloud Drive. Continue?`);
+ if(!compilationApproved)return;
+ await request('/api/plan',{revision:state.revision,mode:$('mode').value,style:$('style').value,targetSeconds,transitions:$('transitions').value,gentleCleanup:$('cleanup').checked,prompt:$('prompt').value,compilationApproved,previousMoments:state.directed?draft:null});
  await wait();$('reviewed').checked=false;$('review').scrollIntoView({block:'start'});
 });
 $('save').onclick=()=>operate(async()=>{await request('/api/review',{revision:state.revision,moments:draft});await wait();});
@@ -169,7 +183,10 @@ $('reviewed').onchange=show;
 $('render').onclick=()=>operate(async()=>{await request('/api/render',{revision:state.revision,reviewed:$('reviewed').checked,moments:draft});await wait();$('result').scrollIntoView({block:'start'});});
 $('cancel').onclick=async()=>{cancelled=true;chunkController?.abort();try{await request('/api/cancel');await wait();}catch(e){error(e);}};
 $('clear').onclick=()=>{if(!confirm('Delete test copies and the finished reel? Your original Photos videos are unchanged.'))return;operate(async()=>{await request('/api/clear');prepared=null;draftRevision=-1;dirty=false;$('reel').pause();$('reel').removeAttribute('src');$('reel').load();$('share').textContent='Prepare iPhone share';await refresh();});};
-for(const b of document.querySelectorAll('[data-prompt]'))b.onclick=()=>{$('prompt').value=b.dataset.prompt;};
+for(const b of document.querySelectorAll('[data-prompt]'))b.onclick=()=>{
+ $('prompt').value=b.dataset.prompt;
+ if(b.dataset.target)$('length').value=b.dataset.target;
+};
 $('share').onclick=async()=>{
  try{
   if(!prepared){$('share').disabled=true;const r=await fetch('/api/reel',{credentials:'same-origin'});if(!r.ok||!r.headers.get('content-type')?.startsWith('video/mp4'))throw Error('The reel is unavailable, or private-link login expired.');

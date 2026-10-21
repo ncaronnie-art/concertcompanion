@@ -22,11 +22,12 @@ def planned_state():
         "csrf": "test-csrf", "busy": False, "ready": False, "revision": 7,
         "clips": [], "upload": None, "feedback": {}, "receipt": None,
         "expiresIn": 3600, "status": "Review your moments.", "progress": 0,
+        "limits": {"clips": 3, "bytesPerClip": 750 * 1024 * 1024, "secondsPerClip": 300},
         "directed": {
             "seconds": 45, "coverage": {"omitted": []},
             "plan": {
                 "settings": {
-                    "mode": "trailer", "style": "musicVideo", "targetSeconds": 45,
+                    "mode": "trailer", "style": "musicVideo", "targetSeconds": 300,
                     "transitions": "dissolves", "gentleCleanup": True,
                     "prompt": "Keep the chorus intact; use the stage-light reveal.",
                 },
@@ -51,6 +52,10 @@ class MobileStateTests(unittest.TestCase):
         self.assertIn("restoreSavedSettings(next.directed.plan.settings)", source)
         self.assertIn('id="savedSettings"', markup)
         self.assertIn('id="editorialProposal"', markup)
+        self.assertIn('value="300"', markup)
+        self.assertIn('data-target="300"', markup)
+        self.assertIn('compilationApproved', source)
+        self.assertIn('state.limits?.clips', source)
 
     @unittest.skipUnless(sync_playwright, "Playwright is not installed in this quality container")
     def test_saved_visible_settings_restore_in_a_fresh_document(self):
@@ -75,7 +80,7 @@ class MobileStateTests(unittest.TestCase):
                 page.wait_for_function("document.getElementById('review').hidden === false")
                 self.assertEqual(page.locator("#mode").input_value(), "trailer")
                 self.assertEqual(page.locator("#style").input_value(), "musicVideo")
-                self.assertEqual(page.locator("#length").input_value(), "45")
+                self.assertEqual(page.locator("#length").input_value(), "300")
                 self.assertEqual(page.locator("#transitions").input_value(), "dissolves")
                 self.assertTrue(page.locator("#cleanup").is_checked())
                 self.assertEqual(page.locator("#prompt").input_value(), state["directed"]["plan"]["settings"]["prompt"])

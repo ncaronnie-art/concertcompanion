@@ -256,15 +256,18 @@ class Handler(BaseHTTPRequestHandler):
         if name:
             allowed.add(f'https://{name}-{PORT}.{domain}')
         # A Codespaces port URL is normally derived from CODESPACE_NAME. In
-        # some private-proxy routes that environment value is not the public
-        # host used by the browser. Accept only an exact same-origin request
-        # for this port on the configured Codespaces forwarding domain.
+        # some private-proxy routes the browser's forwarded URL reaches this
+        # server with a localhost Host header. Accept a forwarded Origin only
+        # for this private port and forwarding domain; writes still require
+        # the Strict session cookie plus the per-session CSRF token.
         proxy_pattern = rf'[a-z0-9][a-z0-9-]*-{PORT}\.{re.escape(domain)}'
         if re.fullmatch(proxy_pattern, host):
             allowed.add(f'https://{host}')
+        forwarded_origin = bool(name and origin and re.fullmatch(
+            rf'https://[a-z0-9][a-z0-9-]*-{PORT}\.{re.escape(domain)}', origin.lower()))
         trusted_hosts = {urlsplit(x).netloc for x in allowed}
         landing = self.command in ('GET', 'HEAD') and urlsplit(self.path).path == '/' and self.headers.get('Sec-Fetch-Mode') == 'navigate'
-        if ((origin is not None and origin not in allowed)
+        if ((origin is not None and origin not in allowed and not forwarded_origin)
                 or (origin is None and self.headers.get('Sec-Fetch-Site') == 'cross-site' and not landing)):
             self.send_json({'error': 'Cross-site requests are blocked.'}, 403)
             return False

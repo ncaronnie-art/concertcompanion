@@ -4,5 +4,47 @@ cd "$(dirname "$0")/.."
 # No public hosting, billing changes, or background model services.
 # This runs only after the owner explicitly creates/starts the Codespace.
 test -f devtest/.build/quality-verified || { echo 'Setup tests have not passed; refusing to start.'; exit 1; }
-nohup python3 devtest/server.py > /tmp/compass-quality-start.log 2>&1 < /dev/null &
-echo 'Open http://localhost:8765 when the private forwarded port appears. Keep its visibility Private.'
+log=/tmp/compass-quality-start.log
+pidfile=/tmp/compass-quality-server.pid
+
+healthy() {
+  python3 - <<'PY'
+import sys, urllib.request
+try:
+    with urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=.5) as response:
+        sys.exit(0 if response.status == 200 else 1)
+except OSError:
+    sys.exit(1)
+PY
+}
+
+if healthy; then
+  echo 'Concert Compass private test is already ready on port 8765.'
+  exit 0
+fi
+
+if [[ -f "$pidfile" ]]; then
+  oldpid=$(<"$pidfile")
+  if [[ "$oldpid" =~ ^[0-9]+$ ]] && kill -0 "$oldpid" 2>/dev/null; then
+    kill "$oldpid" || true
+    for _ in {1..20}; do kill -0 "$oldpid" 2>/dev/null || break; sleep .1; done
+  fi
+  rm -f "$pidfile"
+fi
+
+nohup python3 devtest/server.py > "$log" 2>&1 < /dev/null &
+pid=$!
+printf '%s\n' "$pid" > "$pidfile"
+for _ in {1..30}; do
+  if healthy; then
+    echo 'Concert Compass private test is ready on port 8765.'
+    exit 0
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then break; fi
+  sleep .1
+done
+
+rm -f "$pidfile"
+echo 'Concert Compass did not start. Its diagnostic log follows:' >&2
+cat "$log" >&2 || true
+exit 1

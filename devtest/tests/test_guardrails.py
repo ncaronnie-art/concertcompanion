@@ -157,6 +157,20 @@ class GuardrailTests(unittest.TestCase):
             self.assertEqual(self.call('POST','/api/cancel','{}',
                              {**headers, 'Origin': 'https://evil.invalid'})[0],403)
 
+    def test_15d_private_proxy_accepts_forwarded_origin_with_local_backend_host(self):
+        # The Codespaces proxy can send the browser's private forwarded origin
+        # while the backend sees a local Host header. CSRF still guards writes.
+        origin = 'https://actual-private-test-8765.app.github.dev'
+        headers = {**self.h, 'Origin': origin, 'Sec-Fetch-Site': 'cross-site'}
+        with patch.dict(server.os.environ, {
+                'CODESPACE_NAME': 'different-codespace',
+                'GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN': 'app.github.dev'}):
+            self.assertEqual(self.call('POST','/api/cancel','{}',headers)[0],200)
+            self.assertEqual(self.call('POST','/api/cancel','{}',
+                             {**headers, 'Origin': 'https://evil.invalid'})[0],403)
+            self.assertEqual(self.call('POST','/api/cancel','{}',
+                             {**headers, 'X-Compass-CSRF': 'invalid'})[0],403)
+
     def test_16_untrusted_playlist_is_rejected_before_media_processing(self):
         with tempfile.TemporaryDirectory() as td:
             p=Path(td)/(str(uuid.uuid4())+'.mov');p.write_text('#EXTM3U\n#EXTINF:3,\nfile:///etc/passwd\n')

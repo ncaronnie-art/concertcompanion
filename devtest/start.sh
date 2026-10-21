@@ -6,13 +6,15 @@ cd "$(dirname "$0")/.."
 test -f devtest/.build/quality-verified || { echo 'Setup tests have not passed; refusing to start.'; exit 1; }
 log=/tmp/compass-quality-start.log
 pidfile=/tmp/compass-quality-server.pid
+version=0.2.1
 
 healthy() {
-  python3 - <<'PY'
-import sys, urllib.request
+  python3 - "$version" <<'PY'
+import json, sys, urllib.request
 try:
     with urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=.5) as response:
-        sys.exit(0 if response.status == 200 else 1)
+        health = json.load(response)
+        sys.exit(0 if response.status == 200 and health.get('version') == sys.argv[1] else 1)
 except OSError:
     sys.exit(1)
 PY
@@ -31,6 +33,12 @@ if [[ -f "$pidfile" ]]; then
   fi
   rm -f "$pidfile"
 fi
+
+# Earlier builds did not write a PID file. Clear only this known private
+# development server when its health endpoint is absent or out of date.
+while read -r oldpid; do
+  kill "$oldpid" 2>/dev/null || true
+done < <(pgrep -f '[p]ython3 devtest/server\.py' || true)
 
 nohup python3 devtest/server.py > "$log" 2>&1 < /dev/null &
 pid=$!

@@ -12,7 +12,7 @@ import engine
 from editorial.refine import propose_editorial_refinement
 
 PORT = 8765
-VERSION = '0.2.0'
+VERSION = '0.2.1'
 BASE = Path('/tmp') / ('concert-compass-quality-' + str(os.getuid()))
 SESSIONS = {}
 SESSIONS_LOCK = threading.Lock()

@@ -75,6 +75,19 @@ class QualityTests(unittest.TestCase):
         info=engine.probe(output); video=next(s for s in info['streams'] if s['codec_type']=='video')
         self.assertEqual((video['width'],video['height']),(1080,1080))
         self.assertAlmostEqual(self.frequency(output,3),440,delta=8)
+    def test_d3_all_aspects_and_selected_audio_offset(self):
+        for aspect,dimensions in [('9:16',(1080,1920)),('16:9',(1920,1080)),('1:1',(1080,1080))]:
+            root=Path(tempfile.mkdtemp(dir=self.temp)); clips=[]
+            for index in (0,1):
+                source=root/(str(uuid.uuid4()).upper()+'.mov');shutil.copyfile(self.fixtures[index],source);clips.append(engine.analyze(source,index+1,self.cancel))
+            candidate=self.manual(clips); candidate['plan']['moments']=candidate['plan']['moments'][:1]
+            candidate['timeline']=engine.direct(root,clips,candidate['plan']['settings'],self.cancel,plan=candidate['plan'])['timeline']
+            candidate['wizard']={'aspectRatio':aspect,'audioMode':'single-source','audioClipID':clips[1]['id'],'audioStart':1}
+            output=engine.render(root,clips,candidate,self.cancel,lambda *_:None)
+            video=next(s for s in engine.probe(output)['streams'] if s['codec_type']=='video')
+            self.assertEqual((video['width'],video['height']),dimensions)
+            self.assertAlmostEqual(self.frequency(output,.5),880,delta=8)
+            shutil.rmtree(root,ignore_errors=True)
     def test_e_cancel_does_not_publish(self):
         clips=[self.clip(0)];d=self.manual(clips);self.cancel.set()
         with self.assertRaises(engine.TestError): engine.render(self.root,clips,d,self.cancel,lambda *_:None)

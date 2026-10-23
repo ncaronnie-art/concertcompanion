@@ -227,7 +227,7 @@ for(const b of document.querySelectorAll('[data-prompt]'))b.onclick=()=>{
 };
 $('prompt').oninput=()=>{generatedPromptTarget=null;};
 const parameterControls={mode:'mode',style:'style',length:'targetSeconds',transitions:'transitions',cleanup:'gentleCleanup'};
-for(const [id,key] of Object.entries(parameterControls))$(id).addEventListener('change',()=>explicitSettings.add(key));
+for(const [id,key] of Object.entries(parameterControls))if(typeof $(id).addEventListener==='function')$(id).addEventListener('change',()=>explicitSettings.add(key));
 $('preset').onchange=()=>{
  const p=$('preset').value;
  const presets={cinematic:{style:'cinematic',transitions:'dissolves'},'high-energy':{style:'hype',transitions:'cuts'},memory:{style:'memory',transitions:'dissolves'}};

@@ -279,4 +279,36 @@ class GuardrailTests(unittest.TestCase):
         self.assertEqual(self.post('/api/clear',{})[0],200)
         self.assertFalse(any(next(iter(server.SESSIONS.values())).root.iterdir()))
 
+    def test_21_wizard_adjustment_preserves_lock_and_exports_current_revision(self):
+        b=self.fixture.read_bytes(); upload=self.start(len(b))
+        self.assertEqual(self.chunk(upload,0,b)[0],200)
+        self.assertEqual(self.post('/api/uploads/finish',{'id':upload})[0],202); self.wait()
+        first={
+            'revision': self.state()['revision'], 'mode': 'highlight', 'style': 'memory',
+            'targetSeconds': 15, 'transitions': 'automatic', 'gentleCleanup': False,
+            'prompt': '15 seconds, cinematic', 'explicitSettings': ['targetSeconds', 'style'],
+            'wizard': {'preset': 'wizard', 'aspectRatio': '9:16',
+                       'audioMode': 'selected-moment-original', 'vibePrompt': 'warm memory'},
+        }
+        self.assertEqual(self.post('/api/plan',first)[0],202)
+        planned=self.wait(); self.assertLess(planned['directed']['seconds'],15)
+        self.assertEqual(planned['directed']['plan']['settings']['style'], 'memory')
+        self.assertIn('No footage was looped or stretched', ' '.join(planned['directed']['plan']['warnings']))
+        moments=copy.deepcopy(planned['directed']['plan']['moments']); moments[0]['locked']=True
+        self.assertEqual(self.post('/api/review',{'revision':planned['revision'],'moments':moments})[0],202)
+        locked=self.wait(); original=copy.deepcopy(locked['directed']['plan']['moments'][0])
+        adjustment={'revision':locked['revision'],'editRequest':'cuts only',
+                    'previousMoments':locked['directed']['plan']['moments'],
+                    'wizard':locked['directed']['wizard']}
+        self.assertEqual(self.post('/api/plan',adjustment)[0],202)
+        revised=self.wait(); self.assertEqual(revised['directed']['plan']['settings']['transitions'],'cuts')
+        self.assertEqual(revised['directed']['plan']['moments'][0],original)
+        self.assertEqual(revised['directed']['wizard']['audioMode'],'selected-moment-original')
+        self.assertEqual(self.post('/api/review',{'revision':locked['revision'],'moments':locked['directed']['plan']['moments']})[0],409)
+        self.assertEqual(self.post('/api/render',{'revision':revised['revision'],'reviewed':True,
+                                                   'moments':revised['directed']['plan']['moments']})[0],202)
+        exported=self.wait(); self.assertTrue(exported['ready'])
+        self.assertAlmostEqual(exported['receipt']['seconds'],revised['directed']['seconds'],places=2)
+        self.assertEqual(self.call('GET','/api/download',headers=self.h)[0],200)
+
 if __name__=='__main__':unittest.main(verbosity=2)

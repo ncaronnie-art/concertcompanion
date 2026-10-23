@@ -17,8 +17,7 @@ class SprintIntegrationTests(unittest.TestCase):
         self.assertEqual(server.wizard_from({}), {
             "preset": "wizard", "aspectRatio": "9:16",
             "audioMode": "selected-moment-original", "vibePrompt": ""})
-        with self.assertRaises(engine.TestError):
-            server.wizard_from({"wizard": {"aspectRatio": "16:9"}})
+        self.assertEqual(server.wizard_from({"wizard": {"aspectRatio": "16:9"}})["aspectRatio"], "16:9")
         with self.assertRaises(engine.TestError):
             server.wizard_from({"wizard": {"audioMode": "single-master-clip"}})
 

@@ -156,7 +156,7 @@ def settings_from(data):
     return result
 
 
-def output_profile(target_seconds):
+def output_profile(target_seconds, aspect_ratio='9:16'):
     """Return the declared export profile for an allowed user selection.
 
     Long form stays vertical and 30fps, but uses 720p so a private two-core
@@ -165,9 +165,13 @@ def output_profile(target_seconds):
     """
     if target_seconds not in SUPPORTED_TARGET_SECONDS:
         raise TestError('Choose a supported target before selecting an export profile.')
-    if target_seconds > 60:
-        return dict(name='720p compilation', width=720, height=1280, crf=22)
-    return dict(name='1080p highlight', width=1080, height=1920, crf=20)
+    dimensions = {'9:16': (720, 1280) if target_seconds > 60 else (1080, 1920),
+                  '16:9': (1280, 720) if target_seconds > 60 else (1920, 1080),
+                  '1:1': (720, 720) if target_seconds > 60 else (1080, 1080)}
+    if aspect_ratio not in dimensions:
+        raise TestError('Choose 9:16, 16:9, or 1:1.')
+    width, height = dimensions[aspect_ratio]
+    return dict(name=f'{width}×{height} {aspect_ratio}', width=width, height=height, crf=22 if target_seconds > 60 else 20)
 
 
 def direct(root, clips, settings, cancel, plan=None, previous=None, seed=0, explicit_settings=None):
@@ -249,11 +253,12 @@ def _render(root, clips, directed, cancel, progress):
     segments = []
     duration = shots[-1]['at'] + shots[-1]['moment']['duration']
     settings = directed['plan']['settings']
-    profile = output_profile(settings['targetSeconds'])
+    wizard = directed.get('wizard', {})
+    profile = output_profile(settings['targetSeconds'], wizard.get('aspectRatio', '9:16'))
     deadline = render_deadline(duration)
     audio_policy = AudioPolicy.from_settings(settings)
-    if settings.get('stabilize') or settings.get('masterAudioClipID'):
-        raise TestError('This test does not implement stabilization or a continuous replacement audio bed.')
+    if settings.get('stabilize'):
+        raise TestError('This test does not implement stabilization.')
     for i, shot in enumerate(shots):
         progress(i/len(shots)*.65, f'Rendering selected moments ({i+1} of {len(shots)})')
         moment = shot['moment']; clip = by_id[moment['clipID']]
@@ -275,6 +280,15 @@ def _render(root, clips, directed, cancel, progress):
         segment_timeout = min(remaining_render_time(deadline), max(180, min(600, math.ceil(length * 30))))
         ff(args,cancel,segment_timeout); segments.append(target); progress((i+1)/len(shots)*.65, 'Rendering selected moments')
     pending = assemble_bounded(root, segments, shots, duration, cancel, progress, audio_policy, profile, deadline)
+    if wizard.get('audioMode') == 'single-source':
+        master = by_id.get(wizard.get('audioClipID'))
+        start = wizard.get('audioStart', 0)
+        if not master or not master.get('hasAudio') or not isinstance(start, (int, float)) or start < 0 or start + duration > master['duration'] + .002:
+            raise TestError('The selected continuous audio source cannot cover this reel without looping.')
+        remux = root / 'master-pending.mp4'
+        ff(['-ss', str(start)] + inp(root / master['fileName']) + inp(pending) +
+           ['-map','1:v:0','-map','0:a:0','-t',str(duration),'-c:v','copy','-c:a','aac','-b:a','192k','-ar','48000','-ac','2','-map_metadata','-1','-movflags','+faststart',str(remux)], cancel, remaining_render_time(deadline))
+        pending.unlink(); remux.replace(pending)
     progress(.94, 'Decoding the complete output and checking sound timing')
     verify(pending,duration,cancel,profile,deadline)
     if cancel.is_set():

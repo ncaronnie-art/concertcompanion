@@ -28,8 +28,8 @@ RENDER_GATE = threading.BoundedSemaphore(value=1)
 # The renderer currently has one real output geometry and one real audio
 # policy. Keep the wizard contract here rather than presenting choices the
 # FFmpeg pipeline cannot honour.
-WIZARD_ASPECT_RATIO = '9:16'
-WIZARD_AUDIO_MODE = 'selected-moment-original'
+WIZARD_ASPECT_RATIOS = ('9:16', '16:9', '1:1')
+WIZARD_AUDIO_MODES = ('selected-moment-original', 'single-source')
 WIZARD_PRESETS = {
     'wizard': {},
     'cinematic': {'style': 'cinematic', 'transitions': 'dissolves'},
@@ -38,7 +38,7 @@ WIZARD_PRESETS = {
 }
 
 
-def wizard_from(body, previous=None):
+def wizard_from(body, previous=None, clips=None):
     """Validate only controls the current renderer can actually apply."""
     raw = body.get('wizard', {})
     if raw is None:
@@ -46,14 +46,23 @@ def wizard_from(body, previous=None):
     if not isinstance(raw, dict):
         raise engine.TestError('Invalid Smart Edit Wizard choices.')
     preset = raw.get('preset', previous.get('preset', 'wizard') if previous else 'wizard')
-    aspect = raw.get('aspectRatio', previous.get('aspectRatio', WIZARD_ASPECT_RATIO) if previous else WIZARD_ASPECT_RATIO)
-    audio = raw.get('audioMode', previous.get('audioMode', WIZARD_AUDIO_MODE) if previous else WIZARD_AUDIO_MODE)
-    if preset not in WIZARD_PRESETS or aspect != WIZARD_ASPECT_RATIO or audio != WIZARD_AUDIO_MODE:
+    aspect = raw.get('aspectRatio', previous.get('aspectRatio', '9:16') if previous else '9:16')
+    audio = raw.get('audioMode', previous.get('audioMode', 'selected-moment-original') if previous else 'selected-moment-original')
+    if preset not in WIZARD_PRESETS or aspect not in WIZARD_ASPECT_RATIOS or audio not in WIZARD_AUDIO_MODES:
         raise engine.TestError('That wizard choice is not supported by this private renderer.')
     vibe = raw.get('vibePrompt', previous.get('vibePrompt', '') if previous else '')
     if not isinstance(vibe, str) or len(vibe) > 1500:
         raise engine.TestError('Keep your vibe under 1,500 characters.')
-    return dict(preset=preset, aspectRatio=aspect, audioMode=audio, vibePrompt=vibe)
+    result = dict(preset=preset, aspectRatio=aspect, audioMode=audio, vibePrompt=vibe)
+    if audio == 'single-source':
+        clip_id = raw.get('audioClipID', previous.get('audioClipID') if previous else None)
+        start = raw.get('audioStart', previous.get('audioStart', 0) if previous else 0)
+        if not isinstance(clip_id, str) or type(start) not in (int, float) or start < 0:
+            raise engine.TestError('Choose an audible source and start for continuous audio.')
+        if clips and not any(c['id'] == clip_id and c['hasAudio'] and start < c['duration'] for c in clips):
+            raise engine.TestError('Choose an uploaded source with audio for continuous audio.')
+        result.update(audioClipID=clip_id, audioStart=start)
+    return result
 
 
 class Session:
@@ -268,9 +277,9 @@ def annotate(directed, clips):
     return directed
 
 
-def require_render_workspace(session, settings):
+def require_render_workspace(session, settings, wizard=None):
     """Reserve room for bounded segment/piece files before a heavy render."""
-    profile = engine.output_profile(settings['targetSeconds'])
+    profile = engine.output_profile(settings['targetSeconds'], (wizard or {}).get('aspectRatio', '9:16'))
     reserve = LONG_RENDER_RESERVE if profile['width'] == 720 else 1024**3
     if shutil.disk_usage(session.root).free < reserve:
         raise engine.TestError('Not enough free private workspace for this render. Clear another test or choose a shorter compilation.')
@@ -529,7 +538,7 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     if path == '/api/plan':
                         previous_wizard = s.directed.get('wizard') if s.directed else None
-                        wizard = wizard_from(body, previous_wizard)
+                        wizard = wizard_from(body, previous_wizard, s.clips)
                         # A post-preview adjustment is the newest instruction. It
                         # is deliberately sent through the same local planner as
                         # the first cut, so it changes the saved timeline rather
@@ -561,6 +570,10 @@ class Handler(BaseHTTPRequestHandler):
                             # Recheck its visible result so wording cannot bypass the UI's
                             # explicit long-compilation confirmation.
                             require_directed_compilation_approval(result, body.get('compilationApproved'))
+                            if wizard['audioMode'] == 'single-source':
+                                source = next(c for c in s.clips if c['id'] == wizard['audioClipID'])
+                                if wizard['audioStart'] + result['timeline'][-1]['at'] + result['timeline'][-1]['moment']['duration'] > source['duration'] + .002:
+                                    raise engine.TestError('That continuous audio source is shorter than this first cut. Choose a shorter target, another source, or original audio per moment; it will not loop or pad.')
                             with s.lock:
                                 s.directed = annotate(result, s.clips)
                                 s.directed['wizard'] = wizard
@@ -587,7 +600,7 @@ class Handler(BaseHTTPRequestHandler):
                             if not RENDER_GATE.acquire(blocking=False):
                                 raise engine.TestError('Another private compilation is rendering. Wait for it to finish, then render this reviewed edit again.')
                             try:
-                                profile = require_render_workspace(s, checked['plan']['settings'])
+                                profile = require_render_workspace(s, checked['plan']['settings'], checked.get('wizard'))
                                 before = time.monotonic()
                                 result = engine.render(s.root, s.clips, checked, s.cancel, s.update)
                                 with s.lock:

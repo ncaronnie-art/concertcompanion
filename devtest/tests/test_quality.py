@@ -68,6 +68,13 @@ class QualityTests(unittest.TestCase):
         clips=[self.clip(0),self.clip(2)];self.assertFalse(clips[1]['hasAudio'])
         output=engine.render(self.root,clips,self.manual(clips),self.cancel,lambda *_:None)
         self.assertAlmostEqual(self.frequency(output,3),0,delta=1)
+    def test_d2_square_and_master_audio_are_real_and_bounded(self):
+        clips=[self.clip(0),self.clip(1)]; directed=self.manual(clips)
+        directed['wizard']={'aspectRatio':'1:1','audioMode':'single-source','audioClipID':clips[0]['id'],'audioStart':0}
+        output=engine.render(self.root,clips,directed,self.cancel,lambda *_:None)
+        info=engine.probe(output); video=next(s for s in info['streams'] if s['codec_type']=='video')
+        self.assertEqual((video['width'],video['height']),(1080,1080))
+        self.assertAlmostEqual(self.frequency(output,3),440,delta=8)
     def test_e_cancel_does_not_publish(self):
         clips=[self.clip(0)];d=self.manual(clips);self.cancel.set()
         with self.assertRaises(engine.TestError): engine.render(self.root,clips,d,self.cancel,lambda *_:None)

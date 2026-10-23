@@ -13,6 +13,14 @@ from audio.policy import AudioPolicy
 
 
 class SprintIntegrationTests(unittest.TestCase):
+    def test_preparation_status_exposes_elapsed_time_without_fake_progress(self):
+        session = server.Session()
+        session.update(.1, 'Checking picture and sound; preparing a compatible preview')
+        state = session.state()
+        self.assertEqual(state['progress'], .1)
+        self.assertEqual(state['statusSeconds'], 0)
+        self.assertIn('statusSeconds', state)
+        session.root.rmdir()
     def test_wizard_contract_only_exposes_real_renderer_modes(self):
         self.assertEqual(server.wizard_from({}), {
             "preset": "wizard", "aspectRatio": "9:16",

@@ -77,6 +77,7 @@ class Session:
         self.busy = False
         self.progress = 0
         self.status = 'Choose up to three concert clips, up to five minutes each.'
+        self.status_since = self.created
         self.phase = 'choose'
         self.error = ''
         self.clips = []
@@ -102,6 +103,7 @@ class Session:
                 version=VERSION, csrf=self.csrf, busy=self.busy,
                 progress=self.progress, status=self.status, phase=self.phase,
                 error=self.error, ready=self.ready, revision=self.revision,
+                statusSeconds=max(0, int(time.monotonic() - self.status_since)),
                 clips=[{k: c[k] for k in ('id', 'name', 'duration', 'hasAudio', 'width', 'height')} for c in self.clips],
                 directed=self.directed, upload=self.upload_state(),
                 feedback=self.feedback, receipt=self.receipt, previewReady=self.preview_revision == self.revision,
@@ -144,7 +146,9 @@ class Session:
 
     def update(self, amount, message):
         with self.lock:
-            self.progress, self.status = amount, message
+            self.progress = amount
+            if message != self.status:
+                self.status, self.status_since = message, time.monotonic()
             self.touch()
 
     def reserve_upload(self, size):

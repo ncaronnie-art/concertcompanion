@@ -75,8 +75,14 @@ async function decode(response){
 async function request(path,body={}){
  return decode(await fetch(path,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Compass-CSRF':state.csrf},body:JSON.stringify(body)}));
 }
+async function stateFetch(){
+ const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),20000);
+ try{return await decode(await fetch('/api/state',{credentials:'same-origin',cache:'no-store',signal:controller.signal}));}
+ catch(e){throw Error(e.name==='AbortError'?'Connection check timed out. Your job is still private and can resume observation.':e.message||String(e));}
+ finally{clearTimeout(timer);}
+}
 async function refresh(){
- const next=await decode(await fetch('/api/state',{credentials:'same-origin',cache:'no-store'}));
+ const next=await stateFetch();
  if(state&&state.csrf!==next.csrf){discardPreparedMedia();draft=[];dirty=false;staleDraft=false;draftRevision=-1;error(Error('This session expired. Deleted media cannot be restored; choose clips for a new test.'));}
  if(state&&next.revision!==draftRevision&&dirty&&!running){
   staleDraft=true;show();
@@ -95,6 +101,7 @@ function show(){
  if(!state)return;
  const busy=state.busy||running||uploading;
  $('work').hidden=!busy;$('status').textContent=state.status;$('progress').value=state.progress;
+ $('workNote').textContent=state.statusSeconds>8?`Still ${state.status.toLowerCase()} (${state.statusSeconds}s elapsed). Keep this page open; a connection retry does not restart the job.`:'Keep this page open during uploads and preparation. Completed uploads and saved edits stay in this session.';
  const clipLimit=state.limits?.clips||3;
  $('files').disabled=busy||state.ready||state.clips.length>=clipLimit;
  $('plan').disabled=busy||staleDraft||state.ready||!state.clips.length;$('clear').disabled=busy;
@@ -185,7 +192,7 @@ $('keepMoment').onclick=()=>{
  if(!clip||![m.start,m.duration,m.focusX,m.focusY].every(Number.isFinite)||m.start<0||m.duration<.1||m.start+m.duration>clip.duration+.002){$('editorError').textContent='Keep the trim inside this clip, with a length of at least 0.1 seconds.';return;}
  draft[draft.findIndex(x=>x.id===m.id)]=m;changed();renderMoments();$('editor').close();
 };
-async function wait(){while((await refresh()).busy)await sleep(850);if(state.error)throw Error(state.error);}
+async function wait(){let failures=0;while(true){try{const next=await refresh();failures=0;if(!next.busy)break;}catch(e){if(++failures>3)throw e;$('status').textContent=`Connection interrupted. Retrying observation (${failures}/3); your job was not submitted again.`;await sleep(1000*failures);continue;}await sleep(850);}if(state.error)throw Error(state.error);}
 async function operate(fn){if(staleDraft){error(Error('Reload this page before changing a conflicting edit.'));return;}if(running)return;running=true;cancelled=false;clearError();show();try{await fn();}catch(e){error(e);}finally{running=false;uploading=false;show();}}
 function submittedRevision(){if(staleDraft)throw Error('Reload this page before submitting a conflicting edit.');return draftRevision>=0?draftRevision:state.revision;}
 async function sendChunk(id,offset,blob){

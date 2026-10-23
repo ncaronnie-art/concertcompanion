@@ -187,12 +187,12 @@ def direct(root, clips, settings, cancel, plan=None, previous=None, seed=0, expl
         source.unlink(missing_ok=True); target.unlink(missing_ok=True)
 
 
-def render(root, clips, directed, cancel, progress):
+def render(root, clips, directed, cancel, progress, preview=False):
     """Publish only verified output; on failure keep originals but delete partials."""
     for p in list(root.glob('segment-*.*')) + list(root.glob('piece-*.*')) + [root / 'pending.mp4', root / 'assembly.ffconcat']:
         p.unlink(missing_ok=True)
     try:
-        return _render(root, clips, directed, cancel, progress)
+        return _render(root, clips, directed, cancel, progress, preview)
     except BaseException:
         for p in list(root.glob('segment-*.*')) + list(root.glob('piece-*.*')) + [root / 'pending.mp4', root / 'assembly.ffconcat']:
             p.unlink(missing_ok=True)
@@ -245,7 +245,7 @@ def remaining_render_time(deadline, floor=1):
     return remaining
 
 
-def _render(root, clips, directed, cancel, progress):
+def _render(root, clips, directed, cancel, progress, preview=False):
     shots = frame_timeline(directed['timeline'])
     if not shots or len(shots) > MAX_RENDER_MOMENTS:
         raise TestError(f'This desktop test supports up to {MAX_RENDER_MOMENTS} moments.')
@@ -293,11 +293,21 @@ def _render(root, clips, directed, cancel, progress):
     verify(pending,duration,cancel,profile,deadline)
     if cancel.is_set():
         raise TestError('Stopped safely. No partial reel is shareable.')
-    final=root/'reel.mp4'; pending.replace(final)
-    # Once the completed reel exists, source copies/proxies/intermediates are unnecessary.
+    final=root/('preview.mp4' if preview else 'reel.mp4'); pending.replace(final)
+    # Preview preserves source copies for revision; final export alone cleans them.
+    for p in root.iterdir():
+        if p.is_file() and p != final and (not preview or p.name.startswith(('segment-', 'piece-', 'pending', 'assembly'))): p.unlink()
+    progress(1, 'Preview ready. Sources are retained for changes.' if preview else 'Full reel ready. Source copies have been deleted.')
+    return final
+
+
+def finalize_preview(root: Path):
+    preview, final = root/'preview.mp4', root/'reel.mp4'
+    if not preview.is_file():
+        raise TestError('The current preview is unavailable. Render a new preview before export.')
+    preview.replace(final)
     for p in root.iterdir():
         if p.is_file() and p != final: p.unlink()
-    progress(1, 'Full reel ready. Source copies have been deleted.')
     return final
 
 

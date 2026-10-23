@@ -87,6 +87,7 @@ class Session:
         self.upload = None
         self.feedback = {}
         self.receipt = None
+        self.preview_revision = None
         self.started = None
 
     def touch(self):
@@ -103,7 +104,7 @@ class Session:
                 error=self.error, ready=self.ready, revision=self.revision,
                 clips=[{k: c[k] for k in ('id', 'name', 'duration', 'hasAudio', 'width', 'height')} for c in self.clips],
                 directed=self.directed, upload=self.upload_state(),
-                feedback=self.feedback, receipt=self.receipt,
+                feedback=self.feedback, receipt=self.receipt, previewReady=self.preview_revision == self.revision,
                 expiresIn=max(0, int(remaining)),
                 limits=dict(clips=MAX_CLIPS, bytesPerClip=MAX_UPLOAD, projectBytes=MAX_PROJECT,
                             secondsPerClip=engine.MAX_CLIP_SECONDS, outputBytes=engine.MAX_OUTPUT_BYTES,
@@ -404,6 +405,9 @@ class Handler(BaseHTTPRequestHandler):
             if not s:
                 self.send_json({'error': 'Open your private test session first.'}, 401)
                 return
+            if path == '/api/preview' and s.preview_revision == s.revision:
+                self.media(s.root / 'preview.mp4')
+                return
             if path in ('/api/reel', '/api/download') and s.ready:
                 self.media(s.root / 'reel.mp4', download=path == '/api/download')
                 return
@@ -498,7 +502,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise engine.TestError('Stop the running task before deleting its files.')
                     shutil.rmtree(s.root, ignore_errors=True); s.root.mkdir(mode=0o700)
                     s.clips, s.directed, s.ready, s.bytes = [], None, False, 0
-                    s.upload, s.receipt, s.feedback = None, None, {}
+                    s.upload, s.receipt, s.feedback, s.preview_revision = None, None, {}, None
                     s.revision += 1; s.phase = 'choose'; s.error = ''; s.progress = 0
                     s.status = 'All test media deleted. Delete the Codespace too when finished.'
                 self.send_json({'ok': True})
@@ -569,6 +573,11 @@ class Handler(BaseHTTPRequestHandler):
                                 s.directed = annotate(result, s.clips)
                                 s.directed['wizard'] = wizard
                                 s.revision += 1
+                                s.preview_revision = None
+                            profile = require_render_workspace(s, result['plan']['settings'], wizard)
+                            engine.render(s.root, s.clips, s.directed, s.cancel, s.update, preview=True)
+                            with s.lock:
+                                s.preview_revision = s.revision
                                 s.status = ('Adjusted first cut ready. Review the actual changed moments before rendering.'
                                             if adjustment is not None else 'Review your moments. Nothing is rendered until you approve.')
                         s.phase = 'plan'
@@ -582,18 +591,23 @@ class Handler(BaseHTTPRequestHandler):
                             # Review/render validation recreates a response from
                             # Swift; carry the persisted wizard contract forward.
                             checked['wizard'] = copy.deepcopy(s.directed.get('wizard', {}))
-                            # Persist a valid reviewed cut before starting a cancellable render.
-                            with s.lock:
-                                s.directed = checked; s.revision += 1
+                            # Saving edits invalidates the assembled preview; export
+                            # may only promote the still-current reviewed preview.
+                            if not rendering:
+                                with s.lock:
+                                    s.directed = checked; s.revision += 1
+                                    s.preview_revision = None
                             if not rendering:
                                 s.update(1, 'Edits saved in this session. Refreshing the page keeps them.')
                                 return
+                            if s.preview_revision != s.revision:
+                                raise engine.TestError('Your edit changed. Render and review the current preview before export.')
                             if not RENDER_GATE.acquire(blocking=False):
                                 raise engine.TestError('Another private compilation is rendering. Wait for it to finish, then render this reviewed edit again.')
                             try:
                                 profile = require_render_workspace(s, checked['plan']['settings'], checked.get('wizard'))
                                 before = time.monotonic()
-                                result = engine.render(s.root, s.clips, checked, s.cancel, s.update)
+                                result = engine.finalize_preview(s.root)
                                 with s.lock:
                                     s.ready, s.bytes = True, 0
                                     s.receipt = dict(codec='H.264 / AAC', width=profile['width'], height=profile['height'],

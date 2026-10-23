@@ -104,6 +104,7 @@ function show(){
  $('step1').classList.toggle('active',!state.directed&&!state.ready);
  $('step2').classList.toggle('active',!!state.directed&&!state.ready);$('step3').classList.toggle('active',state.ready);
  $('render').disabled=busy||staleDraft||!$('reviewed').checked||!draft.some(m=>m.approved);
+ $('render').disabled=$('render').disabled||!state.previewReady;
  $('save').disabled=busy||staleDraft||!dirty;$('feedbackSave').disabled=busy;
  $('adjust').disabled=busy||staleDraft;
  $('adjustment').disabled=busy||staleDraft;
@@ -125,6 +126,9 @@ function show(){
   const omitted=d.coverage?.omitted||[];$('coverage').textContent=omitted.length?`Not in the saved edit: ${omitted.join(', ')}. Replace a moment to include that source.`:`All ${state.clips.length} source clips are represented in the saved edit.`;
   $('coverage').classList.toggle('warning',!!omitted.length);
   $('explanation').textContent=[d.plan.director,...d.plan.warnings].join('\n\n');
+  $('preview').hidden=!state.previewReady;$('previewNote').hidden=!state.previewReady;
+  if(state.previewReady){if(!$('preview').getAttribute('src'))$('preview').src='/api/preview';$('previewNote').textContent='Assembled preview of this exact revision. Adjusting or saving changes requires a new preview before export.';}
+  else {$('preview').pause();$('preview').removeAttribute('src');$('preview').load();}
  }
  else {renderEditorialProposal(null);$('durationTruth').textContent='';$('durationTruth').classList.remove('warning');}
  if(state.ready){

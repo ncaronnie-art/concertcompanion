@@ -331,4 +331,21 @@ class GuardrailTests(unittest.TestCase):
         self.assertAlmostEqual(exported['receipt']['seconds'],revised['directed']['seconds'],places=2)
         self.assertEqual(self.call('GET','/api/download',headers=self.h)[0],200)
 
+    def test_22_preview_retains_sources_and_stale_export_is_refused(self):
+        s=self.plan(); self.assertTrue(s['previewReady'])
+        session=next(iter(server.SESSIONS.values()))
+        self.assertTrue((session.root/'preview.mp4').is_file())
+        self.assertTrue(any(p.suffix == '.mov' for p in session.root.iterdir()))
+        self.assertEqual(self.call('GET','/api/preview',headers=self.h)[0],200)
+        moments=copy.deepcopy(s['directed']['plan']['moments']); moments[0]['duration']=max(.1,moments[0]['duration']-.1)
+        self.assertEqual(self.post('/api/review',{'revision':s['revision'],'moments':moments})[0],202)
+        changed=self.wait(); self.assertFalse(changed['previewReady'])
+        self.assertEqual(self.call('GET','/api/preview',headers=self.h)[0],404)
+        self.assertEqual(self.post('/api/render',{'revision':changed['revision'],'reviewed':True,'moments':moments})[0],202)
+        for _ in range(20):
+            stale=self.state()
+            if not stale['busy']: break
+            time.sleep(.1)
+        self.assertIn('Render and review the current preview', stale['error'])
+
 if __name__=='__main__':unittest.main(verbosity=2)

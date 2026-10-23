@@ -7,6 +7,7 @@ struct Request: Codable {
     var plan: EditPlan?
     var previous: EditPlan?
     var seed: UInt64?
+    var explicitSettings: [String]?
 }
 struct Response: Codable { var plan: EditPlan; var timeline: [TimelineShot] }
 do {
@@ -15,8 +16,22 @@ do {
     var plan: EditPlan
     if r.action == "plan" {
         let direction = PromptDirector.interpret(r.settings.prompt, base: r.settings)
-        guard !direction.settings.stabilize else { throw CompassError.invalid("Stabilization is not part of this Linux quality test. Remove that direction.") }
-        plan = try Planner.propose(clips: r.clips, settings: direction.settings, previous: r.previous, seed: r.seed ?? 0)
+        var resolved = direction.settings
+        // A compact wizard can combine a vibe with deliberate visible
+        // controls. Never let old/generated prose silently replace a newer
+        // parameter the owner touched.
+        for key in r.explicitSettings ?? [] {
+            switch key {
+            case "mode": resolved.mode = r.settings.mode
+            case "style": resolved.style = r.settings.style
+            case "targetSeconds": resolved.targetSeconds = r.settings.targetSeconds
+            case "transitions": resolved.transitions = r.settings.transitions
+            case "gentleCleanup": resolved.gentleCleanup = r.settings.gentleCleanup
+            default: continue
+            }
+        }
+        guard !resolved.stabilize else { throw CompassError.invalid("Stabilization is not part of this Linux quality test. Remove that direction.") }
+        plan = try Planner.propose(clips: r.clips, settings: resolved, previous: r.previous, seed: r.seed ?? 0)
         plan.warnings += direction.understood + direction.warnings
         plan.director = "Existing CompassCore rules and signal planner; separate Linux renderer"
     } else if r.action == "validate", let proposed = r.plan {

@@ -13,6 +13,25 @@ from audio.policy import AudioPolicy
 
 
 class SprintIntegrationTests(unittest.TestCase):
+    def test_wizard_contract_only_exposes_real_renderer_modes(self):
+        self.assertEqual(server.wizard_from({}), {
+            "preset": "wizard", "aspectRatio": "9:16",
+            "audioMode": "selected-moment-original", "vibePrompt": ""})
+        with self.assertRaises(engine.TestError):
+            server.wizard_from({"wizard": {"aspectRatio": "16:9"}})
+        with self.assertRaises(engine.TestError):
+            server.wizard_from({"wizard": {"audioMode": "single-master-clip"}})
+
+    def test_wizard_persistence_and_real_adjustment_contract_are_shipped(self):
+        source = (Path(engine.HERE) / "static" / "app.js").read_text()
+        markup = (Path(engine.HERE) / "static" / "index.html").read_text()
+        adapter = (Path(engine.HERE) / "Sources" / "QualityCLI" / "main.swift").read_text()
+        self.assertIn("directed['wizard'] = wizard", Path(server.__file__).read_text())
+        self.assertIn("editRequest", source)
+        self.assertIn("Any edits before export?", markup)
+        self.assertIn("Continuous one-clip audio is not available", markup)
+        self.assertIn("explicitSettings", adapter)
+
     def test_settings_route_audio_policy_without_enabling_processing_by_default(self):
         raw = engine.settings_from({})
         self.assertFalse(raw["gentleCleanup"])

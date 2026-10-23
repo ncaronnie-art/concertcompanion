@@ -25,6 +25,36 @@ TTL = 3600
 MAX_SESSION_AGE = 3 * TTL
 RENDER_GATE = threading.BoundedSemaphore(value=1)
 
+# The renderer currently has one real output geometry and one real audio
+# policy. Keep the wizard contract here rather than presenting choices the
+# FFmpeg pipeline cannot honour.
+WIZARD_ASPECT_RATIO = '9:16'
+WIZARD_AUDIO_MODE = 'selected-moment-original'
+WIZARD_PRESETS = {
+    'wizard': {},
+    'cinematic': {'style': 'cinematic', 'transitions': 'dissolves'},
+    'high-energy': {'style': 'hype', 'transitions': 'cuts'},
+    'memory': {'style': 'memory', 'transitions': 'dissolves'},
+}
+
+
+def wizard_from(body, previous=None):
+    """Validate only controls the current renderer can actually apply."""
+    raw = body.get('wizard', {})
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise engine.TestError('Invalid Smart Edit Wizard choices.')
+    preset = raw.get('preset', previous.get('preset', 'wizard') if previous else 'wizard')
+    aspect = raw.get('aspectRatio', previous.get('aspectRatio', WIZARD_ASPECT_RATIO) if previous else WIZARD_ASPECT_RATIO)
+    audio = raw.get('audioMode', previous.get('audioMode', WIZARD_AUDIO_MODE) if previous else WIZARD_AUDIO_MODE)
+    if preset not in WIZARD_PRESETS or aspect != WIZARD_ASPECT_RATIO or audio != WIZARD_AUDIO_MODE:
+        raise engine.TestError('That wizard choice is not supported by this private renderer.')
+    vibe = raw.get('vibePrompt', previous.get('vibePrompt', '') if previous else '')
+    if not isinstance(vibe, str) or len(vibe) > 1500:
+        raise engine.TestError('Keep your vibe under 1,500 characters.')
+    return dict(preset=preset, aspectRatio=aspect, audioMode=audio, vibePrompt=vibe)
+
 
 class Session:
     def __init__(self):
@@ -498,21 +528,45 @@ class Handler(BaseHTTPRequestHandler):
                         self.send_json({'error': 'A newer edit exists in another tab. Reload before changing it.'}, 409)
                         return
                     if path == '/api/plan':
-                        settings = engine.settings_from(body)
+                        previous_wizard = s.directed.get('wizard') if s.directed else None
+                        wizard = wizard_from(body, previous_wizard)
+                        # A post-preview adjustment is the newest instruction. It
+                        # is deliberately sent through the same local planner as
+                        # the first cut, so it changes the saved timeline rather
+                        # than becoming a suggestion-only note.
+                        adjustment = body.get('editRequest')
+                        if adjustment is not None:
+                            if not isinstance(adjustment, str) or not adjustment.strip() or len(adjustment) > 1500:
+                                raise engine.TestError('Describe one supported adjustment in under 1,500 characters.')
+                            if not s.directed:
+                                raise engine.TestError('Make a first cut before asking for an adjustment.')
+                            requested = copy.deepcopy(s.directed['plan']['settings'])
+                            requested['prompt'] = adjustment
+                            wizard['vibePrompt'] = adjustment
+                            settings = engine.settings_from(requested)
+                        else:
+                            settings = engine.settings_from(body)
+                        explicit = body.get('explicitSettings', []) if adjustment is None else []
+                        allowed_explicit = {'mode', 'style', 'targetSeconds', 'transitions', 'gentleCleanup'}
+                        if not isinstance(explicit, list) or any(x not in allowed_explicit for x in explicit):
+                            raise engine.TestError('Invalid explicit wizard setting.')
                         require_compilation_approval(settings, body.get('compilationApproved'))
                         previous = patch_plan(s, body['previousMoments']) if s.directed and body.get('previousMoments') is not None else (s.directed['plan'] if s.directed else None)
                         def operation():
                             if previous and any(m['approved'] for m in previous['moments']):
                                 engine.direct(s.root, s.clips, previous['settings'], s.cancel, plan=previous)
-                            result = engine.direct(s.root, s.clips, settings, s.cancel, previous=previous, seed=s.revision)
+                            result = engine.direct(s.root, s.clips, settings, s.cancel, previous=previous, seed=s.revision,
+                                                   explicit_settings=explicit)
                             # The bounded prompt interpreter can request a longer target.
                             # Recheck its visible result so wording cannot bypass the UI's
                             # explicit long-compilation confirmation.
                             require_directed_compilation_approval(result, body.get('compilationApproved'))
                             with s.lock:
                                 s.directed = annotate(result, s.clips)
+                                s.directed['wizard'] = wizard
                                 s.revision += 1
-                                s.status = 'Review your moments. Nothing is rendered until you approve.'
+                                s.status = ('Adjusted first cut ready. Review the actual changed moments before rendering.'
+                                            if adjustment is not None else 'Review your moments. Nothing is rendered until you approve.')
                         s.phase = 'plan'
                     else:
                         updated = patch_plan(s, body.get('moments'))
@@ -521,6 +575,9 @@ class Handler(BaseHTTPRequestHandler):
                         rendering = path == '/api/render'
                         def operation():
                             checked = annotate(engine.direct(s.root, s.clips, updated['settings'], s.cancel, plan=updated), s.clips)
+                            # Review/render validation recreates a response from
+                            # Swift; carry the persisted wizard contract forward.
+                            checked['wizard'] = copy.deepcopy(s.directed.get('wizard', {}))
                             # Persist a valid reviewed cut before starting a cancellable render.
                             with s.lock:
                                 s.directed = checked; s.revision += 1

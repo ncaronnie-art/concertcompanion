@@ -170,8 +170,9 @@ def output_profile(target_seconds):
     return dict(name='1080p highlight', width=1080, height=1920, crf=20)
 
 
-def direct(root, clips, settings, cancel, plan=None, previous=None, seed=0):
-    request = dict(clips=clips, settings=settings, action='validate' if plan is not None else 'plan', plan=plan, previous=previous, seed=seed)
+def direct(root, clips, settings, cancel, plan=None, previous=None, seed=0, explicit_settings=None):
+    request = dict(clips=clips, settings=settings, action='validate' if plan is not None else 'plan', plan=plan, previous=previous, seed=seed,
+                   explicitSettings=explicit_settings or [])
     source, target = root/'request.json', root/'response.json'
     source.write_text(json.dumps(request, allow_nan=False))
     try:

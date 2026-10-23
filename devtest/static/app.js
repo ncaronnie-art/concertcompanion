@@ -2,6 +2,7 @@
 const $ = id => document.getElementById(id);
 let state=null, draft=[], draftRevision=-1, dirty=false, staleDraft=false, running=false, uploading=false;
 let prepared=null, cancelled=false, chunkController=null, editing=null, expiryAt=0, generatedPromptTarget=null;
+const explicitSettings=new Set();
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const labels={completePlayback:'Every moment plays to the end',soundInSync:'Picture and sound stay in sync',savedToPhotos:'Saved to Photos',photosSound:'Replays in Photos with sound',capturesNight:'It captures the night',wouldShare:'I would share this'};
 function error(e){const text=e.message||String(e);$('error').textContent=text;$('error').hidden=false;}
@@ -47,6 +48,12 @@ function restoreSavedSettings(settings){
  $('cleanup').checked=settings.gentleCleanup===true;
  $('savedSettings').textContent=`Saved edit settings restored: ${savedSettingsLabel(settings)}.`;
 }
+function wizardPayload(){return {preset:$('preset').value,aspectRatio:'9:16',audioMode:'selected-moment-original',vibePrompt:$('prompt').value};}
+function restoreWizard(wizard){
+ if(!wizard)return;
+ if(wizard.preset&&[...$('preset').options].some(o=>o.value===wizard.preset))$('preset').value=wizard.preset;
+ if(typeof wizard.vibePrompt==='string')$('prompt').value=wizard.vibePrompt;
+}
 function renderEditorialProposal(proposal){
  const panel=$('editorialProposal'), summary=$('editorialProposalSummary'), detail=$('editorialProposalDetail');
  if(!proposal){panel.hidden=true;summary.textContent='';detail.textContent='';return;}
@@ -75,7 +82,7 @@ async function refresh(){
  state=next;expiryAt=Date.now()+next.expiresIn*1000;
  if(next.directed&&next.revision!==draftRevision){
   if(dirty&&!running)throw Error('A newer edit was saved in another tab. Reload this page before making changes.');
-  draft=structuredClone(next.directed.plan.moments);draftRevision=next.revision;dirty=false;restoreSavedSettings(next.directed.plan.settings);renderMoments();
+  draft=structuredClone(next.directed.plan.moments);draftRevision=next.revision;dirty=false;restoreSavedSettings(next.directed.plan.settings);restoreWizard(next.directed.wizard);renderMoments();
  }
  if(!next.directed){draft=[];draftRevision=-1;$('moments').replaceChildren();$('savedSettings').textContent='Your saved edit settings will appear here after you make a first cut.';}
  show();return next;
@@ -87,13 +94,15 @@ function show(){
  const clipLimit=state.limits?.clips||3;
  $('files').disabled=busy||state.ready||state.clips.length>=clipLimit;
  $('plan').disabled=busy||staleDraft||state.ready||!state.clips.length;$('clear').disabled=busy;
- for(const id of ['prompt','mode','style','length','transitions','cleanup'])$(id).disabled=busy||state.ready;
+ for(const id of ['preset','prompt','mode','style','length','transitions','cleanup'])$(id).disabled=busy||state.ready;
  document.querySelectorAll('[data-prompt]').forEach(b=>b.disabled=busy);
  $('controls').hidden=state.ready;$('review').hidden=state.ready||!state.directed;$('result').hidden=!state.ready;
  $('step1').classList.toggle('active',!state.directed&&!state.ready);
  $('step2').classList.toggle('active',!!state.directed&&!state.ready);$('step3').classList.toggle('active',state.ready);
  $('render').disabled=busy||staleDraft||!$('reviewed').checked||!draft.some(m=>m.approved);
  $('save').disabled=busy||staleDraft||!dirty;$('feedbackSave').disabled=busy;
+ $('adjust').disabled=busy||staleDraft;
+ $('adjustment').disabled=busy||staleDraft;
  $('saveState').textContent=dirty?'Unsaved changes. Save or render to keep them.':'Edits saved in this session.';
  $('moments').querySelectorAll('button').forEach(b=>b.disabled=busy);
  if(!state.ready)$('clips').replaceChildren(...state.clips.map(c=>{
@@ -105,6 +114,7 @@ function show(){
   $('durationTruth').textContent=durationTruth(d);
   $('durationTruth').classList.toggle('warning',Math.abs(Number(d.plan.settings.targetSeconds)-Number(d.seconds))>.08);
   if(!$('savedSettings').textContent.startsWith('Saved edit settings restored:'))restoreSavedSettings(d.plan.settings);
+  restoreWizard(d.wizard);
   renderEditorialProposal(d.editorialProposal);
   const omitted=d.coverage?.omitted||[];$('coverage').textContent=omitted.length?`Not in the saved edit: ${omitted.join(', ')}. Replace a moment to include that source.`:`All ${state.clips.length} source clips are represented in the saved edit.`;
   $('coverage').classList.toggle('warning',!!omitted.length);
@@ -201,7 +211,7 @@ $('plan').onclick=()=>operate(async()=>{
  const targetSeconds=Number($('length').value);
  const compilationApproved=targetSeconds<=60||confirm(`This ${durationLabel(targetSeconds)} stays vertical at 720 × 1280 and can take longer to render. Keep this private page open, then download the MP4 to iCloud Drive. Continue?`);
  if(!compilationApproved)return;
- await request('/api/plan',{revision:submittedRevision(),mode:$('mode').value,style:$('style').value,targetSeconds,transitions:$('transitions').value,gentleCleanup:$('cleanup').checked,prompt:$('prompt').value,compilationApproved,previousMoments:state.directed?draft:null});
+ await request('/api/plan',{revision:submittedRevision(),mode:$('mode').value,style:$('style').value,targetSeconds,transitions:$('transitions').value,gentleCleanup:$('cleanup').checked,prompt:$('prompt').value,wizard:wizardPayload(),explicitSettings:[...explicitSettings],compilationApproved,previousMoments:state.directed?draft:null});
  await wait();$('reviewed').checked=false;$('review').scrollIntoView({block:'start'});
 });
 $('save').onclick=()=>operate(async()=>{await request('/api/review',{revision:submittedRevision(),moments:draft});await wait();});
@@ -213,8 +223,16 @@ for(const b of document.querySelectorAll('[data-prompt]'))b.onclick=()=>{
  $('prompt').value=b.dataset.prompt;
  generatedPromptTarget=Number(b.dataset.target)||null;
  if(b.dataset.target)$('length').value=b.dataset.target;
+ if(b.dataset.target)explicitSettings.add('targetSeconds');
 };
 $('prompt').oninput=()=>{generatedPromptTarget=null;};
+const parameterControls={mode:'mode',style:'style',length:'targetSeconds',transitions:'transitions',cleanup:'gentleCleanup'};
+for(const [id,key] of Object.entries(parameterControls))$(id).addEventListener('change',()=>explicitSettings.add(key));
+$('preset').onchange=()=>{
+ const p=$('preset').value;
+ const presets={cinematic:{style:'cinematic',transitions:'dissolves'},'high-energy':{style:'hype',transitions:'cuts'},memory:{style:'memory',transitions:'dissolves'}};
+ if(presets[p])Object.entries(presets[p]).forEach(([id,value])=>{$(id).value=value;explicitSettings.add(parameterControls[id]);});
+};
 $('length').onchange=()=>{
  if(!generatedPromptTarget)return;
  const seconds=Number($('length').value);
@@ -222,6 +240,15 @@ $('length').onchange=()=>{
  $('prompt').value=$('prompt').value.replace(/^\s*(?:\d+\s*(?:seconds?|secs?|minutes?|mins?)|\d+\s*min)\s*,?\s*/i,`${label}, `);
  generatedPromptTarget=seconds;
 };
+$('adjust').onclick=()=>operate(async()=>{
+ const editRequest=$('adjustment').value.trim();
+ if(!editRequest)throw Error('Describe an adjustment, or render this reviewed first cut.');
+ const targetSeconds=Number(state.directed.plan.settings.targetSeconds);
+ const compilationApproved=targetSeconds<=60||confirm(`This ${durationLabel(targetSeconds)} stays vertical at 720 × 1280. Continue?`);
+ if(!compilationApproved)return;
+ await request('/api/plan',{revision:submittedRevision(),editRequest,wizard:wizardPayload(),compilationApproved,previousMoments:draft});
+ await wait();$('adjustment').value='';$('reviewed').checked=false;$('review').scrollIntoView({block:'start'});
+});
 $('share').onclick=async()=>{
  try{
   if(!prepared){const shareSession=state.csrf,shareRevision=state.revision;$('share').disabled=true;const r=await fetch('/api/reel',{credentials:'same-origin'});if(!r.ok||!r.headers.get('content-type')?.startsWith('video/mp4'))throw Error('The reel is unavailable, or private-link login expired.');

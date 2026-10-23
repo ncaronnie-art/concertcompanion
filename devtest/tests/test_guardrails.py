@@ -242,17 +242,22 @@ class GuardrailTests(unittest.TestCase):
     def test_15e_exact_https_localhost_requires_session_and_csrf(self):
         host=f'localhost:{self.http.server_port}'
         secure={**self.h,'Host':host,'Origin':f'https://{host}','Sec-Fetch-Site':'cross-site'}
-        self.assertEqual(self.call('POST','/api/uploads',json.dumps({'size':1}),secure)[0],201)
-        self.assertEqual(self.post('/api/cancel',{})[0],200)
-        self.assertIsNone(self.state()['upload'])
+        code,_,data=self.call('POST','/api/uploads',json.dumps({'size':3}),secure)
+        self.assertEqual(code,201); upload=json.loads(data)['id']
+        chunk_headers={**secure,'X-Upload-Offset':'0'}
+        self.assertEqual(self.call('PUT','/api/upload-chunk/'+upload,b'a',chunk_headers)[0],200)
+        session=next(iter(server.SESSIONS.values())); source=session.root/(upload+'.mov')
+        self.assertEqual(source.read_bytes(),b'a')
         for bad in ({**secure,'X-Compass-CSRF':'bad'}, {k:v for k,v in secure.items() if k!='Cookie'}, {**secure,'Cookie':'compass=other'}):
             self.assertEqual(self.call('POST','/api/uploads',json.dumps({'size':1}),bad)[0],403)
-            self.assertIsNone(self.state()['upload'])
+            self.assertEqual(self.call('PUT','/api/upload-chunk/'+upload,b'b',{**bad,'X-Upload-Offset':'1'})[0],403)
+            self.assertEqual(source.read_bytes(),b'a')
         for origin in (f'https://localhost:{self.http.server_port+1}','null','https://localhost.evil.invalid','https://evil.invalid'):
             self.assertEqual(self.call('POST','/api/uploads',json.dumps({'size':1}),{**secure,'Origin':origin})[0],403)
         self.assertEqual(self.call('POST','/api/uploads',json.dumps({'size':1}),{k:v for k,v in secure.items() if k!='Origin'})[0],403)
         self.assertEqual(self.call('POST','/api/uploads',json.dumps({'size':1}),{**secure,'Host':'evil.invalid'})[0],403)
         self.assertEqual(self.call('POST','/api/uploads',json.dumps({'size':1}),{**secure,'Origin':'https://evil.invalid','X-Forwarded-Host':'localhost','X-Forwarded-Proto':'https'})[0],403)
+        self.assertEqual(self.post('/api/cancel',{})[0],200)
 
     def test_16_untrusted_playlist_is_rejected_before_media_processing(self):
         with tempfile.TemporaryDirectory() as td:

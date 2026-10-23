@@ -28,7 +28,8 @@ class SprintIntegrationTests(unittest.TestCase):
         self.assertIn("directed['wizard'] = wizard", Path(server.__file__).read_text())
         self.assertIn("editRequest", source)
         self.assertIn("Any edits before export?", markup)
-        self.assertIn("Continuous one-clip audio is not available", markup)
+        self.assertIn("One source beneath all visuals", markup)
+        self.assertIn("No audio loops or padding", markup)
         self.assertIn("explicitSettings", adapter)
 
     def test_settings_route_audio_policy_without_enabling_processing_by_default(self):

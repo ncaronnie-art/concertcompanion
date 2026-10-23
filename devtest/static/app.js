@@ -1,11 +1,16 @@
 'use strict';
 const $ = id => document.getElementById(id);
-let state=null, draft=[], draftRevision=-1, dirty=false, running=false, uploading=false;
-let prepared=null, cancelled=false, chunkController=null, editing=null, expiryAt=0;
+let state=null, draft=[], draftRevision=-1, dirty=false, staleDraft=false, running=false, uploading=false;
+let prepared=null, cancelled=false, chunkController=null, editing=null, expiryAt=0, generatedPromptTarget=null;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const labels={completePlayback:'Every moment plays to the end',soundInSync:'Picture and sound stay in sync',savedToPhotos:'Saved to Photos',photosSound:'Replays in Photos with sound',capturesNight:'It captures the night',wouldShare:'I would share this'};
 function error(e){const text=e.message||String(e);$('error').textContent=text;$('error').hidden=false;}
 function clearError(){$('error').textContent='';$('error').hidden=true;}
+function discardPreparedMedia(){
+ prepared=null;
+ const reel=$('reel');reel.pause();reel.removeAttribute('src');reel.load();
+ $('share').textContent='Prepare iPhone share';
+}
 function text(tag,value,className){const el=document.createElement(tag);el.textContent=value;if(className)el.className=className;return el;}
 function button(label,fn,className=''){const b=text('button',label,className);b.type='button';b.onclick=fn;return b;}
 function timecode(value){return `${Math.floor(value/60)}:${(value%60).toFixed(1).padStart(4,'0')}`;}
@@ -15,6 +20,16 @@ function durationLabel(seconds){
  if(seconds===120)return '2 min compilation';
  if(seconds===90)return '90 sec compilation';
  return `${seconds} sec`;
+}
+function durationTruth(directed){
+ const requested=Number(directed?.plan?.settings?.targetSeconds);
+ const planned=Number(directed?.seconds);
+ if(!Number.isFinite(requested)||!Number.isFinite(planned))return '';
+ const target=`Requested ${durationLabel(requested)}`;
+ const output=`first cut ${planned.toFixed(1)}s`;
+ if(Math.abs(requested-planned)<=.08)return `${target} \u00b7 ${output}. Review the selected moments before rendering.`;
+ const gap=planned<requested?'shorter':'longer';
+ return `${target} \u00b7 ${output} (${gap} than requested). Nothing is padded, looped, stretched, or invented. To preserve a longer musical section, extend and lock an approved source moment, then save again.`;
 }
 function savedSettingsLabel(settings){
  const mode=settings.mode==='trailer'?'Trailer':'Highlights';
@@ -51,7 +66,12 @@ async function request(path,body={}){
 }
 async function refresh(){
  const next=await decode(await fetch('/api/state',{credentials:'same-origin',cache:'no-store'}));
- if(state&&state.csrf!==next.csrf){draft=[];dirty=false;draftRevision=-1;prepared=null;error(Error('This session expired. Deleted media cannot be restored; choose clips for a new test.'));}
+ if(state&&state.csrf!==next.csrf){discardPreparedMedia();draft=[];dirty=false;staleDraft=false;draftRevision=-1;error(Error('This session expired. Deleted media cannot be restored; choose clips for a new test.'));}
+ if(state&&next.revision!==draftRevision&&dirty&&!running){
+  staleDraft=true;show();
+  throw Error('A newer edit was saved in another tab. Your local changes were not submitted. Reload this page before making changes.');
+ }
+ if(state&&(next.revision!==state.revision||next.ready!==state.ready))discardPreparedMedia();
  state=next;expiryAt=Date.now()+next.expiresIn*1000;
  if(next.directed&&next.revision!==draftRevision){
   if(dirty&&!running)throw Error('A newer edit was saved in another tab. Reload this page before making changes.');
@@ -66,14 +86,14 @@ function show(){
  $('work').hidden=!busy;$('status').textContent=state.status;$('progress').value=state.progress;
  const clipLimit=state.limits?.clips||3;
  $('files').disabled=busy||state.ready||state.clips.length>=clipLimit;
- $('plan').disabled=busy||state.ready||!state.clips.length;$('clear').disabled=busy;
+ $('plan').disabled=busy||staleDraft||state.ready||!state.clips.length;$('clear').disabled=busy;
  for(const id of ['prompt','mode','style','length','transitions','cleanup'])$(id).disabled=busy||state.ready;
  document.querySelectorAll('[data-prompt]').forEach(b=>b.disabled=busy);
  $('controls').hidden=state.ready;$('review').hidden=state.ready||!state.directed;$('result').hidden=!state.ready;
  $('step1').classList.toggle('active',!state.directed&&!state.ready);
  $('step2').classList.toggle('active',!!state.directed&&!state.ready);$('step3').classList.toggle('active',state.ready);
- $('render').disabled=busy||!$('reviewed').checked||!draft.some(m=>m.approved);
- $('save').disabled=busy||!dirty;$('feedbackSave').disabled=busy;
+ $('render').disabled=busy||staleDraft||!$('reviewed').checked||!draft.some(m=>m.approved);
+ $('save').disabled=busy||staleDraft||!dirty;$('feedbackSave').disabled=busy;
  $('saveState').textContent=dirty?'Unsaved changes. Save or render to keep them.':'Edits saved in this session.';
  $('moments').querySelectorAll('button').forEach(b=>b.disabled=busy);
  if(!state.ready)$('clips').replaceChildren(...state.clips.map(c=>{
@@ -82,16 +102,18 @@ function show(){
  }));
  if(state.directed&&!state.ready){
   const d=state.directed;$('summary').textContent=`${draft.filter(m=>m.approved).length} moments / ${d.seconds.toFixed(1)} seconds saved`;
+  $('durationTruth').textContent=durationTruth(d);
+  $('durationTruth').classList.toggle('warning',Math.abs(Number(d.plan.settings.targetSeconds)-Number(d.seconds))>.08);
   if(!$('savedSettings').textContent.startsWith('Saved edit settings restored:'))restoreSavedSettings(d.plan.settings);
   renderEditorialProposal(d.editorialProposal);
   const omitted=d.coverage?.omitted||[];$('coverage').textContent=omitted.length?`Not in the saved edit: ${omitted.join(', ')}. Replace a moment to include that source.`:`All ${state.clips.length} source clips are represented in the saved edit.`;
   $('coverage').classList.toggle('warning',!!omitted.length);
   $('explanation').textContent=[d.plan.director,...d.plan.warnings].join('\n\n');
  }
- else renderEditorialProposal(null);
+ else {renderEditorialProposal(null);$('durationTruth').textContent='';$('durationTruth').classList.remove('warning');}
  if(state.ready){
   if(!$('reel').getAttribute('src'))$('reel').src='/api/reel';
-  $('reelDimensions').textContent=`${state.receipt.width} × ${state.receipt.height}`;
+  $('reelDimensions').textContent=`${state.receipt.width} x ${state.receipt.height}`;
   $('reelTime').textContent=durationLabel(Math.round(state.receipt.seconds));
   $('receipt').textContent=`${state.receipt.moments} moments rendered in the ${state.receipt.profile}. Complete-file decoding passed. Uploaded source copies deleted. Download it, put it in iCloud Drive, then test playback on your phone.`;
   for(const k of Object.keys(labels))if(typeof state.feedback[k]==='boolean')$('fb-'+k).value=String(state.feedback[k]);
@@ -144,7 +166,8 @@ $('keepMoment').onclick=()=>{
  draft[draft.findIndex(x=>x.id===m.id)]=m;changed();renderMoments();$('editor').close();
 };
 async function wait(){while((await refresh()).busy)await sleep(850);if(state.error)throw Error(state.error);}
-async function operate(fn){if(running)return;running=true;cancelled=false;clearError();show();try{await fn();}catch(e){error(e);}finally{running=false;uploading=false;show();}}
+async function operate(fn){if(staleDraft){error(Error('Reload this page before changing a conflicting edit.'));return;}if(running)return;running=true;cancelled=false;clearError();show();try{await fn();}catch(e){error(e);}finally{running=false;uploading=false;show();}}
+function submittedRevision(){if(staleDraft)throw Error('Reload this page before submitting a conflicting edit.');return draftRevision>=0?draftRevision:state.revision;}
 async function sendChunk(id,offset,blob){
  chunkController=new AbortController();const timer=setTimeout(()=>chunkController?.abort(),45000);
  try{return await decode(await fetch(`/api/upload-chunk/${id}`,{method:'PUT',credentials:'same-origin',headers:{'X-Compass-CSRF':state.csrf,'X-Upload-Offset':String(offset)},body:blob,signal:chunkController.signal}));}
@@ -169,29 +192,43 @@ $('files').onchange=()=>operate(async()=>{
  if(files.length+state.clips.length>maxClips)throw Error(`Choose up to ${maxClips} clips for this test.`);
  const maxBytes=state.limits?.bytesPerClip||750*1024*1024;
  if(files.some(f=>f.size>maxBytes||f.size===0))throw Error(`Each clip must be nonempty and smaller than ${Math.floor(maxBytes/1024/1024)} MB.`);
+ // Commit local trims before analysis advances the project revision. A stale
+ // revision fails here, before any upload can replace this local draft.
+ if(dirty){await request('/api/review',{revision:submittedRevision(),moments:draft});await wait();}
  uploading=true;show();for(const f of files){if(cancelled)break;await upload(f);}await refresh();
 });
 $('plan').onclick=()=>operate(async()=>{
  const targetSeconds=Number($('length').value);
  const compilationApproved=targetSeconds<=60||confirm(`This ${durationLabel(targetSeconds)} stays vertical at 720 × 1280 and can take longer to render. Keep this private page open, then download the MP4 to iCloud Drive. Continue?`);
  if(!compilationApproved)return;
- await request('/api/plan',{revision:state.revision,mode:$('mode').value,style:$('style').value,targetSeconds,transitions:$('transitions').value,gentleCleanup:$('cleanup').checked,prompt:$('prompt').value,compilationApproved,previousMoments:state.directed?draft:null});
+ await request('/api/plan',{revision:submittedRevision(),mode:$('mode').value,style:$('style').value,targetSeconds,transitions:$('transitions').value,gentleCleanup:$('cleanup').checked,prompt:$('prompt').value,compilationApproved,previousMoments:state.directed?draft:null});
  await wait();$('reviewed').checked=false;$('review').scrollIntoView({block:'start'});
 });
-$('save').onclick=()=>operate(async()=>{await request('/api/review',{revision:state.revision,moments:draft});await wait();});
+$('save').onclick=()=>operate(async()=>{await request('/api/review',{revision:submittedRevision(),moments:draft});await wait();});
 $('reviewed').onchange=show;
-$('render').onclick=()=>operate(async()=>{await request('/api/render',{revision:state.revision,reviewed:$('reviewed').checked,moments:draft});await wait();$('result').scrollIntoView({block:'start'});});
+$('render').onclick=()=>operate(async()=>{await request('/api/render',{revision:submittedRevision(),reviewed:$('reviewed').checked,moments:draft});await wait();$('result').scrollIntoView({block:'start'});});
 $('cancel').onclick=async()=>{cancelled=true;chunkController?.abort();try{await request('/api/cancel');await wait();}catch(e){error(e);}};
-$('clear').onclick=()=>{if(!confirm('Delete test copies and the finished reel? Your original Photos videos are unchanged.'))return;operate(async()=>{await request('/api/clear');prepared=null;draftRevision=-1;dirty=false;$('reel').pause();$('reel').removeAttribute('src');$('reel').load();$('share').textContent='Prepare iPhone share';await refresh();});};
+$('clear').onclick=()=>{if(!confirm('Delete test copies and the finished reel? Your original Photos videos are unchanged.'))return;operate(async()=>{await request('/api/clear');prepared=null;draftRevision=-1;dirty=false;staleDraft=false;$('reel').pause();$('reel').removeAttribute('src');$('reel').load();$('share').textContent='Prepare iPhone share';await refresh();});};
 for(const b of document.querySelectorAll('[data-prompt]'))b.onclick=()=>{
  $('prompt').value=b.dataset.prompt;
+ generatedPromptTarget=Number(b.dataset.target)||null;
  if(b.dataset.target)$('length').value=b.dataset.target;
+};
+$('prompt').oninput=()=>{generatedPromptTarget=null;};
+$('length').onchange=()=>{
+ if(!generatedPromptTarget)return;
+ const seconds=Number($('length').value);
+ const label=`${seconds} seconds`;
+ $('prompt').value=$('prompt').value.replace(/^\s*(?:\d+\s*(?:seconds?|secs?|minutes?|mins?)|\d+\s*min)\s*,?\s*/i,`${label}, `);
+ generatedPromptTarget=seconds;
 };
 $('share').onclick=async()=>{
  try{
-  if(!prepared){$('share').disabled=true;const r=await fetch('/api/reel',{credentials:'same-origin'});if(!r.ok||!r.headers.get('content-type')?.startsWith('video/mp4'))throw Error('The reel is unavailable, or private-link login expired.');
+  if(!prepared){const shareSession=state.csrf,shareRevision=state.revision;$('share').disabled=true;const r=await fetch('/api/reel',{credentials:'same-origin'});if(!r.ok||!r.headers.get('content-type')?.startsWith('video/mp4'))throw Error('The reel is unavailable, or private-link login expired.');
    if(Number(r.headers.get('content-length'))>160*1024**2)throw Error('Use Download MP4 for this large reel.');
-   prepared=new File([await r.blob()],'Concert-Compass-Test.mp4',{type:'video/mp4'});$('share').textContent='Share video / Save Video';$('shareNote').textContent='Ready. Tap again to open the share sheet. Choose Save Video if available.';return;
+   const blob=await r.blob();
+   if(!state.ready||state.csrf!==shareSession||state.revision!==shareRevision)throw Error('The reel changed while preparing. Prepare the current reel again.');
+   prepared=new File([blob],'Concert-Compass-Test.mp4',{type:'video/mp4'});$('share').textContent='Share video / Save Video';$('shareNote').textContent='Ready. Tap again to open the share sheet. Choose Save Video if available.';return;
   }
   // The second user tap preserves Safari activation instead of awaiting a fetch.
   if(navigator.canShare?.({files:[prepared]}))await navigator.share({files:[prepared],title:'Concert Compass'});

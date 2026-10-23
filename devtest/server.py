@@ -155,9 +155,15 @@ class Session:
                     with self.lock:
                         self.clips.append(clip)
                         self.bytes += size
-                        self.directed = None
+                        # Adding footage must never erase a reviewed cut.  Keep its
+                        # trims, locks and rejects intact; the new clip is shown as
+                        # omitted until the owner explicitly replans or replaces a
+                        # moment.  Re-annotate only derived coverage/review hints.
+                        if self.directed:
+                            self.directed = annotate(self.directed, self.clips)
                         self.revision += 1
-                        self.status = 'Clip ready. Add another or plan your reel.'
+                        self.status = ('Clip ready. Your saved edit is unchanged; the new source is not in it yet.'
+                                       if self.directed else 'Clip ready. Add another or plan your reel.')
                         self.progress = 1
                 except Exception:
                     for suffix in ('.mov', '.preview.mp4', '.poster.jpg'):

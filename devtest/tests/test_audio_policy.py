@@ -4,6 +4,9 @@ from __future__ import annotations
 import array
 import math
 import subprocess
+import struct
+import tempfile
+import wave
 import sys
 import time
 import tracemalloc
@@ -54,14 +57,25 @@ class AudioPolicyTests(unittest.TestCase):
     def test_ffmpeg_fragment_reduces_the_same_generated_phase_flip(self):
         """Exercise the exact fragment handed to the bounded FFmpeg assembler."""
         fragment = AudioPolicy(seam_smoothing=True).seam_filter(.04)
-        command = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-f", "lavfi", "-i", "aevalsrc=0.8:s=48000:d=0.1",
-            "-f", "lavfi", "-i", "aevalsrc=-0.8:s=48000:d=0.1",
-            "-filter_complex", f"[0:a][1:a]{fragment}[a]", "-map", "[a]",
-            "-f", "f32le", "pipe:1",
-        ]
-        raw = subprocess.check_output(command)
+        # File-backed PCM matches production segment inputs. Two short lavfi
+        # sources intermittently terminate early on FFmpeg 7.1.5 even with
+        # exit status zero; do not weaken the exact sample-count assertion.
+        with tempfile.TemporaryDirectory(prefix='compass-audio-fixture-') as root:
+            paths = [str(Path(root) / f'{i}.wav') for i in range(2)]
+            for path, value in zip(paths, (.8, -.8)):
+                with wave.open(path, 'wb') as output:
+                    output.setnchannels(1)
+                    output.setsampwidth(2)
+                    output.setframerate(48_000)
+                    output.writeframes(struct.pack('<h', round(value * 32767)) * 4_800)
+            command = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                "-threads", "2", "-filter_threads", "1", "-filter_complex_threads", "1",
+                "-i", paths[0], "-i", paths[1],
+                "-filter_complex", f"[0:a][1:a]{fragment}[a]", "-map", "[a]",
+                "-f", "f32le", "pipe:1",
+            ]
+            raw = subprocess.check_output(command)
         samples = array.array("f"); samples.frombytes(raw)
         frames = [(sample,) for sample in samples]
         self.assertEqual(len(frames), 7_680)  # .1 + .1 - .04 seconds

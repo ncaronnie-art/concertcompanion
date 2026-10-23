@@ -133,6 +133,39 @@ class GuardrailTests(unittest.TestCase):
         fresh=self.wait();m=fresh['directed']['plan']['moments'][0]
         self.assertEqual(m['focusX'],.2);self.assertTrue(m['muted']);self.assertEqual(m['duration'],.5)
         self.assertEqual(self.state()['revision'],fresh['revision'])
+    def test_07b_adding_source_preserves_saved_trims_locks_and_rejections(self):
+        s=self.plan();moments=copy.deepcopy(s['directed']['plan']['moments'])
+        moments[0].update(start=0,duration=.5,focusX=.2,focusY=.7,locked=True)
+        if len(moments)>1: moments[-1]['approved']=False
+        self.assertEqual(self.post('/api/review',{'revision':s['revision'],'moments':moments})[0],202)
+        saved=self.wait();original=copy.deepcopy(saved['directed']['plan']['moments'])
+        b=self.fixture.read_bytes();upload=self.start(len(b))
+        self.assertEqual(self.chunk(upload,0,b)[0],200)
+        self.assertEqual(self.post('/api/uploads/finish',{'id':upload})[0],202)
+        after=self.wait()
+        self.assertEqual(after['directed']['plan']['moments'],original)
+        self.assertIn('Clip 2',after['directed']['coverage']['omitted'])
+        self.assertIn('saved edit is unchanged',after['status'])
+    def test_07c_source_addition_preserves_review_without_swift(self):
+        # Seed a valid reviewed EDL, then exercise real HTTP upload/analysis.
+        # This checks the upload mutation, not Swift planning or rendering.
+        session=next(iter(server.SESSIONS.values()))
+        clip=dict(id='source-A',name='Clip 1',duration=90,hasAudio=True,width=180,height=320)
+        kept=dict(id='chorus',clipID='source-A',start=10,duration=45,approved=True,
+                  locked=True,muted=False,focusX=.2,focusY=.7,role='peak',score=.8)
+        rejected={**kept,'id':'reject','start':60,'duration':5,'approved':False,'locked':False}
+        plan=dict(settings=engine.settings_from({'targetSeconds':60}),moments=[kept,rejected])
+        session.clips=[clip]
+        session.directed=server.annotate(dict(plan=copy.deepcopy(plan),timeline=[dict(at=0,moment=kept)]),session.clips)
+        b=self.fixture.read_bytes();upload=self.start(len(b))
+        self.assertEqual(self.chunk(upload,0,b)[0],200)
+        self.assertEqual(self.post('/api/uploads/finish',{'id':upload})[0],202)
+        after=self.wait()
+        self.assertEqual(after['directed']['plan'],plan)
+        self.assertEqual(after['directed']['seconds'],45)
+        self.assertEqual(after['directed']['coverage']['omitted'],['Clip 2'])
+        self.assertEqual(after['revision'],1)
+
     def test_08_old_revision_cannot_overwrite_new_edit(self):
         s=self.plan();payload={'revision':s['revision'],'moments':s['directed']['plan']['moments']}
         self.assertEqual(self.post('/api/review',payload)[0],202);self.wait()

@@ -342,7 +342,8 @@ class Handler(BaseHTTPRequestHandler):
         name = os.environ.get('CODESPACE_NAME')
         domain = os.environ.get('GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN', 'app.github.dev').lower()
         host = self.headers.get('Host', '').lower()
-        allowed = {f'http://127.0.0.1:{self.server.server_port}', f'http://localhost:{self.server.server_port}'}
+        allowed = {f'http://127.0.0.1:{self.server.server_port}', f'http://localhost:{self.server.server_port}',
+                   f'https://localhost:{self.server.server_port}'}
         if name:
             allowed.add(f'https://{name}-{PORT}.{domain}')
         # A Codespaces port URL is normally derived from CODESPACE_NAME. In

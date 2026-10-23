@@ -211,21 +211,21 @@ class GuardrailTests(unittest.TestCase):
         self.assertEqual(self.call('POST','/api/cancel','{}',{**self.h,'Sec-Fetch-Site':'cross-site'})[0],403)
         self.assertEqual(self.call('POST','/api/cancel','{}',{**headers,'X-Compass-CSRF':'invalid'})[0],403)
 
-    def test_15c_private_proxy_accepts_its_actual_same_origin_host(self):
+    def test_15c_private_proxy_requires_exact_configured_instance(self):
         # Some Codespaces proxy routes use a browser host that does not match
         # CODESPACE_NAME. Same-origin requests for the private forwarded port
         # must work, while a different Origin remains blocked.
-        host = 'actual-private-test-8765.app.github.dev'
-        headers = {**self.h, 'Host': host, 'Origin': f'https://{host}',
+        host = 'exact-test-8765.app.github.dev'
+        headers = {**self.h, 'Host': 'localhost:'+str(self.http.server_port), 'Origin': f'https://{host}',
                    'Sec-Fetch-Site': 'cross-site'}
         with patch.dict(server.os.environ, {
-                'CODESPACE_NAME': 'different-codespace',
+                'CODESPACE_NAME': 'exact-test',
                 'GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN': 'app.github.dev'}):
             self.assertEqual(self.call('POST','/api/cancel','{}',headers)[0],200)
             self.assertEqual(self.call('POST','/api/cancel','{}',
-                             {**headers, 'Origin': 'https://evil.invalid'})[0],403)
+                             {**headers, 'Origin': 'https://other-test-8765.app.github.dev'})[0],403)
 
-    def test_15d_private_proxy_accepts_forwarded_origin_with_local_backend_host(self):
+    def test_15d_private_proxy_rejects_forwarded_unconfigured_origin(self):
         # The Codespaces proxy can send the browser's private forwarded origin
         # while the backend sees a local Host header. CSRF still guards writes.
         origin = 'https://actual-private-test-8765.app.github.dev'
@@ -233,7 +233,7 @@ class GuardrailTests(unittest.TestCase):
         with patch.dict(server.os.environ, {
                 'CODESPACE_NAME': 'different-codespace',
                 'GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN': 'app.github.dev'}):
-            self.assertEqual(self.call('POST','/api/cancel','{}',headers)[0],200)
+            self.assertEqual(self.call('POST','/api/cancel','{}',headers)[0],403)
             self.assertEqual(self.call('POST','/api/cancel','{}',
                              {**headers, 'Origin': 'https://evil.invalid'})[0],403)
             self.assertEqual(self.call('POST','/api/cancel','{}',

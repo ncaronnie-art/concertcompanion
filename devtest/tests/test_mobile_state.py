@@ -60,6 +60,9 @@ class MobileStateTests(unittest.TestCase):
         self.assertIn('function durationTruth(directed)', source)
         self.assertIn('Nothing is padded, looped, stretched, or invented.', source)
         self.assertIn('extend and lock an approved source moment', source)
+        self.assertIn('AbortController', source)
+        self.assertIn('Connection interrupted. Retrying observation', source)
+        self.assertIn('statusSeconds', source)
 
     @unittest.skipUnless(sync_playwright, "Playwright is not installed in this quality container")
     def test_saved_visible_settings_restore_in_a_fresh_document(self):

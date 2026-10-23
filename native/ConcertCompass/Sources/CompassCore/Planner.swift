@@ -30,7 +30,27 @@ public enum Planner {
         let available = free.values.flatMap { $0 }.reduce(0) { $0 + $1.duration } + locks.values.reduce(0) { $0 + $1.duration }
         guard available >= 0.1 else { throw CompassError.invalid("All footage is rejected. Restore a moment or add another clip.") }
         let desiredCount = Int((min(settings.targetSeconds, available) / settings.style.averageShot).rounded())
-        let count = min(Timeline.maximumMoments, max(1, max(desiredCount, (locks.keys.max() ?? -1) + 1)))
+        var count = min(Timeline.maximumMoments, max(1, max(desiredCount, (locks.keys.max() ?? -1) + 1)))
+        // A dissolve consumes a short span from both source clips while presenting it
+        // once in the output.  Do not silently reuse or loop footage merely to keep
+        // every requested dissolve in a long compilation.  If the unique remaining
+        // material cannot cover a target-length reel plus the minimum transition
+        // windows, prefer honest cuts and disclose that downgrade.
+        if settings.transitions == .dissolves {
+            let overlap = 0.32
+            // With n five-second source segments, dissolves yield at most
+            // n * (5 - overlap) + overlap seconds of output.  Conversely,
+            // target output needs target + (n - 1) * overlap seconds of
+            // unique source.  Keep the shot count inside both bounds.
+            let minimumMoments = max(1, Int(ceil((settings.targetSeconds - overlap) / (5.0 - overlap))))
+            let maximumMomentsFromUniqueSource = max(0, Int(floor((available - settings.targetSeconds) / overlap)) + 1)
+            if available + 0.002 >= settings.targetSeconds && maximumMomentsFromUniqueSource < minimumMoments {
+                settings.transitions = .cuts
+                warnings.append("Used cuts instead of requested dissolves so the complete target can use unique source footage without looping or stretching clips.")
+            } else {
+                count = max(minimumMoments, min(count, maximumMomentsFromUniqueSource))
+            }
+        }
         let roles = Timeline.roles(count: count, mode: settings.mode)
         let lockedDuration = locks.values.reduce(0) { $0 + $1.duration }
         let estimatedOverlap = settings.transitions == .dissolves ? 0.32 : settings.transitions == .automatic && (settings.style == .cinematic || settings.style == .memory) ? 0.07 : 0

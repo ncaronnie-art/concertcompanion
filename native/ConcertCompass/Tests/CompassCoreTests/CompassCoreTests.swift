@@ -55,6 +55,21 @@ final class CompassCoreTests: XCTestCase {
         XCTAssertEqual(Timeline.duration(plan), 300, accuracy: 0.08)
         try Timeline.validate(plan, clips: clips)
     }
+    func testDissolveRequestFallsBackToCutsBeforeReusingFootage() throws {
+        let clips = [source(105), source(105), source(105)]
+        let plan = try Planner.propose(clips: clips, settings: makeSettings(300, transition: .dissolves))
+        XCTAssertEqual(plan.settings.transitions, .cuts)
+        XCTAssertEqual(Timeline.duration(plan), 300, accuracy: 0.08)
+        XCTAssertTrue(plan.warnings.contains { $0.contains("without looping or stretching") })
+        assertNoRepeatedSourceRanges(plan)
+    }
+    func testDissolvesStayEnabledWhenUniqueFootageCoversTheirWindows() throws {
+        let clips = [source(110), source(110), source(110)]
+        let plan = try Planner.propose(clips: clips, settings: makeSettings(300, transition: .dissolves))
+        XCTAssertEqual(plan.settings.transitions, .dissolves)
+        XCTAssertEqual(Timeline.duration(plan), 300, accuracy: 0.08)
+        assertNoRepeatedSourceRanges(plan)
+    }
     func testDefaultPlanUsesSeveralSources() throws {
         let clips = [source(20), source(20), source(20)]
         let plan = try Planner.propose(clips: clips, settings: makeSettings())

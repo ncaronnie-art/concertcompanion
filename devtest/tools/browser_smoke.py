@@ -77,11 +77,15 @@ try:
         expect(page.locator('#work')).to_be_hidden(timeout=30000)
         assert page.locator('#error').is_hidden(),page.locator('#error').inner_text()
         page.locator('#reel').scroll_into_view_if_needed()
-        page.wait_for_function("document.getElementById('reel').readyState >= 2",timeout=30000)
+        # Locator evaluation is Playwright's protocol API, not string evaluation in
+        # page JavaScript.  It remains compatible with the application's strict CSP.
+        page.locator('#reel').evaluate('''video => video.readyState >= 2 ? Promise.resolve() :
+            new Promise(resolve => video.addEventListener('loadeddata', resolve, {once:true}))''')
         duration=page.locator('#reel').evaluate('(v)=>v.duration')
         assert abs(duration-15)<.16,duration
         page.locator('#reel').evaluate('(v)=>{v.muted=true;v.currentTime=14.4;return v.play();}')
-        page.wait_for_function("document.getElementById('reel').ended",timeout=10000)
+        page.locator('#reel').evaluate('''video => new Promise(resolve =>
+            video.addEventListener('ended', resolve, {once:true}))''')
         checks.append('Complete 15-second result decodes and plays to its end in Chromium')
         with page.expect_download() as dl:
             page.locator('#download').click()

@@ -90,6 +90,10 @@ class MobileStateTests(unittest.TestCase):
                 self.assertEqual(page.locator("#prompt").input_value(), state["directed"]["plan"]["settings"]["prompt"])
                 self.assertIn("Saved edit settings restored", page.locator("#savedSettings").inner_text())
                 self.assertFalse(page.locator("#editorialProposal").is_hidden())
+                # A closed <details> intentionally has no rendered innerText. Verify
+                # its supplied content, then open it before asserting visible copy.
+                self.assertIn("Review-only suggestion", page.locator("#editorialProposalSummary").text_content())
+                page.locator("#editorialProposal summary").click()
                 self.assertIn("Review-only suggestion", page.locator("#editorialProposalSummary").inner_text())
                 self.assertIn("no trim or lock has changed", page.locator("#editorialProposalDetail").inner_text())
                 page.close()

@@ -92,6 +92,11 @@ class QualityTests(unittest.TestCase):
         clips=[self.clip(0)];d=self.manual(clips);self.cancel.set()
         with self.assertRaises(engine.TestError): engine.render(self.root,clips,d,self.cancel,lambda *_:None)
         self.assertFalse((self.root/'reel.mp4').exists())
+    def test_e2_cancelled_preview_keeps_sources(self):
+        clips=[self.clip(0)]; directed=self.manual(clips); self.cancel.set()
+        with self.assertRaises(engine.TestError): engine.render(self.root,clips,directed,self.cancel,lambda *_:None,preview=True)
+        self.assertTrue((self.root/clips[0]['fileName']).exists())
+        self.assertFalse((self.root/'preview.mp4').exists())
     def test_f_invalid_trim_blocked_by_core(self):
         clips=[self.clip(0)];d=self.manual(clips);d['plan']['moments'][0]['start']=90
         with self.assertRaises(engine.TestError):engine.direct(self.root,clips,d['plan']['settings'],self.cancel,plan=d['plan'])

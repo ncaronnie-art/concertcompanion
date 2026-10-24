@@ -201,7 +201,12 @@ class IntactCLIIntegrationTests(unittest.TestCase):
         durations = [300/17]*17
         selected = [moment(self.sources[0], i*durations[0], d) for i,d in enumerate(durations)]
         previous = dict(version=1, settings=self.settings, moments=selected, warnings=[], director='Selected')
-        self.assertGreater(sum(durations), 300)
+        # Builtin sum uses compensated addition on newer Python versions.
+        # Model the OLD adapter's sequential reduce explicitly instead.
+        sequential = 0.0
+        for duration in durations:
+            sequential += duration
+        self.assertGreater(sequential, 300)
         self.assertEqual(math.fsum(durations), 300)
         result = self.direct(previous=previous)
         self.assertEqual(result['plan']['moments'], selected)

@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let state=null, draft=[], draftRevision=-1, dirty=false, staleDraft=false, running=false, uploading=false;
-let prepared=null, cancelled=false, chunkController=null, editing=null, expiryAt=0, generatedPromptTarget=null;
+let prepared=null, cancelled=false, chunkController=null, editing=null, expiryAt=0, generatedPromptTarget=null, observationStopped=false;
 const explicitSettings=new Set();
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const labels={completePlayback:'Every moment plays to the end',soundInSync:'Picture and sound stay in sync',savedToPhotos:'Saved to Photos',photosSound:'Replays in Photos with sound',capturesNight:'It captures the night',wouldShare:'I would share this'};
@@ -90,6 +90,7 @@ async function refresh(){
  }
  if(state&&(next.revision!==state.revision||next.ready!==state.ready))discardPreparedMedia();
  state=next;expiryAt=Date.now()+next.expiresIn*1000;
+ observationStopped=false;$('resumeStatus').hidden=true;
  if(next.directed&&next.revision!==draftRevision){
   if(dirty&&!running)throw Error('A newer edit was saved in another tab. Reload this page before making changes.');
   draft=structuredClone(next.directed.plan.moments);draftRevision=next.revision;dirty=false;restoreSavedSettings(next.directed.plan.settings);restoreWizard(next.directed.wizard);renderMoments();
@@ -192,7 +193,7 @@ $('keepMoment').onclick=()=>{
  if(!clip||![m.start,m.duration,m.focusX,m.focusY].every(Number.isFinite)||m.start<0||m.duration<.1||m.start+m.duration>clip.duration+.002){$('editorError').textContent='Keep the trim inside this clip, with a length of at least 0.1 seconds.';return;}
  draft[draft.findIndex(x=>x.id===m.id)]=m;changed();renderMoments();$('editor').close();
 };
-async function wait(){let failures=0;while(true){try{const next=await refresh();failures=0;if(!next.busy)break;}catch(e){if(++failures>3)throw e;$('status').textContent=`Connection interrupted. Retrying observation (${failures}/3); your job was not submitted again.`;await sleep(1000*failures);continue;}await sleep(850);}if(state.error)throw Error(state.error);}
+async function wait(){let failures=0;while(true){try{const next=await refresh();failures=0;if(!next.busy)break;}catch(e){if(++failures>3){observationStopped=true;$('resumeStatus').hidden=false;throw Error('Connection checks stopped. Resume checking status; your job was not submitted again.');}$('status').textContent=`Connection interrupted. Retrying observation (${failures}/3); your job was not submitted again.`;await sleep(1000*failures);continue;}await sleep(850);}if(state.error)throw Error(state.error);}
 async function operate(fn){if(staleDraft){error(Error('Reload this page before changing a conflicting edit.'));return;}if(running)return;running=true;cancelled=false;clearError();show();try{await fn();}catch(e){error(e);}finally{running=false;uploading=false;show();}}
 function submittedRevision(){if(staleDraft)throw Error('Reload this page before submitting a conflicting edit.');return draftRevision>=0?draftRevision:state.revision;}
 async function sendChunk(id,offset,blob){
@@ -235,6 +236,7 @@ $('save').onclick=()=>operate(async()=>{await request('/api/review',{revision:su
 $('reviewed').onchange=show;
 $('render').onclick=()=>operate(async()=>{await request('/api/render',{revision:submittedRevision(),reviewed:$('reviewed').checked,moments:draft});await wait();$('result').scrollIntoView({block:'start'});});
 $('cancel').onclick=async()=>{cancelled=true;chunkController?.abort();try{await request('/api/cancel');await wait();}catch(e){error(e);}};
+$('resumeStatus').onclick=()=>operate(wait);
 $('clear').onclick=()=>{if(!confirm('Delete test copies and the finished reel? Your original Photos videos are unchanged.'))return;operate(async()=>{await request('/api/clear');prepared=null;draftRevision=-1;dirty=false;staleDraft=false;$('reel').pause();$('reel').removeAttribute('src');$('reel').load();$('share').textContent='Prepare iPhone share';await refresh();});};
 for(const b of document.querySelectorAll('[data-prompt]'))b.onclick=()=>{
  $('prompt').value=b.dataset.prompt;

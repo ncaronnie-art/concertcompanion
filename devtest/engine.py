@@ -22,9 +22,11 @@ class TestError(Exception):
 
 def run(args: list[str], cancel: Event | None = None, timeout: int = 180) -> bytes:
     # Child processes get no GitHub tokens, cloud credentials, or request data in env.
-    env = {k: os.environ[k] for k in ('PATH', 'HOME', 'LANG', 'LD_LIBRARY_PATH') if k in os.environ}
+    # Windows needs its system/runtime directories even with a restricted env.
+    env = {k: os.environ[k] for k in ('PATH', 'HOME', 'LANG', 'LD_LIBRARY_PATH',
+                                    'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP') if k in os.environ}
     p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                         env=env, start_new_session=True)
+                         env=env, start_new_session=os.name == 'posix')
     deadline = time.monotonic() + timeout
     try:
         while True:
@@ -46,7 +48,15 @@ def run(args: list[str], cancel: Event | None = None, timeout: int = 180) -> byt
         return out
     finally:
         if p.poll() is None:
-            os.killpg(p.pid, signal.SIGKILL)
+            try:
+                if os.name == 'posix':
+                    os.killpg(p.pid, signal.SIGKILL)
+                else:
+                    # Direct executable, never a shell/launcher. FFmpeg workers
+                    # are threads; terminate only this owned process on Windows.
+                    p.kill()
+            except ProcessLookupError:
+                pass  # The child exited between poll and termination; still reap it.
             p.communicate()
 
 
@@ -173,7 +183,19 @@ def color_filter(video):
     return ''
 
 
-def analyze(path: Path, number: int, cancel: Event):
+def visual_analysis_filter(video):
+    # Keep the same 1 Hz sample timestamps and full-resolution HDR transform.
+    # Drop unused frames BEFORE expensive tone mapping, not after. Do not seek
+    # only to keyframes or replace measurements with proxy/placeholder values.
+    return 'fps=1:start_time=0,' + color_filter(video) + 'scale=64:64,format=gray'
+
+
+def analyze(path: Path, number: int, cancel: Event, *, make_preview: bool = True):
+    """Measure source signals; headless planning can omit optional UI media.
+
+    make_preview=False returns the identical analysis record without encoding
+    a proxy/poster. It does not skip audio/visual measurement or alter renders.
+    """
     # Restrict the demuxer before inspecting untrusted uploads. Playlists must
     # not be able to reference files elsewhere in this development container.
     info = json.loads(run(['ffprobe', '-v', 'error', '-protocol_whitelist', 'file,pipe',
@@ -213,7 +235,7 @@ def analyze(path: Path, number: int, cancel: Event):
                               clipping=sum(abs(x)>.985 for x in bins[i])/max(1, len(bins[i]))))
             last = energy
     analysis_timeout = max(180, min(720, math.ceil(duration * 4)))
-    raw = ff(['-ss', ff_time(timing['seekOrigin'])] + inp(path) + ['-t', str(duration), '-vf', color_filter(video)+'fps=1:start_time=0,scale=64:64,format=gray',
+    raw = ff(['-ss', ff_time(timing['seekOrigin'])] + inp(path) + ['-t', str(duration), '-vf', visual_analysis_filter(video),
                          '-an', '-f', 'rawvideo', 'pipe:1'], cancel, analysis_timeout)
     visual, previous = [], None
     for i in range(0, len(raw)-4095, 4096):
@@ -228,6 +250,8 @@ def analyze(path: Path, number: int, cancel: Event):
                 width=width, height=height, hasAudio=has_audio, mediaStart=0,
                 audioCoverage=timing['audioCoverage'],
                 audio=audio, visual=visual, warnings=['Linux image difference is a motion proxy, not camera-shake recognition.'])
+    if not make_preview:
+        return clip
     proxy = path.with_suffix('.preview.mp4')
     ff(['-ss', ff_time(timing['seekOrigin'])] + inp(path) + ['-t', str(duration), '-map', '0:v:0', '-map', '0:a:0?',
         '-vf', color_filter(video)+'scale=540:960:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,fps=30:start_time=0,format=yuv420p',

@@ -3,6 +3,10 @@ const $ = id => document.getElementById(id);
 let state=null, draft=[], draftRevision=-1, dirty=false, staleDraft=false, running=false, uploading=false;
 let prepared=null, cancelled=false, chunkController=null, editing=null, expiryAt=0, generatedPromptTarget=null, observationStopped=false, refreshSequence=0, clearPending=false, previewIdentity='';
 const explicitSettings=new Set();
+// File references only: no media bytes, paths or catalog entries go to storage
+// or the server until explicit activation. Reload requires reselecting files.
+const catalog=[], CATALOG_LIMIT=500, CATALOG_PAGE=25;
+let catalogPage=0, catalogMatches=[], localPreviewURL=null;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const labels={completePlayback:'Every moment plays to the end',soundInSync:'Picture and sound stay in sync',savedToPhotos:'Saved to Photos',photosSound:'Replays in Photos with sound',capturesNight:'It captures the night',wouldShare:'I would share this'};
 function error(e){const text=e.message||String(e);$('error').textContent=text;$('error').hidden=false;}
@@ -14,6 +18,100 @@ function discardPreparedMedia(){
 }
 function text(tag,value,className){const el=document.createElement(tag);el.textContent=value;if(className)el.className=className;return el;}
 function button(label,fn,className=''){const b=text('button',label,className);b.type='button';b.onclick=fn;return b;}
+function catalogActive(entry){return !!state&&!state.ready&&!!entry.binding&&entry.binding.session===state.csrf&&state.clips.some(c=>c.id===entry.binding.id);}
+function catalogIncluded(id){return !!state?.directed&&(state.directed.plan.moments.some(m=>m.approved&&m.clipID===id)||(state.directed.wizard?.audioMode==='single-source'&&state.directed.wizard.audioClipID===id));}
+function catalogProblem(entry){
+ const maxBytes=state?.limits?.bytesPerClip||750*1024**2, maxSeconds=state?.limits?.secondsPerClip||300;
+ if(!entry.file.size)return 'Empty file; cannot activate';
+ if(entry.file.size>maxBytes)return `Local only: exceeds ${Math.floor(maxBytes/1024**2)} MiB per active source`;
+ if(Number.isFinite(entry.duration)&&(entry.duration<.15||entry.duration>maxSeconds+.04))return `Local only: active sources must be 0.15–${maxSeconds} seconds`;
+ return '';
+}
+function catalogSelected(){return catalog.filter(e=>e.selected&&!e.excluded&&!catalogActive(e));}
+function checkCatalogActivation(entries){
+ if(!state||state.busy||state.ready||staleDraft)throw Error('Finish or clear the current test before activating sources. Local originals are unchanged.');
+ if(!entries.length)throw Error('Select local sources to activate first.');
+ const limit=state.limits?.clips||3;
+ if(state.clips.length+entries.length>limit)throw Error(`At most ${limit} active sources per test, not unlimited-source compilation.`);
+ if(entries.some(e=>e.excluded||catalogActive(e)||catalogProblem(e)))throw Error('An excluded, active, empty, oversized or unsupported-duration source cannot be activated.');
+ const used=state.clips.length?state.sourceBytes:0;
+ if(!Number.isSafeInteger(used)||used<0)throw Error('Refresh to obtain the current active-source byte count before activation.');
+ if(used+entries.reduce((n,e)=>n+e.file.size,0)>(state.limits?.projectBytes||2*1024**3))throw Error('Selected sources exceed the 2 GiB active-project budget. Choose fewer or smaller files.');
+}
+function addCatalogFiles(files, separate=false){
+ let added=0, unsupported=0, overflow=0, matched=0;
+ if(!separate)catalogMatches=[];
+ for(const file of files){
+  if(!/\.(mov|mp4|m4v)$/i.test(file.name)){unsupported++;continue;}
+  // Metadata is a reselection hint, NEVER proof of equal media. Keep the
+  // existing File reference/exclusion and allow explicit separate indexing.
+  const key=JSON.stringify([file.name,file.size,file.lastModified,file.webkitRelativePath||'']);
+  if(!separate&&catalog.some(e=>e.key===key)){
+   matched++;if(catalogMatches.length<CATALOG_LIMIT)catalogMatches.push(file);continue;
+  }
+  if(catalog.length>=CATALOG_LIMIT){overflow++;continue;}
+  catalog.push({file,key,excluded:false,selected:false,binding:null,duration:null});added++;
+ }
+ $('catalogNotice').textContent=[`${added} local references added; nothing uploaded.`,
+  matched?`${matched} metadata matches kept their existing references and exclusions. Equal metadata is not proof of duplicates; add separately if these are different files.`:'',
+  unsupported?`${unsupported} unsupported files not indexed. Use MOV, MP4 or M4V; ZIP extraction is not supported.`:'',
+  overflow?`${overflow} not indexed: this tab is limited to ${CATALOG_LIMIT} local references.`:''].filter(Boolean).join(' ');
+ renderCatalog();
+}
+function chooseCatalog(){
+ if(!state||state.busy||running||uploading||state.ready||staleDraft)return;
+ for(const entry of catalog)entry.selected=false;
+ let slots=(state.limits?.clips||3)-state.clips.length;
+ let bytes=state.clips.length?state.sourceBytes:0;
+ if(!Number.isSafeInteger(bytes)){$('catalogNotice').textContent='Refresh before choosing: active-source byte count is unavailable.';renderCatalog();return;}
+ for(const entry of catalog){
+  if(slots<=0)break;
+  if(entry.excluded||catalogActive(entry)||catalogProblem(entry)||bytes+entry.file.size>(state.limits?.projectBytes||2*1024**3))continue;
+  entry.selected=true;slots--;bytes+=entry.file.size;
+ }
+ $('catalogNotice').textContent=`Selected ${catalogSelected().length} eligible files in import order, not by musical quality. No new files analyzed or uploaded. Activate them, then use Make my first cut to auto-generate a preview.`;
+ renderCatalog();
+}
+function closeLocalPreview(){
+ const player=$('localPlayer');player.pause();player.removeAttribute('src');player.load();
+ if(localPreviewURL){URL.revokeObjectURL(localPreviewURL);localPreviewURL=null;}
+}
+function watchCatalog(entry){
+ closeLocalPreview();localPreviewURL=URL.createObjectURL(entry.file);
+ $('localTitle').textContent=entry.file.name;
+ $('localPlaybackNote').textContent='Local playback only; not analyzed or included in an edit. Some camera codecs cannot play in this browser.';
+ const player=$('localPlayer');
+ player.onloadedmetadata=()=>{if(Number.isFinite(player.duration)){entry.duration=player.duration;if(catalogProblem(entry))entry.selected=false;renderCatalog();}};
+ player.onerror=()=>{$('localPlaybackNote').textContent='This browser could not play the local file. Activation can create a compatible preview if the source meets the test limits.';};
+ player.src=localPreviewURL;$('localPreview').showModal();
+}
+function renderCatalog(){
+ if(!state)return;
+ const busy=state.busy||running||uploading, active=state.ready?[]:state.clips;
+ const selected=catalogSelected(), limit=state.limits?.clips||3;
+ $('catalogSummary').textContent=`${catalog.length} local indexed · ${catalog.filter(e=>e.excluded).length} excluded · ${active.length} analyzed in this test · ${active.filter(c=>catalogIncluded(c.id)).length} included in saved edit. Maximum ${limit} active sources.`;
+ $('chooseCatalog').disabled=busy||state.ready||staleDraft||!catalog.length||active.length>=limit;
+ $('activateCatalog').disabled=busy||state.ready||staleDraft||!selected.length;
+ $('activateCatalog').textContent=`Activate & analyze ${selected.length} selected`;
+ $('catalogMatches').hidden=!catalogMatches.length;$('catalogMatches').disabled=busy;
+ catalogPage=Math.max(0,Math.min(catalogPage,Math.ceil(catalog.length/CATALOG_PAGE)-1));
+ $('catalogPage').textContent=catalog.length?`Page ${catalogPage+1} of ${Math.ceil(catalog.length/CATALOG_PAGE)}`:'No local files indexed';
+ $('catalogBack').disabled=catalogPage===0;$('catalogNext').disabled=(catalogPage+1)*CATALOG_PAGE>=catalog.length;
+ $('catalogList').replaceChildren(...catalog.slice(catalogPage*CATALOG_PAGE,(catalogPage+1)*CATALOG_PAGE).map(entry=>{
+  const row=text('article','','catalog-entry'), isActive=catalogActive(entry), problem=catalogProblem(entry);
+  const label=text('label','','check'), select=document.createElement('input');select.type='checkbox';select.checked=entry.selected;
+  select.disabled=busy||state.ready||staleDraft||entry.excluded||isActive||!!problem;
+  select.setAttribute('aria-label',`Select ${entry.file.name} for activation`);
+  select.onchange=()=>{entry.selected=select.checked;renderCatalog();};
+  label.append(select,text('b',entry.file.name));
+  const status=isActive?`Analyzed · ${catalogIncluded(entry.binding.id)?'included in saved edit':'not included in saved edit'}`:entry.excluded?'Excluded from rotation · local reference kept':'Local indexed · not analyzed in this test';
+  const details=`${(entry.file.size/1024**2).toFixed(1)} MiB · ${Number.isFinite(entry.duration)?entry.duration.toFixed(2)+'s':'duration checked on activation'}${problem?' · '+problem:''}`;
+  const actions=text('div','','row'), watch=button('Watch locally',()=>watchCatalog(entry),'quiet');watch.disabled=busy;
+  const exclude=button(entry.excluded?'Restore to rotation':'Exclude from rotation',()=>{entry.excluded=!entry.excluded;entry.selected=false;renderCatalog();},'quiet');
+  exclude.disabled=busy||isActive;exclude.title=isActive?'Active sources remain in this test. Reject moments in review, or clear the test before choosing another set.':'';
+  actions.append(watch,exclude);row.append(label,text('small',status),text('small',details),actions);return row;
+ }));
+}
 function timecode(value){return `${Math.floor(value/60)}:${(value%60).toFixed(1).padStart(4,'0')}`;}
 function durationLabel(seconds){
  if(seconds===300)return '5 min compilation';
@@ -141,8 +239,9 @@ function show(){
  const busy=state.busy||running||uploading, pending=pendingSettings();
  $('work').hidden=!busy;$('status').textContent=state.status;$('progress').value=state.progress;
  $('workNote').textContent=state.statusSeconds>8?`Still ${state.status.toLowerCase()} (${state.statusSeconds}s elapsed). Keep this page open; a connection retry does not restart the job.`:'Keep this page open during uploads and preparation. Completed uploads and saved edits stay in this session.';
- const clipLimit=state.limits?.clips||3;
- $('files').disabled=busy||state.ready||state.clips.length>=clipLimit;
+ $('files').disabled=busy;
+ $('hero').hidden=state.ready;
+ renderCatalog();
  $('plan').disabled=busy||staleDraft||state.ready||!state.clips.length;$('clear').disabled=busy;
  for(const id of ['preset','aspectRatio','audioMode','audioClipID','audioStart','prompt','mode','style','length','transitions','cleanup','preserveSections'])$(id).disabled=busy||state.ready;
  const transitionLabels=$('preserveSections').checked?{automatic:'Soft boundary fades',cuts:'Cuts only',dissolves:'Soft boundary fades (no overlap)'}:{automatic:'Automatic',cuts:'Cuts only',dissolves:'Dissolves'};
@@ -161,9 +260,9 @@ function show(){
  $('save').textContent='Update preview';
  $('saveState').textContent=pending?'Output settings changed. Choose Apply settings and preview, or restore saved settings before export.':dirty?'Edits changed. Update preview before export.':!state.previewReady?'Saved edit has no current preview. Choose Update preview to retry; your sources are kept.':'Edits saved in this session.';
  $('moments').querySelectorAll('button').forEach(b=>b.disabled=busy);
- if(!state.ready)$('clips').replaceChildren(...state.clips.map(c=>{
+ $('clips').replaceChildren(...(state.ready?[]:state.clips).map(c=>{
   const el=document.createElement('div');el.className='source';const img=document.createElement('img');img.alt='';img.src=`/api/poster/${c.id}`;
-  const info=document.createElement('div');info.append(text('b',c.name),text('small',`${c.duration.toFixed(1)}s / ${c.hasAudio?'original sound':'silent source'} / ready`));el.append(img,info);return el;
+  const info=document.createElement('div');info.append(text('b',c.name),text('small',`${c.duration.toFixed(1)}s / ${c.hasAudio?'original sound':'silent source'} / analyzed / ${catalogIncluded(c.id)?'included in saved edit':'not included in saved edit'}`));el.append(img,info);return el;
  }));
  $('audioClipWrap').hidden=$('audioMode').value!=='single-source';$('audioStartWrap').hidden=$('audioMode').value!=='single-source';
  if(state.directed&&!state.ready){
@@ -245,8 +344,9 @@ async function sendChunk(id,offset,blob){
  try{return await decode(await fetch(`/api/upload-chunk/${id}`,{method:'PUT',credentials:'same-origin',headers:{'X-Compass-CSRF':state.csrf,'X-Upload-Offset':String(offset)},body:blob,signal:chunkController.signal}));}
  finally{clearTimeout(timer);chunkController=null;}
 }
-async function upload(file){
- const u=await request('/api/uploads',{size:file.size});let offset=0,failures=0;
+async function upload(file,onReserved=()=>{}){
+ const session=state.csrf,u=await request('/api/uploads',{size:file.size});let offset=0,failures=0;
+ onReserved({session,id:u.id});
  try{
   while(offset<file.size){
    if(cancelled)throw Error('Upload stopped. Completed clips are still here.');
@@ -256,18 +356,30 @@ async function upload(file){
   }
   if(cancelled)throw Error('Upload stopped.');
   await request('/api/uploads/finish',{id:u.id});await wait();
+  return u.id;
  }catch(e){try{await request('/api/cancel');}catch{}throw e;}
 }
-$('files').onchange=()=>operate(async()=>{
- const files=[...$('files').files];$('files').value='';
- const maxClips=state.limits?.clips||3;
- if(files.length+state.clips.length>maxClips)throw Error(`Choose up to ${maxClips} clips for this test.`);
- const maxBytes=state.limits?.bytesPerClip||750*1024*1024;
- if(files.some(f=>f.size>maxBytes||f.size===0))throw Error(`Each clip must be nonempty and smaller than ${Math.floor(maxBytes/1024/1024)} MB.`);
+$('files').onchange=()=>{const files=[...$('files').files];$('files').value='';if(!state?.busy&&!running&&!uploading)addCatalogFiles(files);};
+$('chooseCatalog').onclick=chooseCatalog;
+$('catalogMatches').onclick=()=>{const matches=catalogMatches;catalogMatches=[];addCatalogFiles(matches,true);};
+$('catalogBack').onclick=()=>{catalogPage--;renderCatalog();};
+$('catalogNext').onclick=()=>{catalogPage++;renderCatalog();};
+$('localPreview').onclose=closeLocalPreview;
+$('activateCatalog').onclick=()=>operate(async()=>{
+ const entries=catalogSelected(), session=state.csrf;
+ checkCatalogActivation(entries);
+ if(pendingSettings())throw Error('Apply or restore pending output settings before activating more sources.');
  // Commit local trims before analysis advances the project revision. A stale
  // revision fails here, before any upload can replace this local draft.
  if(dirty){await request('/api/review',{revision:submittedRevision(),moments:draft});await wait();}
- uploading=true;show();for(const f of files){if(cancelled)break;await upload(f);}await refresh();
+ checkCatalogActivation(entries);
+ uploading=true;show();
+ for(const entry of entries){
+  if(cancelled)break;
+  if(state.csrf!==session)throw Error('The test session changed. Local references are kept; select sources again.');
+  await upload(entry.file,binding=>{entry.binding=binding;});entry.selected=false;
+ }
+ await refresh();
 });
 $('plan').onclick=()=>{
  const revision=snapshotRevision();if(revision===null)return;

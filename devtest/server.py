@@ -105,7 +105,7 @@ class Session:
                 error=self.error, ready=self.ready, revision=self.revision,
                 statusSeconds=max(0, int(time.monotonic() - self.status_since)),
                 clips=[{k: c[k] for k in ('id', 'name', 'duration', 'hasAudio', 'width', 'height')} for c in self.clips],
-                directed=self.directed, upload=self.upload_state(),
+                directed=self.directed, upload=self.upload_state(), sourceBytes=self.bytes,
                 feedback=self.feedback, receipt=self.receipt, previewReady=self.preview_revision == self.revision,
                 expiresIn=max(0, int(remaining)),
                 limits=dict(clips=MAX_CLIPS, bytesPerClip=MAX_UPLOAD, projectBytes=MAX_PROJECT,

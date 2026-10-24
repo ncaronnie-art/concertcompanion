@@ -82,11 +82,11 @@ checks.push('reverse-order stale failure cannot stop or replace current observat
 fetcher=async()=>({headers:{get:key=>key==='content-type'?'application/json':null},ok:true,json:async()=>next});
 for(const seconds of [15,30,45,60,90,120,180,300]){chip.onclick();$('length').value=String(seconds);$('length').onchange();assert.equal($('prompt').value,`${seconds} seconds, cinematic, soft transitions`);}
 checks.push('all eight generated target directives use exact integer seconds');
-ui.set({state:old,draft:[{id:'chorus',duration:45}],dirty:true});$('files').files=[{size:1}];const calls=[];
+ui.set({state:old,draft:[{id:'chorus',duration:45}],dirty:true});$('files').files=[{name:'chorus.mov',size:1,lastModified:1}];const calls=[];
 ui.override(async(path,body)=>{calls.push(path);assert.equal(body.revision,7);assert.equal(body.moments[0].duration,45);},async()=>{calls.push('saved');},async()=>{calls.push('upload');});
-next=old;await $('files').onchange();assert.deepEqual(calls,['/api/review','saved','upload']);checks.push('dirty draft saved with base revision before upload');
-ui.set({state:old,draft:[{id:'chorus'}],dirty:true});$('files').files=[{size:1}];let uploads=0;
-ui.override(async()=>{throw Error('revision conflict');},async()=>{},async()=>{uploads++;});await $('files').onchange();assert.equal(uploads,0);assert.equal(ui.get().dirty,true);checks.push('save conflict prevents upload and retains local draft');
+next=old;await $('files').onchange();assert.equal(calls.length,0);$('chooseCatalog').onclick();await $('activateCatalog').onclick();assert.deepEqual(calls,['/api/review','saved','upload']);checks.push('local indexing does not upload; activation saves dirty draft with base revision first');
+ui.set({state:old,draft:[{id:'chorus'}],dirty:true});let uploads=0;$('chooseCatalog').onclick();
+ui.override(async()=>{throw Error('revision conflict');},async()=>{},async()=>{uploads++;});await $('activateCatalog').onclick();assert.equal(uploads,0);assert.equal(ui.get().dirty,true);checks.push('save conflict prevents activation upload and retains local draft');
 ui.set({state:rendered});let finishBlob;fetcher=async()=>({ok:true,headers:{get:k=>k==='content-type'?'video/mp4':'1'},blob:()=>new Promise(r=>{finishBlob=r;})});
 const pending=$('share').onclick();await new Promise(r=>setImmediate(r));assert.equal(typeof finishBlob,'function');ui.set({state:{...rendered,revision:10}});finishBlob('old video');await pending;assert.equal(ui.get().prepared,null);checks.push('in-flight old share cannot repopulate cache after export changes');
 // UI integrity regressions: fresh hydration, running responses and interrupted previews.

@@ -20,6 +20,8 @@ Open the private forwarded port after signing into GitHub. Use up to three sourc
 
 The browser uploads files; it does not use MediaRecorder or canvas capture. HEVC decoding and H.264 rendering happen on Linux. This reduces dependence on browser encoding APIs, but does not prove the Codespaces authentication, file-picker, upload, playback or Photos-save round trip.
 
+The local catalog indexes up to 500 user-selected MOV/MP4/M4V references in this tab, 25 rows at a time; indexing does not upload or analyze media. Exclude/restore and local playback leave originals untouched. Reloading or leaving the page requires reselecting files and exclusions; no media or catalog is persisted in browser storage. Matching filename/size/date metadata is only a reselection hint, not duplicate detection, and different files can explicitly be indexed separately. ZIP extraction is not supported. “Choose for me” selects eligible files in import order, not by musical quality; only explicit activation uploads and analyzes the bounded selection. The three-active-source, per-source duration/size, project-byte and render limits remain unchanged. Active sources stay in the current edit: use existing moment rejection or explicitly clear the test before choosing another set. Local catalog references survive session cleanup/export, but source copies and completed exports retain the existing deletion rules. This is not unlimited-source compilation; additional range splitting remains separate work.
+
 ## Engineering reproduction
 
 In a development environment with Swift, Python 3 and FFmpeg:

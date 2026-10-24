@@ -38,7 +38,12 @@ class AudioTimelineTests(unittest.TestCase):
                     'color=black:s=160x90:r=30:d=3,drawbox=color=white:t=fill:enable=between(t\\,0.5\\,0.6)',
                     '-itsoffset', str(audio_start), '-f', 'lavfi', '-i',
                     f'aevalsrc={tone}|0.5*{tone}:s={rate}:d=3',
-                    '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'pcm_s16le', str(path)])
+                    # FFmpeg 6.1's automatic video sync duplicates the first
+                    # frames to fill a positive offset. Preserve timestamps
+                    # explicitly so every supported version tests the same
+                    # early/late stream relationship, not a different source.
+                    '-c:v', 'libx264', '-preset', 'ultrafast', '-fps_mode', 'passthrough',
+                    '-c:a', 'pcm_s16le', str(path)])
                 cls.sources[rate, name] = path
 
     @classmethod
@@ -83,6 +88,20 @@ class AudioTimelineTests(unittest.TestCase):
 
     def onset(self, samples):
         return next((i/48000 for i, value in enumerate(samples) if abs(value) > .1), None)
+
+    def test_generated_offsets_are_real_stream_offsets_without_duplicate_frames(self):
+        offsets = {'late': (0, .25), 'early': (.3, 0),
+                   'both-offset': (.3, .55), 'aligned': (0, 0)}
+        for (rate, name), source in self.sources.items():
+            with self.subTest(rate=rate, source=name):
+                streams = engine.probe(source)['streams']
+                video = next(s for s in streams if s['codec_type'] == 'video')
+                audio = next(s for s in streams if s['codec_type'] == 'audio')
+                expected_video, expected_audio = offsets[name]
+                self.assertAlmostEqual(float(video['start_time']), expected_video, delta=.000001)
+                self.assertAlmostEqual(float(audio['start_time']), expected_audio, delta=.000001)
+                self.assertAlmostEqual(float(video['duration']), 3, delta=.000001)
+                self.assertEqual(int(video['nb_frames']), 90)
 
     def test_pcm_preserves_shared_origin_for_early_late_and_offset_sources(self):
         for (rate, name), source in self.sources.items():

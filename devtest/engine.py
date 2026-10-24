@@ -3,6 +3,7 @@ from __future__ import annotations
 import array, copy, json, math, os, signal, subprocess, sys, time, uuid
 from pathlib import Path
 from threading import Event
+from fractions import Fraction
 from audio.policy import AudioPolicy
 
 HERE = Path(__file__).resolve().parent
@@ -63,6 +64,109 @@ def probe(path: Path, cancel=None):
                           '-show_streams', '-show_format', '-of', 'json', str(path)], cancel, 30))
 
 
+def stream_seconds(stream, key):
+    """Read a finite stream timestamp, preferring its unrounded time base."""
+    ticks_key = 'start_pts' if key == 'start_time' else 'duration_ts'
+    try:
+        value = float(int(stream[ticks_key]) * Fraction(stream['time_base']))
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        try:
+            value = float(stream[key])
+        except (KeyError, TypeError, ValueError):
+            return None
+    return value if math.isfinite(value) else None
+
+
+def ff_time(seconds):
+    # FFmpeg's duration parser does not accept Python's scientific notation.
+    # Nanosecond precision is well below one audio sample, including offsets
+    # caused by the format's six-decimal timestamp rounding.
+    return f'{seconds:.9f}'
+
+
+def source_timing(info):
+    """Clip times are relative to the first video timestamp, not each stream.
+
+    FFmpeg's input -ss is relative to format.start_time. Audio may begin before
+    or after video; subtracting its own STARTPTS would move the performance.
+    An unknown audio extent is not evidence of continuous soundtrack coverage.
+    """
+    video = next(s for s in info['streams'] if s['codec_type'] == 'video'
+                 and not s.get('disposition', {}).get('attached_pic'))
+    try:
+        format_start = float(info.get('format', {}).get('start_time', 0))
+    except (TypeError, ValueError):
+        raise TestError('The source has an unsupported media timeline.')
+    video_start = stream_seconds(video, 'start_time')
+    if not math.isfinite(format_start) or video_start is None:
+        raise TestError('The source has an unsupported media timeline.')
+    audio = next((s for s in info['streams'] if s['codec_type'] == 'audio'), None)
+    coverage = None
+    if audio is not None:
+        start, length = stream_seconds(audio, 'start_time'), stream_seconds(audio, 'duration')
+        try:
+            rate = int(audio.get('sample_rate', 0))
+        except (TypeError, ValueError):
+            rate = 0
+        if start is not None and length is not None and length > 0 and rate > 0:
+            coverage = dict(start=start-video_start, end=start+length-video_start,
+                            sampleRate=rate)
+    return dict(video=video, seekOrigin=video_start-format_start,
+                videoStart=video_start, audioCoverage=coverage)
+
+
+def segment_audio_filter(source_length, length, rate=48000):
+    # Input seeking already established the shared video-relative origin.
+    # Keep real leading/trailing gaps in original moment audio in their original
+    # positions. This is not used for a continuous bed, which must be covered.
+    # async=1 alone leaves gaps below its default 100ms hard-correction
+    # threshold collapsed. Correct real timestamp holes down to one output
+    # sample; disable soft compensation explicitly so music is never sped up
+    # or slowed down. Continuous beds never use this gap-preserving filter.
+    threshold = ff_time(1 / rate)
+    return (f'atrim=start=0:end={source_length},aresample={rate}:async=1:first_pts=0:'
+            f'min_comp={threshold}:min_hard_comp={threshold}:max_soft_comp=0,'
+            f'apad,atrim=duration={length}')
+
+
+def continuous_audio_source(root, clips, wizard, duration, cancel=None, deadline=None):
+    """Validate the actual selected audio interval before rendering pictures.
+
+    Stream extents reject missing heads/tails, including sub-AAC-frame gaps.
+    A bounded PCM count additionally rejects missing packets inside that extent.
+    Neither check inserts silence, loops, or time-stretches the soundtrack.
+    """
+    if wizard.get('audioMode') != 'single-source':
+        return None
+    master = next((c for c in clips if c['id'] == wizard.get('audioClipID')), None)
+    start = wizard.get('audioStart', 0)
+    if (not master or not master.get('hasAudio') or type(start) not in (int, float)
+            or not math.isfinite(start) or start < 0 or not math.isfinite(duration) or duration <= 0):
+        raise TestError('Choose an audible source and a finite start for continuous audio.')
+    if duration > MAX_CLIP_SECONDS:
+        raise TestError('One continuous audio source supports at most five minutes.')
+    path = root / master['fileName']
+    timing = source_timing(probe(path, cancel))
+    coverage = timing['audioCoverage']
+    # One source sample allows time-base rounding, not an AAC packet or frame.
+    tolerance = 1 / coverage['sampleRate'] + 1e-9 if coverage else 0
+    if (not coverage or start < coverage['start'] - tolerance
+            or start + duration > coverage['end'] + tolerance):
+        raise TestError('The selected continuous audio interval is not fully covered by source audio. Choose another start, a shorter edit, or original audio per moment; it will not loop or pad.')
+    seek = timing['seekOrigin'] + start
+    timeout = max(60, min(720, math.ceil(duration * 4)))
+    if deadline is not None:
+        timeout = min(timeout, remaining_render_time(deadline))
+    raw = ff(['-ss', ff_time(seek)] + inp(path) +
+             ['-map', '0:a:0', '-vn', '-af', f'atrim=start=0:end={duration},aresample=48000',
+              '-t', str(duration), '-ac', '1', '-ar', '48000', '-f', 's16le', 'pipe:1'],
+             cancel, timeout)
+    expected_samples = round(duration * 48000)
+    if len(raw) // 2 < expected_samples - 1:
+        raise TestError('The selected source has missing audio within this interval. Choose another source or original audio per moment; it will not loop or pad.')
+    return dict(path=path, seek=seek)
+
+
 def color_filter(video):
     if video.get('color_transfer') in ('smpte2084', 'arib-std-b67'):
         return 'zscale=t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,'
@@ -79,6 +183,7 @@ def analyze(path: Path, number: int, cancel: Event):
     if not videos or not {'mov', 'mp4', 'm4v'}.intersection(info.get('format', {}).get('format_name', '').split(',')):
         raise TestError('Choose a camera MOV or MP4 video, not a playlist or another file type.')
     video = videos[0]
+    timing = source_timing(info)
     duration = float(video.get('duration') or info['format'].get('duration', 0))
     width, height = int(video['width']), int(video['height'])
     if not math.isfinite(duration) or not 0.15 <= duration <= MAX_CLIP_SECONDS + 0.04:
@@ -92,7 +197,10 @@ def analyze(path: Path, number: int, cancel: Event):
     audio = []
     if has_audio:
         analysis_timeout = max(180, min(720, math.ceil(duration * 4)))
-        raw = ff(inp(path) + ['-t', str(duration), '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-f', 'f32le', 'pipe:1'], cancel, analysis_timeout)
+        raw = ff(['-ss', ff_time(timing['seekOrigin'])] + inp(path) +
+                 ['-t', str(duration), '-map', '0:a:0', '-vn',
+                  '-af', segment_audio_filter(duration, duration, 16000),
+                  '-ac', '1', '-ar', '16000', '-f', 'f32le', 'pipe:1'], cancel, analysis_timeout)
         samples = array.array('f'); samples.frombytes(raw)
         if sys.byteorder != 'little': samples.byteswap()
         bins = [samples[i:i + 1600] for i in range(0, len(samples), 1600)]
@@ -105,7 +213,7 @@ def analyze(path: Path, number: int, cancel: Event):
                               clipping=sum(abs(x)>.985 for x in bins[i])/max(1, len(bins[i]))))
             last = energy
     analysis_timeout = max(180, min(720, math.ceil(duration * 4)))
-    raw = ff(inp(path) + ['-t', str(duration), '-vf', color_filter(video)+'fps=1,scale=64:64,format=gray',
+    raw = ff(['-ss', ff_time(timing['seekOrigin'])] + inp(path) + ['-t', str(duration), '-vf', color_filter(video)+'fps=1:start_time=0,scale=64:64,format=gray',
                          '-an', '-f', 'rawvideo', 'pipe:1'], cancel, analysis_timeout)
     visual, previous = [], None
     for i in range(0, len(raw)-4095, 4096):
@@ -118,10 +226,12 @@ def analyze(path: Path, number: int, cancel: Event):
         previous = pixels
     clip = dict(id=path.stem.upper(), name=f'Clip {number}', fileName=path.name, duration=duration,
                 width=width, height=height, hasAudio=has_audio, mediaStart=0,
+                audioCoverage=timing['audioCoverage'],
                 audio=audio, visual=visual, warnings=['Linux image difference is a motion proxy, not camera-shake recognition.'])
     proxy = path.with_suffix('.preview.mp4')
-    ff(inp(path) + ['-t', str(duration), '-map', '0:v:0', '-map', '0:a:0?',
-        '-vf', color_filter(video)+'scale=540:960:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,fps=30,format=yuv420p',
+    ff(['-ss', ff_time(timing['seekOrigin'])] + inp(path) + ['-t', str(duration), '-map', '0:v:0', '-map', '0:a:0?',
+        '-vf', color_filter(video)+'scale=540:960:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,fps=30:start_time=0,format=yuv420p',
+        '-af', segment_audio_filter(duration, duration),
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24', '-threads', '2', '-c:a', 'aac', '-ar', '48000', '-ac', '2',
         '-map_metadata', '-1', '-movflags', '+faststart', str(proxy)], cancel, analysis_timeout)
     # The proxy keeps its natural aspect ratio. CSS cover + object-position
@@ -254,8 +364,9 @@ def _render(root, clips, directed, cancel, progress, preview=False):
     duration = shots[-1]['at'] + shots[-1]['moment']['duration']
     settings = directed['plan']['settings']
     wizard = directed.get('wizard', {})
-    profile = output_profile(settings['targetSeconds'], wizard.get('aspectRatio', '9:16'))
     deadline = render_deadline(duration)
+    master_audio = continuous_audio_source(root, clips, wizard, duration, cancel, deadline)
+    profile = output_profile(settings['targetSeconds'], wizard.get('aspectRatio', '9:16'))
     audio_policy = AudioPolicy.from_settings(settings)
     if settings.get('stabilize'):
         raise TestError('This test does not implement stabilization.')
@@ -265,13 +376,18 @@ def _render(root, clips, directed, cancel, progress, preview=False):
         source = root / clip['fileName']
         length = moment['duration']
         source_length = shot['_sourceDuration']
-        video = next(s for s in probe(source, cancel)['streams'] if s['codec_type'] == 'video')
+        timing = source_timing(probe(source, cancel))
+        video = timing['video']
         target = root / f'segment-{i}.mkv'
-        args = ['-ss', str(moment['start'])] + inp(source)
+        args = ['-ss', ff_time(timing['seekOrigin'] + moment['start'])] + inp(source)
         audible = clip['hasAudio'] and not moment['muted']
+        coverage = timing['audioCoverage']
+        if coverage and (moment['start'] >= coverage['end'] or
+                         moment['start'] + source_length <= coverage['start']):
+            audible = False  # This original video interval has no source audio.
         if not audible: args += ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']
-        vf = f'trim=duration={source_length},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=0.067,'+color_filter(video)+f'scale={profile["width"]}:{profile["height"]}:force_original_aspect_ratio=increase,crop={profile["width"]}:{profile["height"]}:(iw-ow)*{moment["focusX"]}:(ih-oh)*{moment["focusY"]},setsar=1,fps=30,format=yuv420p'
-        af = f'atrim=duration={source_length},asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0,apad,atrim=duration={length}'
+        vf = f'trim=start=0:end={source_length},tpad=stop_mode=clone:stop_duration=0.067,'+color_filter(video)+f'scale={profile["width"]}:{profile["height"]}:force_original_aspect_ratio=increase,crop={profile["width"]}:{profile["height"]}:(iw-ow)*{moment["focusX"]}:(ih-oh)*{moment["focusY"]},setsar=1,fps=30:start_time=0,format=yuv420p'
+        af = segment_audio_filter(source_length, length)
         af += audio_policy.segment_suffix()
         args += ['-map','0:v:0','-map','0:a:0' if audible else '1:a:0', '-t',str(length), '-vf',vf, '-af',af,
                  '-c:v','libx264','-preset','veryfast','-crf',str(profile['crf']),'-threads','2','-x264-params','colorprim=bt709:transfer=bt709:colormatrix=bt709',
@@ -280,14 +396,12 @@ def _render(root, clips, directed, cancel, progress, preview=False):
         segment_timeout = min(remaining_render_time(deadline), max(180, min(600, math.ceil(length * 30))))
         ff(args,cancel,segment_timeout); segments.append(target); progress((i+1)/len(shots)*.65, 'Rendering selected moments')
     pending = assemble_bounded(root, segments, shots, duration, cancel, progress, audio_policy, profile, deadline)
-    if wizard.get('audioMode') == 'single-source':
-        master = by_id.get(wizard.get('audioClipID'))
-        start = wizard.get('audioStart', 0)
-        if not master or not master.get('hasAudio') or not isinstance(start, (int, float)) or start < 0 or start + duration > master['duration'] + .002:
-            raise TestError('The selected continuous audio source cannot cover this reel without looping.')
+    if master_audio:
         remux = root / 'master-pending.mp4'
-        ff(['-ss', str(start)] + inp(root / master['fileName']) + inp(pending) +
-           ['-map','1:v:0','-map','0:a:0','-t',str(duration),'-c:v','copy','-c:a','aac','-b:a','192k','-ar','48000','-ac','2','-map_metadata','-1','-movflags','+faststart',str(remux)], cancel, remaining_render_time(deadline))
+        ff(['-ss', ff_time(master_audio['seek'])] + inp(master_audio['path']) + inp(pending) +
+           ['-map','1:v:0','-map','0:a:0','-t',str(duration),
+            '-af',f'atrim=start=0:end={duration}',
+            '-c:v','copy','-c:a','aac','-b:a','192k','-ar','48000','-ac','2','-map_metadata','-1','-movflags','+faststart',str(remux)], cancel, remaining_render_time(deadline))
         pending.unlink(); remux.replace(pending)
     progress(.94, 'Decoding the complete output and checking sound timing')
     verify(pending,duration,cancel,profile,deadline)
@@ -402,9 +516,14 @@ def verify(path, expected, cancel, profile=None, deadline=None):
         decode_timeout = min(decode_timeout, remaining_render_time(deadline))
     ff(['-xerror'] + inp(path) + ['-map', '0:v:0', '-map', '0:a:0',
         '-f', 'null', '-'], cancel, decode_timeout)
-    vd = float(v.get('duration', expected))
-    ad = float(a.get('duration', expected))
-    if not all(math.isfinite(t) for t in (vd, ad)) or abs(vd-ad) > .12:
-        raise TestError('Video and audio end times disagree. This reel was not published.')
+    vs, vd = stream_seconds(v, 'start_time'), stream_seconds(v, 'duration')
+    aus, ad = stream_seconds(a, 'start_time'), stream_seconds(a, 'duration')
+    # AAC's final packet can extend by one 1024-sample frame. This codec
+    # allowance is NOT the source-coverage test, which runs before rendering.
+    audio_tolerance = 1024 / 48000 + .002
+    if (None in (vs, vd, aus, ad) or abs(vs) > .002 or abs(aus) > .002
+            or abs(vs + vd - expected) > 1 / 30 + .002
+            or abs(aus + ad - expected) > audio_tolerance):
+        raise TestError('Video and audio start or end positions disagree. This reel was not published.')
     if path.stat().st_size > MAX_OUTPUT_BYTES:
         raise TestError('The completed reel is too large for this private desktop export.')

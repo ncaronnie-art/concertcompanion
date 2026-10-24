@@ -57,7 +57,7 @@ def wizard_from(body, previous=None, clips=None):
     if audio == 'single-source':
         clip_id = raw.get('audioClipID', previous.get('audioClipID') if previous else None)
         start = raw.get('audioStart', previous.get('audioStart', 0) if previous else 0)
-        if not isinstance(clip_id, str) or type(start) not in (int, float) or start < 0:
+        if not isinstance(clip_id, str) or type(start) not in (int, float) or not math.isfinite(start) or start < 0:
             raise engine.TestError('Choose an audible source and start for continuous audio.')
         if clips and not any(c['id'] == clip_id and c['hasAudio'] and start < c['duration'] for c in clips):
             raise engine.TestError('Choose an uploaded source with audio for continuous audio.')
@@ -574,10 +574,9 @@ class Handler(BaseHTTPRequestHandler):
                             # Recheck its visible result so wording cannot bypass the UI's
                             # explicit long-compilation confirmation.
                             require_directed_compilation_approval(result, body.get('compilationApproved'))
-                            if wizard['audioMode'] == 'single-source':
-                                source = next(c for c in s.clips if c['id'] == wizard['audioClipID'])
-                                if wizard['audioStart'] + result['timeline'][-1]['at'] + result['timeline'][-1]['moment']['duration'] > source['duration'] + .002:
-                                    raise engine.TestError('That continuous audio source is shorter than this first cut. Choose a shorter target, another source, or original audio per moment; it will not loop or pad.')
+                            # The renderer validates the frame-aligned interval
+                            # against actual audio, not video duration, before
+                            # rendering any pictures (including older sessions).
                             with s.lock:
                                 s.directed = annotate(result, s.clips)
                                 s.directed['wizard'] = wizard

@@ -88,6 +88,45 @@ class IntactContractTests(unittest.TestCase):
             self.assertLessEqual(abs(shot['at'] - i*.101), 1/30)
         self.assertLessEqual(shots[-1]['at'] + shots[-1]['moment']['duration'] - duration, 1/30)
 
+    def test_exact_limit_retains_bounded_samples_without_rejecting_or_truncating(self):
+        for durations in ([100.0000125, 100.0000125, 99.999975], [300/7]*7, [150, 150]):
+            with self.subTest(durations=durations):
+                timeline = [dict(at=0, overlap=0, incoming='cut', moment=dict(duration=d)) for d in durations]
+                original = copy.deepcopy(timeline)
+                shots, sampled = engine.intact_frame_timeline(timeline)
+                self.assertEqual(engine.validate_intact_duration(timeline, sampled), 300)
+                expected = sum(round(d*48000) for d in durations)
+                self.assertEqual(round(sampled*48000), expected)
+                self.assertEqual(expected, 14400000 if len(durations)==2 else 14400001)
+                self.assertEqual(timeline, original)
+                self.assertLessEqual(shots[-1]['at'] + shots[-1]['moment']['duration'] - sampled, 1/30)
+
+    def test_semantic_limit_is_not_relaxed_by_sample_tolerance(self):
+        for duration in (300.001, 300.000001):
+            timeline = [dict(moment=dict(duration=duration))]
+            with self.assertRaisesRegex(engine.TestError, 'exceed 300s'):
+                engine.validate_intact_duration(timeline, round(duration*48000)/48000)
+        timeline = [dict(moment=dict(duration=100)) for _ in range(3)]
+        with self.assertRaisesRegex(engine.TestError, 'bounded output-sample rounding'):
+            engine.validate_intact_duration(timeline, (14400000+2)/48000)
+
+    def test_continuous_bed_rounds_one_interval_without_extra_section_sample(self):
+        source = clip(300)
+        durations = [100.0000125, 100.0000125, 99.999975]
+        moments = [moment(source, 0, d) for d in durations]
+        timeline = [dict(at=0, overlap=0, incoming='cut', moment=m) for m in moments]
+        directed = dict(plan=dict(settings=engine.settings_from({'preserveSections': True}), moments=moments),
+                        timeline=timeline, wizard=dict(audioMode='single-source'))
+        class ReachedCoverage(Exception):
+            pass
+        def coverage(root, clips, wizard, duration, *args):
+            self.assertEqual(duration, 300)
+            self.assertEqual(round(duration*48000), 14400000)
+            raise ReachedCoverage()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(engine, 'continuous_audio_source', side_effect=coverage):
+            with self.assertRaises(ReachedCoverage):
+                engine.render(Path(tmp), [source], directed, threading.Event(), lambda *_: None, preview=True)
+
     def test_native_model_unchanged_and_core_validation_is_used(self):
         adapter = (engine.HERE/'Sources/QualityCLI/main.swift').read_text()
         self.assertIn('timingPlan.settings.transitions = .cuts', adapter)
@@ -95,6 +134,7 @@ class IntactContractTests(unittest.TestCase):
         self.assertIn('try Timeline.build(timingPlan)', adapter)
         self.assertIn('moments = previous.moments', adapter)
         self.assertIn('try Planner.propose', adapter)
+        self.assertEqual(adapter.count('selectedSectionDuration('), 3)
 
 
 @unittest.skipUnless(engine.CLI.is_file(), 'Real Swift QualityCLI absent; do not substitute a mock planner')
@@ -155,6 +195,20 @@ class IntactCLIIntegrationTests(unittest.TestCase):
         result['plan']['moments'][-1]['duration'] = 150.001
         with self.assertRaisesRegex(engine.TestError, '300.001s.*Reject a section or unlock and trim'):
             self.direct(plan=result['plan'])
+
+    def test_exact_limit_compensates_seventeen_selected_ranges(self):
+        self.sources = [clip(300, 'full.mov')]
+        durations = [300/17]*17
+        selected = [moment(self.sources[0], i*durations[0], d) for i,d in enumerate(durations)]
+        previous = dict(version=1, settings=self.settings, moments=selected, warnings=[], director='Selected')
+        self.assertGreater(sum(durations), 300)
+        self.assertEqual(math.fsum(durations), 300)
+        result = self.direct(previous=previous)
+        self.assertEqual(result['plan']['moments'], selected)
+        checked = self.direct(plan=result['plan'])
+        self.assertEqual(checked['plan']['moments'], selected)
+        _, sampled = engine.intact_frame_timeline(checked['timeline'])
+        self.assertEqual(engine.validate_intact_duration(checked['timeline'], sampled), 300)
 
     def test_core_rejects_bad_range_and_duplicate_moment_ids(self):
         previous = self.direct()['plan']

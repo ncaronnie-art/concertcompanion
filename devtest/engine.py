@@ -370,6 +370,19 @@ def intact_frame_timeline(timeline):
     return shots, duration
 
 
+def validate_intact_duration(timeline, sampled_duration):
+    # The 300s choice limit applies to approved source time. Each intact
+    # section independently rounds to its nearest output sample; at the exact
+    # limit those preserved samples can legitimately total one sample more.
+    approved = math.fsum(shot['moment']['duration'] for shot in timeline)
+    if not math.isfinite(approved) or approved > MAX_CLIP_SECONDS:
+        raise TestError('Intact sections exceed 300s. Remove a section or unlock and trim one.')
+    quantization = len(timeline) / (2 * 48000)
+    if not math.isfinite(sampled_duration) or abs(sampled_duration - approved) > quantization + 1e-10:
+        raise TestError('Intact audio duration exceeds bounded output-sample rounding. No reel was published.')
+    return approved
+
+
 def render_deadline(duration):
     # Bound total work while leaving enough time for the intentionally
     # lower-resolution five-minute profile on two CPU cores.
@@ -399,12 +412,16 @@ def _render(root, clips, directed, cancel, progress, preview=False):
     duration = shots[-1]['at'] + shots[-1]['moment']['duration']
     if intact:
         duration = intact_duration
-        if duration > 300:
-            raise TestError('Intact sections exceed 300s. Remove a section or unlock and trim one.')
+        approved_duration = validate_intact_duration(directed['timeline'], duration)
         # Picture boundaries stay on the cumulative 30fps grid. Hold the final
         # frame for less than one frame instead of cutting the soundtrack tail.
     video_duration = shots[-1]['at'] + shots[-1]['moment']['duration']
     wizard = directed.get('wizard', {})
+    if intact and wizard.get('audioMode') == 'single-source':
+        # A continuous bed is ONE approved interval, not separately rounded
+        # section audio. Round it once and keep its real-coverage checks strict;
+        # never pad a 300s bed to cover another section's rounding sample.
+        duration = round(approved_duration * 48000) / 48000
     deadline = render_deadline(duration)
     master_audio = continuous_audio_source(root, clips, wizard, duration, cancel, deadline)
     profile = output_profile(render_target(settings, duration), wizard.get('aspectRatio', '9:16'))

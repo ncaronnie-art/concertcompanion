@@ -13,6 +13,21 @@ struct Request: Codable {
 }
 struct Response: Codable { var plan: EditPlan; var timeline: [TimelineShot]; var preserveSections: Bool }
 
+// Compensate floating-point addition rather than allowing longer selections.
+// For example, 17 selected ranges of 300/17 seconds must not become
+// 300.00000000000006 merely because the additions happened sequentially.
+func selectedSectionDuration(_ moments: [Moment]) -> Double {
+    var total = 0.0
+    var correction = 0.0
+    for moment in moments where moment.approved {
+        let adjusted = moment.duration - correction
+        let next = total + adjusted
+        correction = (next - total) - adjusted
+        total = next
+    }
+    return total
+}
+
 func intactPlan(clips: [MediaClip], settings: EditSettings, previous: EditPlan?) throws -> EditPlan {
     guard !clips.isEmpty, clips.count <= 12 else { throw CompassError.invalid("Choose up to 12 source videos first.") }
     let moments: [Moment]
@@ -27,7 +42,7 @@ func intactPlan(clips: [MediaClip], settings: EditSettings, previous: EditPlan?)
                    reason: "Complete source preserved in upload order", locked: true)
         }
     }
-    let actual = moments.filter(\.approved).reduce(0) { $0 + $1.duration }
+    let actual = selectedSectionDuration(moments)
     guard actual.isFinite, actual <= Timeline.maximumReelSeconds else {
         let choice = previous == nil
             ? "Choose Highlight montage, or clear this test and upload fewer/shorter clips."
@@ -84,7 +99,7 @@ do {
     var timingPlan = plan
     if r.preserveSections == true {
         timingPlan.settings.transitions = .cuts
-        let actual = timingPlan.moments.filter(\.approved).reduce(0) { $0 + $1.duration }
+        let actual = selectedSectionDuration(timingPlan.moments)
         guard actual.isFinite, actual <= Timeline.maximumReelSeconds else {
             throw CompassError.invalid("Your intact sections total \(String(format: "%.3f", actual))s, over the 300s limit. Reject a section or unlock and trim one; nothing was shortened automatically.")
         }

@@ -1,0 +1,4 @@
+# Capacity cap only. Does not enable tools, change permissions, or fund usage.
+# Model, effort, sandbox and approval settings inherit from the authorized session.
+[agents]
+max_concurrent_threads_per_session = 3

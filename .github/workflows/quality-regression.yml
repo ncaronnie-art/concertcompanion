@@ -1,0 +1,74 @@
+name: Concert Compass full regression
+
+on:
+  push:
+    branches:
+      - native/codespaces-quality-test
+    paths:
+      - 'devtest/**'
+      - 'native/ConcertCompass/Sources/CompassCore/**'
+      - '.github/workflows/quality-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compass-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generated-media-regression:
+    # Standard Linux runner in a public repository only. Never bill private runners.
+    if: github.event.repository.private == false && github.ref == 'refs/heads/native/codespaces-quality-test'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out source without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check Swift executable
+        run: |
+          command -v swift
+          swift --version
+      - name: Install Ubuntu FFmpeg tools when absent
+        run: |
+          set -euo pipefail
+          if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg
+          fi
+      - name: Check FFmpeg executable
+        run: |
+          command -v ffmpeg
+          ffmpeg -version
+      - name: Check FFprobe executable
+        run: |
+          command -v ffprobe
+          ffprobe -version
+      - name: Check Python and Node executables
+        run: |
+          command -v python3
+          python3 --version
+          command -v node
+          node --version
+      - name: Portable Swift planner tests
+        run: swift test --package-path native/ConcertCompass -c release -j 2
+      - name: Build quality-test CLI
+        run: swift build --package-path devtest -c release -j 2
+      - name: Check JavaScript syntax
+        run: node --check devtest/static/app.js
+      - name: Full generated-media and guardrail suite
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s devtest/tests -v
+      - name: Evidence summary
+        if: always()
+        run: |
+          {
+            echo '### Concert Compass regression'
+            echo 'Scope: portable Swift planner and Linux FFmpeg synthetic-media tests only.'
+            echo 'No Codespace, real footage, public deployment, signing, billing or physical iPhone testing.'
+            echo 'Use the step conclusions above for pass/fail. A green result is not approval to host or pay.'
+          } >> "$GITHUB_STEP_SUMMARY"

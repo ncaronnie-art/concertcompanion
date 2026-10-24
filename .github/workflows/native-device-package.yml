@@ -1,0 +1,194 @@
+name: Concert Compass - unsigned iPhone package
+
+on:
+  push:
+    branches: ['native/ios-alpha-0.1']
+    paths: ['.github/workflows/native-device-package.yml']
+  workflow_dispatch:
+
+# Read an existing successful verification run. No signing or deployment access.
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: compass-device-package-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Deliberately package the exact app revision that passed the Apple tests.
+  # Update both values together only after a new verification run succeeds.
+  SOURCE_COMMIT: 8ac25c2041718ec431acbf0e6056800bc2107227
+  VERIFIED_RUN: '38950269578'
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+
+jobs:
+  unsigned-iphone:
+    if: github.event.repository.private == false && github.ref == 'refs/heads/native/ios-alpha-0.1'
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - name: Require successful Apple verification for the pinned source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request
+          repo = os.environ['GITHUB_REPOSITORY']
+          url = f"https://api.github.com/repos/{repo}/actions/runs/{os.environ['VERIFIED_RUN']}"
+          req = urllib.request.Request(url, headers={
+              'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+          })
+          with urllib.request.urlopen(req, timeout=30) as response:
+              run = json.load(response)
+          required = (run.get('status') == 'completed' and run.get('conclusion') == 'success'
+                      and run.get('head_sha') == os.environ['SOURCE_COMMIT']
+                      and run.get('head_branch') == 'native/ios-alpha-0.1'
+                      and run.get('path') == '.github/workflows/native-verification.yml')
+          if not required:
+              raise SystemExit('Refusing to package: the pinned source has no matching successful Apple verification.')
+          print('Verified exact source revision against completed Apple workflow: ' + run['html_url'])
+          PY
+      - name: Check out the tested source only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+          persist-credentials: false
+      - name: Prepare generated project and alpha icon
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
+          cd native/ConcertCompass
+          python3 tools/prepare_assets.py
+          python3 tools/generate_xcode_project.py
+          mkdir -p qa/macos qa/iphone
+          xcodebuild -version > qa/macos/device-xcode-version.txt
+      - name: Build a real-device arm64 archive without any signing account
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd native/ConcertCompass
+          xcodebuild -project iOS/ConcertCompass.xcodeproj -scheme ConcertCompass \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/compass-device-derived" \
+            -archivePath "$RUNNER_TEMP/ConcertCompass.xcarchive" \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' DEVELOPMENT_TEAM='' \
+            archive 2>&1 | tee qa/macos/iphone-build.log
+      - name: Validate device platform and create the unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd native/ConcertCompass
+          python3 - <<'PY'
+          import hashlib, json, os, plistlib, re, shutil, subprocess
+          from pathlib import Path
+          temp = Path(os.environ['RUNNER_TEMP'])
+          app = temp / 'ConcertCompass.xcarchive/Products/Applications/ConcertCompass.app'
+          if not app.is_dir():
+              raise SystemExit('The device archive is missing ConcertCompass.app.')
+          with (app / 'Info.plist').open('rb') as handle:
+              info = plistlib.load(handle)
+          if info.get('CFBundleSupportedPlatforms') != ['iPhoneOS'] or info.get('DTPlatformName') != 'iphoneos':
+              raise SystemExit('Refusing to package a non-iPhoneOS bundle.')
+          executable = info['CFBundleExecutable']
+          if Path(executable).name != executable:
+              raise SystemExit('Invalid executable reference.')
+          binary = app / executable
+          arch = subprocess.check_output(['xcrun', 'lipo', '-archs', str(binary)], text=True).strip()
+          if arch != 'arm64':
+              raise SystemExit('Expected an arm64 device executable, found: ' + arch)
+          platform = subprocess.check_output(['xcrun', 'vtool', '-show-build', str(binary)], text=True)
+          if not re.search(r'platform\s+IOS\b', platform) or 'IOSSIMULATOR' in platform:
+              raise SystemExit('The Mach-O platform is not iOS device.')
+          forbidden = {'.p12', '.p8', '.mobileprovision', '.mp4', '.mov', '.xctest'}
+          if any(path.suffix.lower() in forbidden for path in app.rglob('*')):
+              raise SystemExit('Unexpected signing material, test bundle or media inside the app.')
+          stage = temp / 'compass-ipa-stage'
+          stage.mkdir(exist_ok=False)
+          payload = stage / 'Payload'
+          payload.mkdir()
+          shutil.copytree(app, payload / app.name, symlinks=True)
+          output = Path('qa/iphone').resolve()
+          ipa = output / 'ConcertCompass-0.1-iphone-unsigned.ipa'
+          subprocess.run(['/usr/bin/ditto', '-c', '-k', '--keepParent', str(payload), str(ipa)], check=True)
+          digest = hashlib.sha256(ipa.read_bytes()).hexdigest()
+          (output / 'SHA256SUMS.txt').write_text(digest + '  ' + ipa.name + '\n')
+          manifest = {
+              'source_commit': os.environ['SOURCE_COMMIT'],
+              'verification_run': os.environ['VERIFIED_RUN'],
+              'package_run': os.environ['GITHUB_RUN_ID'],
+              'bundle_id': info['CFBundleIdentifier'],
+              'minimum_ios': info['MinimumOSVersion'],
+              'platform': 'iPhoneOS', 'architecture': arch,
+              'signing': 'unsigned; requires local personal-device signing before installation',
+              'physical_iphone_tested': False, 'sha256': digest,
+          }
+          (output / 'BUILD.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          (output / 'READ-ME-FIRST.txt').write_text(
+              'CONCERT COMPASS - PERSONAL IPHONE TEST PACKAGE\n\n'
+              'This is an unsigned real-device IPA, NOT a simulator app, TestFlight invitation, or App Store release.\n'
+              'The exact source passed the linked Apple simulator verification. Physical iPhone testing remains outstanding.\n'
+              'Minimum OS: ' + str(info['MinimumOSVersion']) + '. Do not change the minimum OS or inject tweaks.\n\n'
+              'On your personal Windows computer, a third-party signing tool such as Sideloadly can sign your own app with a free Apple Account.\n'
+              'Official download and prerequisites: https://sideloadly.io/\n'
+              'Use only its official download and Apple-hosted prerequisite links. A separate testing Apple Account limits account exposure.\n'
+              'Do not send passwords, verification codes, signing certificates, or pairing records to ChatGPT or put them in GitHub.\n'
+              'Connect the iPhone by USB, unlock it, and trust your own computer when prompted.\n'
+              'Load the IPA in Sideloadly, select your phone, enter the testing account locally, and use normal Apple ID signing.\n'
+              'Keep bundle ID and signing account consistent on later updates. Do not remove an existing install just to update it.\n'
+              'Free signing expires after seven days; refresh requires this computer and USB or configured Wi-Fi connectivity.\n'
+              'On iPhone, trust your own developer entry in Settings > General > VPN & Device Management when prompted.\n'
+              'Developer Mode is required: Settings > Privacy & Security > Developer Mode; follow the restart and confirmation prompts.\n'
+              'Do not disable antivirus, device management, or other protections if blocked. Stop and report the error instead.\n\n'
+              'First test: two short, non-sensitive videos, 15-second Memory edit, cleanup/stabilization off.\n'
+              'Review moments, render the entire preview, verify both clips and their sound, then Save to Photos.\n'
+              'Keep the app open while rendering. Test advanced features only after basic import/render/save works.\n'
+              'The app processes selected footage locally. This package contains no real concert footage or personal information.\n'
+          )
+          print(json.dumps(manifest, indent=2))
+          PY
+      - name: Keep the unsigned phone package for one day
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ConcertCompass-iPhone-unsigned
+          path: native/ConcertCompass/qa/iphone/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Expose actual compiler errors if packaging fails
+        if: failure()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('native/ConcertCompass/qa/macos/iphone-build.log')
+          if path.exists():
+              errors = [line for line in path.read_text(errors='replace').splitlines() if 'error:' in line]
+              for line in list(dict.fromkeys(errors))[:20]:
+                  print('::error::' + line.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
+          PY
+      - name: Keep device build evidence for one day
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-device-build-evidence
+          path: native/ConcertCompass/qa/macos/
+          if-no-files-found: warn
+          retention-days: 1
+      - name: Record the installation boundary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### Concert Compass personal-device package'
+            echo "Source: $SOURCE_COMMIT"
+            echo "Apple simulator verification: https://github.com/$GITHUB_REPOSITORY/actions/runs/$VERIFIED_RUN"
+            echo 'A successful job produces an unsigned arm64 iPhone IPA, not a simulator executable.'
+            echo 'Local signing and an actual iPhone test are still required. No Apple credentials were collected.'
+            echo 'No deployment, paid enrollment, certificate purchase, or App Store submission was performed.'
+          } >> "$GITHUB_STEP_SUMMARY"

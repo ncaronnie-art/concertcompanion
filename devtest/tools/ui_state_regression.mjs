@@ -11,7 +11,7 @@ const document={getElementById(id){if(!elements.has(id))elements.set(id,new Elem
 let next,fetcher=async()=>({headers:{get:key=>key==='content-type'?'application/json':null},ok:true,json:async()=>next});
 let source=readFileSync(new URL('../static/app.js',import.meta.url),'utf8');
 source=source.replace(/refresh\(\)\.then\(\(\)=>\{if\(state\.busy&&!state\.upload\)operate\(wait\);\}\)\.catch\(error\);\s*$/, '');
-source+='\nglobalThis.__ui={refresh,submittedRevision,get:()=>({state,draft,draftRevision,dirty,staleDraft,prepared}),set:(v)=>{state=v.state;draft=v.draft||[];draftRevision=v.draftRevision??v.state.revision;dirty=!!v.dirty;staleDraft=false;prepared=v.prepared||null;running=false;},override:(r,w,u)=>{request=r;wait=w;upload=u;}};';
+source+='\nglobalThis.__ui={refresh,wait,submittedRevision,get:()=>({state,draft,draftRevision,dirty,staleDraft,prepared}),set:(v)=>{state=v.state;draft=v.draft||[];draftRevision=v.draftRevision??v.state.revision;dirty=!!v.dirty;staleDraft=false;prepared=v.prepared||null;running=false;},override:(r,w,u)=>{request=r;wait=w;upload=u;}};';
 const context={document,console,fetch:(...a)=>fetcher(...a),setInterval:()=>0,setTimeout,clearTimeout,AbortController,structuredClone,File:class {constructor(parts){this.parts=parts;}},Error,Number,Math,Object,Array,JSON};
 vm.runInNewContext(source,context,{filename:'app.js'});
 const ui=context.__ui,$=document.getElementById,checks=[];
@@ -40,4 +40,6 @@ ui.set({state:old,draft:[{id:'chorus'}],dirty:true});$('files').files=[{size:1}]
 ui.override(async()=>{throw Error('revision conflict');},async()=>{},async()=>{uploads++;});await $('files').onchange();assert.equal(uploads,0);assert.equal(ui.get().dirty,true);checks.push('save conflict prevents upload and retains local draft');
 ui.set({state:rendered});let finishBlob;fetcher=async()=>({ok:true,headers:{get:k=>k==='content-type'?'video/mp4':'1'},blob:()=>new Promise(r=>{finishBlob=r;})});
 const pending=$('share').onclick();await new Promise(r=>setImmediate(r));assert.equal(typeof finishBlob,'function');ui.set({state:{...rendered,revision:10}});finishBlob('old video');await pending;assert.equal(ui.get().prepared,null);checks.push('in-flight old share cannot repopulate cache after export changes');
+let polls=0;fetcher=async()=>{if(++polls===1)throw Error('temporary network');return {headers:{get:()=> 'application/json'},ok:true,json:async()=>({...old,busy:false})};};ui.set({state:{...old,busy:true}});await ui.wait();assert.equal(polls,2);checks.push('transient poll failure resumes the same job without a submission');
+fetcher=(_url,opts)=>new Promise((_resolve,reject)=>opts.signal.addEventListener('abort',()=>reject(Object.assign(new Error('aborted'),{name:'AbortError'}))));ui.set({state:{...old,busy:true}});await assert.rejects(ui.refresh(),/timed out/);checks.push('hung state fetch reaches the bounded observation deadline');
 for(const c of checks)console.log('PASS',c);console.log(`PASS ${checks.length} UI regression scenarios`);

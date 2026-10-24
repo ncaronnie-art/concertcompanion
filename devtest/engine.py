@@ -39,6 +39,9 @@ def run(args: list[str], cancel: Event | None = None, timeout: int = 180) -> byt
                 break
             except subprocess.TimeoutExpired:
                 continue
+        # Completion can race with cancellation inside the final wait window.
+        if cancel and cancel.is_set():
+            raise TestError('Stopped safely. No partial reel is shareable.')
         if p.returncode:
             if Path(args[0]).name == 'QualityCLI':
                 raise TestError(err.decode(errors='replace')[:700].strip())
@@ -250,6 +253,8 @@ def analyze(path: Path, number: int, cancel: Event, *, make_preview: bool = True
                 width=width, height=height, hasAudio=has_audio, mediaStart=0,
                 audioCoverage=timing['audioCoverage'],
                 audio=audio, visual=visual, warnings=['Linux image difference is a motion proxy, not camera-shake recognition.'])
+    if cancel and cancel.is_set():
+        raise TestError('Stopped safely. No partial reel is shareable.')
     if not make_preview:
         return clip
     proxy = path.with_suffix('.preview.mp4')
@@ -263,6 +268,8 @@ def analyze(path: Path, number: int, cancel: Event, *, make_preview: bool = True
     ff(['-ss', str(min(duration / 2, 1))] + inp(proxy) + ['-frames:v', '1',
         '-vf', 'scale=180:320:force_original_aspect_ratio=decrease', '-q:v', '5',
         '-an', str(path.with_suffix('.poster.jpg'))], cancel)
+    if cancel and cancel.is_set():
+        raise TestError('Stopped safely. No partial reel is shareable.')
     return clip
 
 

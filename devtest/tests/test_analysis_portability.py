@@ -88,6 +88,55 @@ class ProcessCleanupTests(unittest.TestCase):
             engine.run([sys.executable, '-c', 'import sys; sys.stderr.write("generated failure"); sys.exit(1)'])
         self.assertIn('generated failure', failed.exception.diagnostic)
 
+    def test_cancel_during_successful_communicate_is_not_reported_as_success(self):
+        event = threading.Event()
+        child = Mock(returncode=0)
+        child.poll.return_value = 0
+
+        def completed(**kwargs):
+            self.assertEqual(kwargs['timeout'], .2)
+            event.set()  # Cancellation arrives inside the final wait window.
+            return b'finished', b''
+
+        child.communicate.side_effect = completed
+        with patch.object(engine.subprocess, 'Popen', return_value=child):
+            with self.assertRaisesRegex(engine.TestError, 'Stopped safely'):
+                engine.run(['ffmpeg'], event)
+        child.kill.assert_not_called()  # Already exited: never kill a reused PID.
+
+    def test_real_short_child_cancelled_inside_communicate_window(self):
+        event = threading.Event()
+        processes, timers = [], []
+        popen = subprocess.Popen
+
+        def launch(*args, **kwargs):
+            child = popen(*args, **kwargs)
+            processes.append(child)
+            communicate = child.communicate
+
+            def waiting(*args, **kwargs):
+                if not timers:
+                    timer = threading.Timer(.025, event.set)
+                    timers.append(timer)
+                    timer.start()
+                return communicate(*args, **kwargs)
+
+            child.communicate = waiting
+            return child
+
+        try:
+            with patch.object(engine.subprocess, 'Popen', side_effect=launch):
+                with self.assertRaisesRegex(engine.TestError, 'Stopped safely'):
+                    engine.run([sys.executable, '-c', 'import time; time.sleep(.08); print("finished")'], event)
+        finally:
+            for timer in timers:
+                timer.join()
+        self.assertTrue(event.is_set())
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].poll())
+        self.assertTrue(processes[0].stdout.closed)
+        self.assertTrue(processes[0].stderr.closed)
+
 
 class HDRAnalysisTests(unittest.TestCase):
     @classmethod
@@ -168,6 +217,57 @@ class HDRAnalysisTests(unittest.TestCase):
         event.set()
         with self.assertRaisesRegex(engine.TestError, 'Stopped safely'):
             engine.analyze(path, 1, event, make_preview=False)
+        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), digest)
+        self.assertFalse(path.with_suffix('.preview.mp4').exists())
+        self.assertFalse(path.with_suffix('.poster.jpg').exists())
+
+    def test_cancel_during_final_visual_communicate_cannot_return_analysis(self):
+        path = self.paths['smpte2084']
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        event = threading.Event()
+        popen = subprocess.Popen
+        measured = []
+
+        def launch(args, **kwargs):
+            child = popen(args, **kwargs)
+            if 'rawvideo' in args:
+                communicate = child.communicate
+
+                def completed(*args, **kwargs):
+                    result = communicate(*args, **kwargs)
+                    measured.append(len(result[0]))
+                    event.set()  # Real visual subprocess completed in this wait.
+                    return result
+
+                child.communicate = completed
+            return child
+
+        with patch.object(engine.subprocess, 'Popen', side_effect=launch):
+            with self.assertRaisesRegex(engine.TestError, 'Stopped safely'):
+                engine.analyze(path, 1, event, make_preview=False)
+        self.assertEqual(measured, [3 * 4096])
+        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), digest)
+        self.assertFalse(path.with_suffix('.preview.mp4').exists())
+        self.assertFalse(path.with_suffix('.poster.jpg').exists())
+
+    def test_cancel_after_final_visual_measurement_cannot_return_analysis(self):
+        path = self.paths['smpte2084']
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        event = threading.Event()
+        ff = engine.ff
+        measured = []
+
+        def finish(args, *rest):
+            raw = ff(args, *rest)
+            if 'rawvideo' in args:
+                measured.append(len(raw))
+                event.set()  # After run's guard, before Python computes the record.
+            return raw
+
+        with patch.object(engine, 'ff', side_effect=finish):
+            with self.assertRaisesRegex(engine.TestError, 'Stopped safely'):
+                engine.analyze(path, 1, event, make_preview=False)
+        self.assertEqual(measured, [3 * 4096])
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), digest)
         self.assertFalse(path.with_suffix('.preview.mp4').exists())
         self.assertFalse(path.with_suffix('.poster.jpg').exists())

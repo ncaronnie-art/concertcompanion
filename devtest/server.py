@@ -7,7 +7,7 @@ from __future__ import annotations
 import copy, hashlib, http.cookies, json, math, os, re, secrets, shutil, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 import engine
 from editorial.refine import propose_editorial_refinement
 
@@ -410,6 +410,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({'error': 'Open your private test session first.'}, 401)
                 return
             if path == '/api/preview' and s.preview_revision == s.revision:
+                requested = parse_qs(urlsplit(self.path).query).get('revision')
+                if requested is not None and (len(requested) != 1 or not requested[0].isdigit()
+                                              or int(requested[0]) != s.preview_revision):
+                    self.send_json({'error': 'That preview is no longer current. Refresh the review.'}, 409)
+                    return
                 self.media(s.root / 'preview.mp4')
                 return
             if path in ('/api/reel', '/api/download') and s.ready:
@@ -590,6 +595,20 @@ class Handler(BaseHTTPRequestHandler):
                         if path == '/api/render' and body.get('reviewed') is not True:
                             raise engine.TestError('Review and approve your moments first.')
                         rendering = path == '/api/render'
+                        if rendering:
+                            saved = s.directed['plan']
+                            if updated != saved:
+                                raise engine.TestError('Your submitted edits differ from the reviewed preview. Update preview before export; uploaded sources were kept.')
+                            for key in ('mode', 'style', 'targetSeconds', 'transitions', 'gentleCleanup', 'prompt'):
+                                if key in body and body[key] != saved['settings'].get(key):
+                                    raise engine.TestError('Your submitted settings differ from the reviewed preview. Update preview before export; uploaded sources were kept.')
+                            if 'wizard' in body and wizard_from(body, s.directed.get('wizard'), s.clips) != s.directed.get('wizard', {}):
+                                raise engine.TestError('Your submitted output settings differ from the reviewed preview. Update preview before export; uploaded sources were kept.')
+                            if s.preview_revision != s.revision:
+                                raise engine.TestError('Your edit changed. Update preview before export; uploaded sources were kept.')
+                        refresh_preview = body.get('preview') is True
+                        if 'preview' in body and type(body['preview']) is not bool:
+                            raise engine.TestError('Preview update must be true or false.')
                         def operation():
                             checked = annotate(engine.direct(s.root, s.clips, updated['settings'], s.cancel, plan=updated), s.clips)
                             # Review/render validation recreates a response from
@@ -602,10 +621,15 @@ class Handler(BaseHTTPRequestHandler):
                                     s.directed = checked; s.revision += 1
                                     s.preview_revision = None
                             if not rendering:
+                                if refresh_preview:
+                                    profile = require_render_workspace(s, checked['plan']['settings'], checked.get('wizard'))
+                                    engine.render(s.root, s.clips, s.directed, s.cancel, s.update, preview=True)
+                                    with s.lock:
+                                        s.preview_revision = s.revision
+                                        s.status = 'Updated preview ready. Review this exact revision before export.'
+                                    return
                                 s.update(1, 'Edits saved in this session. Refreshing the page keeps them.')
                                 return
-                            if s.preview_revision != s.revision:
-                                raise engine.TestError('Your edit changed. Render and review the current preview before export.')
                             if not RENDER_GATE.acquire(blocking=False):
                                 raise engine.TestError('Another private compilation is rendering. Wait for it to finish, then render this reviewed edit again.')
                             try:

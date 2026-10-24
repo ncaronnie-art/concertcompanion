@@ -83,10 +83,12 @@ class GuardrailTests(unittest.TestCase):
     def start(self,size):
         code,_,data=self.post('/api/uploads',{'size':size});self.assertEqual(code,201);return json.loads(data)['id']
     def chunk(self,id,offset,b):return self.call('PUT','/api/upload-chunk/'+id,b,{**self.h,'X-Upload-Offset':str(offset)})
-    def plan(self):
-        b=self.fixture.read_bytes();id=self.start(len(b))
-        self.assertEqual(self.chunk(id,0,b)[0],200)
-        self.assertEqual(self.post('/api/uploads/finish',{'id':id})[0],202);self.wait()
+    def plan(self, sources=1):
+        b=self.fixture.read_bytes()
+        for _ in range(sources):
+            id=self.start(len(b))
+            self.assertEqual(self.chunk(id,0,b)[0],200)
+            self.assertEqual(self.post('/api/uploads/finish',{'id':id})[0],202);self.wait()
         self.assertEqual(self.post('/api/plan',{'prompt':'15 seconds, cuts only'})[0],202);return self.wait()
     def test_01_chunks_replay_without_duplicating_bytes(self):
         id=self.start(6)
@@ -341,11 +343,32 @@ class GuardrailTests(unittest.TestCase):
         self.assertEqual(self.post('/api/review',{'revision':s['revision'],'moments':moments})[0],202)
         changed=self.wait(); self.assertFalse(changed['previewReady'])
         self.assertEqual(self.call('GET','/api/preview',headers=self.h)[0],404)
-        self.assertEqual(self.post('/api/render',{'revision':changed['revision'],'reviewed':True,'moments':moments})[0],202)
-        for _ in range(20):
-            stale=self.state()
-            if not stale['busy']: break
-            time.sleep(.1)
-        self.assertIn('Render and review the current preview', stale['error'])
+        code,_,data=self.post('/api/render',{'revision':changed['revision'],'reviewed':True,'moments':moments})
+        self.assertEqual(code,400);self.assertIn('Update preview before export',data.decode())
+
+    def test_23_export_only_promotes_the_exact_reviewed_preview(self):
+        s=self.plan(sources=2); session=next(iter(server.SESSIONS.values()))
+        preview=session.root/'preview.mp4'; source=session.root/session.clips[0]['fileName']
+        before=preview.read_bytes(); original=copy.deepcopy(s['directed']['plan']['moments'])
+        self.assertGreaterEqual(len(original),2)
+        self.assertEqual(self.call('GET',f'/api/preview?revision={s["revision"]}',headers=self.h)[0],200)
+        self.assertEqual(self.call('GET',f'/api/preview?revision={s["revision"]+1}',headers=self.h)[0],409)
+        trim=copy.deepcopy(original);trim[0]['duration']=max(.1,trim[0]['duration']-.1)
+        framing=copy.deepcopy(original);framing[0]['focusX']=.2;framing[0]['muted']=not framing[0]['muted']
+        reordered=list(reversed(copy.deepcopy(original)))
+        continuous={'preset':'wizard','aspectRatio':'9:16','audioMode':'single-source',
+                    'audioClipID':session.clips[1]['id'],'audioStart':0,'vibePrompt':''}
+        variants=[{'moments':trim},{'moments':framing},{'moments':reordered},{'moments':original,'style':'hype'},
+                  {'moments':original,'wizard':continuous}]
+        for extra in variants:
+            code,_,data=self.post('/api/render',{'revision':s['revision'],'reviewed':True,**extra})
+            self.assertEqual(code,400,data)
+            self.assertFalse(session.ready);self.assertTrue(source.exists());self.assertEqual(preview.read_bytes(),before)
+            self.assertFalse((session.root/'reel.mp4').exists())
+        self.assertEqual(self.post('/api/review',{'revision':s['revision'],'moments':trim,'preview':True})[0],202)
+        updated=self.wait();self.assertTrue(updated['previewReady']);self.assertTrue(source.exists())
+        self.assertEqual(self.post('/api/render',{'revision':updated['revision'],'reviewed':True,
+                                                   'moments':updated['directed']['plan']['moments']})[0],202)
+        finished=self.wait();self.assertTrue(finished['ready']);self.assertTrue((session.root/'reel.mp4').exists())
 
 if __name__=='__main__':unittest.main(verbosity=2)

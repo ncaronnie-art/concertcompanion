@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let state=null, draft=[], draftRevision=-1, dirty=false, staleDraft=false, running=false, uploading=false;
-let prepared=null, cancelled=false, chunkController=null, editing=null, expiryAt=0, generatedPromptTarget=null, observationStopped=false, refreshSequence=0, clearPending=false;
+let prepared=null, cancelled=false, chunkController=null, editing=null, expiryAt=0, generatedPromptTarget=null, observationStopped=false, refreshSequence=0, clearPending=false, previewIdentity='';
 const explicitSettings=new Set();
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const labels={completePlayback:'Every moment plays to the end',soundInSync:'Picture and sound stay in sync',savedToPhotos:'Saved to Photos',photosSound:'Replays in Photos with sound',capturesNight:'It captures the night',wouldShare:'I would share this'};
@@ -48,14 +48,33 @@ function restoreSavedSettings(settings){
  $('cleanup').checked=settings.gentleCleanup===true;
  $('savedSettings').textContent=`Saved edit settings restored: ${savedSettingsLabel(settings)}.`;
 }
+function settingsPayload(){return {mode:$('mode').value,style:$('style').value,targetSeconds:Number($('length').value),transitions:$('transitions').value,gentleCleanup:$('cleanup').checked,prompt:$('prompt').value};}
+function normalizedSettings(settings){return {mode:settings.mode,style:settings.style,targetSeconds:Number(settings.targetSeconds),transitions:settings.transitions,gentleCleanup:settings.gentleCleanup===true,prompt:settings.prompt||''};}
+function normalizedWizard(wizard={},prompt=''){
+ const value={preset:wizard.preset||'wizard',aspectRatio:wizard.aspectRatio||'9:16',audioMode:wizard.audioMode||'selected-moment-original',vibePrompt:wizard.vibePrompt??prompt};
+ // The server ignores source/start when original moment audio is selected.
+ if(value.audioMode==='single-source'){value.audioClipID=wizard.audioClipID||'';value.audioStart=Number(wizard.audioStart??0);}
+ return value;
+}
+function pendingSettings(){
+ if(!state?.directed)return false;
+ const saved=state.directed;
+ return JSON.stringify(normalizedSettings(settingsPayload()))!==JSON.stringify(normalizedSettings(saved.plan.settings))||JSON.stringify(normalizedWizard(wizardPayload()))!==JSON.stringify(normalizedWizard(saved.wizard,saved.plan.settings.prompt||''));
+}
+function refreshAudioOptions(next,restore){
+ const selected=restore?next.directed?.wizard?.audioClipID:$('audioClipID').value;
+ const audible=next.clips.filter(c=>c.hasAudio);
+ $('audioClipID').replaceChildren(...audible.map(c=>{const o=text('option',c.name);o.value=c.id;return o;}));
+ if(audible.some(c=>c.id===selected))$('audioClipID').value=selected;
+}
 function wizardPayload(){return {preset:$('preset').value,aspectRatio:$('aspectRatio').value,audioMode:$('audioMode').value,audioClipID:$('audioClipID').value,audioStart:Number($('audioStart').value),vibePrompt:$('prompt').value};}
 function restoreWizard(wizard){
- if(!wizard)return;
+ wizard=normalizedWizard(wizard,$('prompt').value);
  if(wizard.preset&&[...$('preset').options].some(o=>o.value===wizard.preset))$('preset').value=wizard.preset;
  if(wizard.aspectRatio)$('aspectRatio').value=wizard.aspectRatio;
  if(wizard.audioMode)$('audioMode').value=wizard.audioMode;
  if(wizard.audioClipID)$('audioClipID').value=wizard.audioClipID;
- if(Number.isFinite(wizard.audioStart))$('audioStart').value=wizard.audioStart;
+ $('audioStart').value=Number.isFinite(wizard.audioStart)?wizard.audioStart:0;
  if(typeof wizard.vibePrompt==='string')$('prompt').value=wizard.vibePrompt;
 }
 function renderEditorialProposal(proposal){
@@ -85,24 +104,32 @@ async function refresh(){
  const sequence=++refreshSequence;let next;
  try{next=await stateFetch();}catch(e){if(sequence!==refreshSequence)return state;throw e;}
  if(sequence!==refreshSequence)return state;
- if(state&&state.csrf!==next.csrf){discardPreparedMedia();draft=[];dirty=false;staleDraft=false;draftRevision=-1;error(Error('This session expired. Deleted media cannot be restored; choose clips for a new test.'));}
+ if(state?.error&&!next.error&&$('error').textContent===state.error)clearError();
+ const newSession=!!state&&state.csrf!==next.csrf;
+ const newRevision=!!state&&state.revision!==next.revision;
+ const restore=!state||newSession||newRevision||!!next.directed&&next.revision!==draftRevision;
+ if(newSession){discardPreparedMedia();draft=[];dirty=false;staleDraft=false;draftRevision=-1;error(Error('This session expired. Deleted media cannot be restored; choose clips for a new test.'));}
  if(state&&next.revision!==draftRevision&&dirty&&!running){
   staleDraft=true;show();
   throw Error('A newer edit was saved in another tab. Your local changes were not submitted. Reload this page before making changes.');
  }
- if(state&&(next.revision!==state.revision||next.ready!==state.ready))discardPreparedMedia();
+ if(state&&(newRevision||next.ready!==state.ready))discardPreparedMedia();
+ if(newSession||newRevision)$('reviewed').checked=false;
  state=next;expiryAt=Date.now()+next.expiresIn*1000;
  observationStopped=false;$('resumeStatus').hidden=true;
- if(next.directed&&next.revision!==draftRevision){
+ // A real select rejects values before its options exist. Populate it before
+ // hydrating an accepted saved identity, never as a side effect of show().
+ refreshAudioOptions(next,restore);
+ if(next.directed&&restore){
   if(dirty&&!running)throw Error('A newer edit was saved in another tab. Reload this page before making changes.');
-  draft=structuredClone(next.directed.plan.moments);draftRevision=next.revision;dirty=false;restoreSavedSettings(next.directed.plan.settings);restoreWizard(next.directed.wizard);renderMoments();
+  draft=structuredClone(next.directed.plan.moments);draftRevision=next.revision;dirty=false;restoreSavedSettings(next.directed.plan.settings);restoreWizard(next.directed.wizard);explicitSettings.clear();generatedPromptTarget=null;renderMoments();
  }
  if(!next.directed){draft=[];draftRevision=-1;$('moments').replaceChildren();$('savedSettings').textContent='Your saved edit settings will appear here after you make a first cut.';}
  show();return next;
 }
 function show(){
  if(!state)return;
- const busy=state.busy||running||uploading;
+ const busy=state.busy||running||uploading, pending=pendingSettings();
  $('work').hidden=!busy;$('status').textContent=state.status;$('progress').value=state.progress;
  $('workNote').textContent=state.statusSeconds>8?`Still ${state.status.toLowerCase()} (${state.statusSeconds}s elapsed). Keep this page open; a connection retry does not restart the job.`:'Keep this page open during uploads and preparation. Completed uploads and saved edits stay in this session.';
  const clipLimit=state.limits?.clips||3;
@@ -113,32 +140,34 @@ function show(){
  $('controls').hidden=state.ready;$('review').hidden=state.ready||!state.directed;$('result').hidden=!state.ready;
  $('step1').classList.toggle('active',!state.directed&&!state.ready);
  $('step2').classList.toggle('active',!!state.directed&&!state.ready);$('step3').classList.toggle('active',state.ready);
- $('render').disabled=busy||staleDraft||!$('reviewed').checked||!draft.some(m=>m.approved);
+ $('render').disabled=busy||staleDraft||dirty||pending||!$('reviewed').checked||!draft.some(m=>m.approved);
  $('render').disabled=$('render').disabled||!state.previewReady;
- $('save').disabled=busy||staleDraft||!dirty;$('feedbackSave').disabled=busy;
+ $('save').disabled=busy||staleDraft||pending||state.ready||!state.directed||(!dirty&&state.previewReady);$('feedbackSave').disabled=busy;
+ $('revertSettings').hidden=!pending;$('revertSettings').disabled=busy||staleDraft;
  $('adjust').disabled=busy||staleDraft;
  $('adjustment').disabled=busy||staleDraft;
- $('saveState').textContent=dirty?'Unsaved changes. Save or render to keep them.':'Edits saved in this session.';
+ $('plan').textContent=state.directed?'Apply settings and preview':'Make my first cut';
+ $('save').textContent='Update preview';
+ $('saveState').textContent=pending?'Output settings changed. Choose Apply settings and preview, or restore saved settings before export.':dirty?'Edits changed. Update preview before export.':!state.previewReady?'Saved edit has no current preview. Choose Update preview to retry; your sources are kept.':'Edits saved in this session.';
  $('moments').querySelectorAll('button').forEach(b=>b.disabled=busy);
  if(!state.ready)$('clips').replaceChildren(...state.clips.map(c=>{
   const el=document.createElement('div');el.className='source';const img=document.createElement('img');img.alt='';img.src=`/api/poster/${c.id}`;
   const info=document.createElement('div');info.append(text('b',c.name),text('small',`${c.duration.toFixed(1)}s / ${c.hasAudio?'original sound':'silent source'} / ready`));el.append(img,info);return el;
  }));
- const audible=state.clips.filter(c=>c.hasAudio);$('audioClipID').replaceChildren(...audible.map(c=>{const o=text('option',c.name);o.value=c.id;return o;}));
  $('audioClipWrap').hidden=$('audioMode').value!=='single-source';$('audioStartWrap').hidden=$('audioMode').value!=='single-source';
  if(state.directed&&!state.ready){
   const d=state.directed;$('summary').textContent=`${draft.filter(m=>m.approved).length} moments / ${d.seconds.toFixed(1)} seconds saved`;
   $('durationTruth').textContent=durationTruth(d);
   $('durationTruth').classList.toggle('warning',Math.abs(Number(d.plan.settings.targetSeconds)-Number(d.seconds))>.08);
-  if(!$('savedSettings').textContent.startsWith('Saved edit settings restored:'))restoreSavedSettings(d.plan.settings);
-  restoreWizard(d.wizard);
   renderEditorialProposal(d.editorialProposal);
   const omitted=d.coverage?.omitted||[];$('coverage').textContent=omitted.length?`Not in the saved edit: ${omitted.join(', ')}. Replace a moment to include that source.`:`All ${state.clips.length} source clips are represented in the saved edit.`;
   $('coverage').classList.toggle('warning',!!omitted.length);
   $('explanation').textContent=[d.plan.director,...d.plan.warnings].join('\n\n');
-  $('preview').hidden=!state.previewReady;$('previewNote').hidden=!state.previewReady;
-  if(state.previewReady){if(!$('preview').getAttribute('src'))$('preview').src='/api/preview';$('previewNote').textContent='Assembled preview of this exact revision. Adjusting or saving changes requires a new preview before export.';}
-  else {$('preview').pause();$('preview').removeAttribute('src');$('preview').load();}
+  const previewCurrent=state.previewReady&&!dirty&&!pending&&draftRevision===state.revision;
+  $('preview').hidden=!previewCurrent;$('previewNote').hidden=!previewCurrent;
+  const identity=`${state.csrf}:${state.revision}`;
+  if(previewCurrent){if(previewIdentity!==identity){$('preview').pause();$('preview').removeAttribute('src');$('preview').load();$('preview').src=`/api/preview?revision=${state.revision}`;previewIdentity=identity;}$('previewNote').textContent='Assembled preview of this exact revision. Adjusting or saving changes requires a new preview before export.';}
+  else {$('preview').pause();$('preview').removeAttribute('src');$('preview').load();previewIdentity='';}
  }
  else {renderEditorialProposal(null);$('durationTruth').textContent='';$('durationTruth').classList.remove('warning');}
  if(state.ready){
@@ -166,6 +195,7 @@ function renderMoments(){
  });
 }
 function changed(){dirty=true;$('reviewed').checked=false;show();}
+function settingsChanged(){$('reviewed').checked=false;show();}
 function move(i,d){const j=i+d;if(j<0||j>=draft.length)return;[draft[i],draft[j]]=[draft[j],draft[i]];changed();renderMoments();}
 function editorValues(){
  const m=structuredClone(editing);m.clipID=$('editSource').value;m.start=Number($('editStart').value);m.duration=Number($('editDuration').value);
@@ -198,6 +228,7 @@ $('keepMoment').onclick=()=>{
 async function wait(){let failures=0;while(true){try{const next=await refresh();failures=0;if(!next.busy)break;}catch(e){if(++failures>3){observationStopped=true;$('resumeStatus').hidden=false;throw Error('Connection checks stopped. Resume checking status; your job was not submitted again.');}$('status').textContent=`Connection interrupted. Retrying observation (${failures}/3); your job was not submitted again.`;await sleep(1000*failures);continue;}await sleep(850);}if(state.error)throw Error(state.error);}
 async function operate(fn){if(staleDraft){error(Error('Reload this page before changing a conflicting edit.'));return;}if(running)return;running=true;cancelled=false;clearError();show();try{await fn();}catch(e){error(e);}finally{running=false;uploading=false;show();}}
 function submittedRevision(){if(staleDraft)throw Error('Reload this page before submitting a conflicting edit.');return draftRevision>=0?draftRevision:state.revision;}
+function snapshotRevision(){try{return submittedRevision();}catch(e){error(e);return null;}}
 async function sendChunk(id,offset,blob){
  chunkController=new AbortController();const timer=setTimeout(()=>chunkController?.abort(),45000);
  try{return await decode(await fetch(`/api/upload-chunk/${id}`,{method:'PUT',credentials:'same-origin',headers:{'X-Compass-CSRF':state.csrf,'X-Upload-Offset':String(offset)},body:blob,signal:chunkController.signal}));}
@@ -227,16 +258,26 @@ $('files').onchange=()=>operate(async()=>{
  if(dirty){await request('/api/review',{revision:submittedRevision(),moments:draft});await wait();}
  uploading=true;show();for(const f of files){if(cancelled)break;await upload(f);}await refresh();
 });
-$('plan').onclick=()=>operate(async()=>{
- const targetSeconds=Number($('length').value);
+$('plan').onclick=()=>{
+ const revision=snapshotRevision();if(revision===null)return;
+ const targetSeconds=Number($('length').value), payload={revision,mode:$('mode').value,style:$('style').value,targetSeconds,transitions:$('transitions').value,gentleCleanup:$('cleanup').checked,prompt:$('prompt').value,wizard:wizardPayload(),explicitSettings:[...explicitSettings],previousMoments:state.directed?structuredClone(draft):null};
  const compilationApproved=targetSeconds<=60||confirm(`This ${durationLabel(targetSeconds)} stays vertical at 720 × 1280 and can take longer to render. Keep this private page open, then download the MP4 to iCloud Drive. Continue?`);
  if(!compilationApproved)return;
- await request('/api/plan',{revision:submittedRevision(),mode:$('mode').value,style:$('style').value,targetSeconds,transitions:$('transitions').value,gentleCleanup:$('cleanup').checked,prompt:$('prompt').value,wizard:wizardPayload(),explicitSettings:[...explicitSettings],compilationApproved,previousMoments:state.directed?draft:null});
- await wait();$('reviewed').checked=false;$('review').scrollIntoView({block:'start'});
-});
-$('save').onclick=()=>operate(async()=>{await request('/api/review',{revision:submittedRevision(),moments:draft});await wait();});
+ payload.compilationApproved=compilationApproved;
+ return operate(async()=>{await request('/api/plan',payload);await wait();$('reviewed').checked=false;$('review').scrollIntoView({block:'start'});});
+};
+$('save').onclick=()=>{if(pendingSettings()){error(Error('Apply settings and preview, or restore saved settings before updating this edit.'));return;}const revision=snapshotRevision();if(revision===null)return;const payload={revision,moments:structuredClone(draft),preview:true};return operate(async()=>{await request('/api/review',payload);await wait();$('reviewed').checked=false;});};
 $('reviewed').onchange=show;
-$('render').onclick=()=>operate(async()=>{await request('/api/render',{revision:submittedRevision(),reviewed:$('reviewed').checked,moments:draft});await wait();$('result').scrollIntoView({block:'start'});});
+$('revertSettings').onclick=()=>{
+ if(running||state.busy||uploading||staleDraft||!state.directed)return;
+ restoreSavedSettings(state.directed.plan.settings);restoreWizard(state.directed.wizard);explicitSettings.clear();generatedPromptTarget=null;settingsChanged();
+};
+$('render').onclick=()=>{
+ const revision=snapshotRevision();if(revision===null)return;
+ if(dirty||pendingSettings()||!state.previewReady){error(Error('Apply or restore pending settings and update the preview before export.'));show();return;}
+ const payload={revision,reviewed:$('reviewed').checked,moments:structuredClone(draft),...settingsPayload(),wizard:wizardPayload()};
+ return operate(async()=>{await request('/api/render',payload);await wait();$('result').scrollIntoView({block:'start'});});
+};
 $('cancel').onclick=async()=>{cancelled=true;chunkController?.abort();try{await request('/api/cancel');await wait();}catch(e){error(e);}};
 $('resumeStatus').onclick=()=>operate(wait);
 $('clear').onclick=()=>{if(!running&&!clearPending)$('clearConfirm').showModal();};
@@ -251,32 +292,38 @@ for(const b of document.querySelectorAll('[data-prompt]'))b.onclick=()=>{
  generatedPromptTarget=Number(b.dataset.target)||null;
  if(b.dataset.target)$('length').value=b.dataset.target;
  if(b.dataset.target)explicitSettings.add('targetSeconds');
+ settingsChanged();
 };
-$('prompt').oninput=()=>{generatedPromptTarget=null;};
+$('prompt').oninput=()=>{generatedPromptTarget=null;settingsChanged();};
 const parameterControls={mode:'mode',style:'style',length:'targetSeconds',transitions:'transitions',cleanup:'gentleCleanup'};
-for(const [id,key] of Object.entries(parameterControls))if(typeof $(id).addEventListener==='function')$(id).addEventListener('change',()=>explicitSettings.add(key));
+for(const [id,key] of Object.entries(parameterControls))if(typeof $(id).addEventListener==='function')$(id).addEventListener('change',()=>{explicitSettings.add(key);settingsChanged();});
 $('preset').onchange=()=>{
  const p=$('preset').value;
  const presets={cinematic:{style:'cinematic',transitions:'dissolves'},'high-energy':{style:'hype',transitions:'cuts'},memory:{style:'memory',transitions:'dissolves'}};
  if(presets[p])Object.entries(presets[p]).forEach(([id,value])=>{$(id).value=value;explicitSettings.add(parameterControls[id]);});
+ settingsChanged();
 };
-$('audioMode').onchange=()=>{ const hidden=$('audioMode').value!=='single-source';$('audioClipWrap').hidden=hidden;$('audioStartWrap').hidden=hidden; };
+$('audioMode').onchange=settingsChanged;
+$('audioClipID').onchange=settingsChanged;
+$('aspectRatio').onchange=settingsChanged;
+$('audioStart').oninput=settingsChanged;
 $('length').onchange=()=>{
- if(!generatedPromptTarget)return;
+ if(!generatedPromptTarget){settingsChanged();return;}
  const seconds=Number($('length').value);
  const label=`${seconds} seconds`;
  $('prompt').value=$('prompt').value.replace(/^\s*(?:\d+\s*(?:seconds?|secs?|minutes?|mins?)|\d+\s*min)\s*,?\s*/i,`${label}, `);
- generatedPromptTarget=seconds;
+ generatedPromptTarget=seconds;settingsChanged();
 };
-$('adjust').onclick=()=>operate(async()=>{
+$('adjust').onclick=()=>{
  const editRequest=$('adjustment').value.trim();
  if(!editRequest)throw Error('Describe an adjustment, or render this reviewed first cut.');
- const targetSeconds=Number(state.directed.plan.settings.targetSeconds);
+ const revision=snapshotRevision();if(revision===null)return;
+ const targetSeconds=Number(state.directed.plan.settings.targetSeconds), payload={revision,editRequest,wizard:wizardPayload(),previousMoments:structuredClone(draft)};
  const compilationApproved=targetSeconds<=60||confirm(`This ${durationLabel(targetSeconds)} stays vertical at 720 × 1280. Continue?`);
  if(!compilationApproved)return;
- await request('/api/plan',{revision:submittedRevision(),editRequest,wizard:wizardPayload(),compilationApproved,previousMoments:draft});
- await wait();$('adjustment').value='';$('reviewed').checked=false;$('review').scrollIntoView({block:'start'});
-});
+ payload.compilationApproved=compilationApproved;
+ return operate(async()=>{await request('/api/plan',payload);await wait();$('adjustment').value='';$('reviewed').checked=false;$('review').scrollIntoView({block:'start'});});
+};
 $('share').onclick=async()=>{
  try{
   if(!prepared){const shareSession=state.csrf,shareRevision=state.revision;$('share').disabled=true;const r=await fetch('/api/reel',{credentials:'same-origin'});if(!r.ok||!r.headers.get('content-type')?.startsWith('video/mp4'))throw Error('The reel is unavailable, or private-link login expired.');

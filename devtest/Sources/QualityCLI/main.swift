@@ -53,7 +53,10 @@ func intactPlan(clips: [MediaClip], settings: EditSettings, previous: EditPlan?)
         ? "Complete uploaded clips kept intact in upload order and locked."
         : "Chosen ranges, reviewed order, rejections and locks kept unchanged; newly uploaded clips are not added automatically."]
     warnings.append("Intact mode does not identify choruses, bridges or lyrics. Select those ranges yourself; direction changes do not recut them.")
-    warnings.append("With original section audio, joins use 5ms de-click gains; gentle cleanup applies only when selected. Picture boundaries round to 30fps within one frame; audio samples do not follow that rounding.")
+    warnings.append(settings.transitions == .cuts
+        ? "With original section audio, cuts use up to 5 ms de-click ramps at joins."
+        : "With original section audio, soft joins use up to 150 ms fade out / fade in inside each section, without overlapping audio.")
+    warnings.append("Each audio fade is capped at one quarter of its section. Continuous-source audio has no join fades. Fades do not match beats or lyrics; gentle cleanup applies only when selected. Picture boundaries round to 30fps within one frame; audio samples do not follow that rounding.")
     warnings.append(settings.transitions == .cuts ? "Sections join with cuts, without overlapping source audio."
         : "Soft fades through black stay inside section edges. No overlap, lyric mixing or source-time removal.")
     if abs(actual - settings.targetSeconds) > 0.08 {

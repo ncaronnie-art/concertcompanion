@@ -650,6 +650,7 @@ class Handler(BaseHTTPRequestHandler):
                                     s.receipt = dict(codec='H.264 / AAC', width=profile['width'], height=profile['height'],
                                         profile=profile['name'], seconds=round(checked['seconds'], 3), bytes=result.stat().st_size,
                                         moments=len(checked['timeline']), coverage=checked['coverage'],
+                                        audioTransition=engine.intact_audio_transition(checked),
                                         renderSeconds=round(time.monotonic()-before, 2),
                                         completeDecode=True, sourceCopiesDeleted=True,
                                         nativeTest=False, physicalPhoneTest='unverified')

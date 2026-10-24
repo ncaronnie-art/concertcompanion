@@ -346,6 +346,38 @@ class GuardrailTests(unittest.TestCase):
         code,_,data=self.post('/api/render',{'revision':changed['revision'],'reviewed':True,'moments':moments})
         self.assertEqual(code,400);self.assertIn('Update preview before export',data.decode())
 
+    def test_24_intact_song_fades_export_reviewed_bytes_with_honest_receipt(self):
+        # Real Swift planning, FFmpeg preview and HTTP promotion. The only
+        # substituted setting is output resolution to bound generated test cost.
+        with patch.object(engine, 'output_profile', return_value=dict(name='synthetic 160x90', width=160, height=90, crf=18)):
+            data = self.fixture.read_bytes()
+            for _ in range(2):
+                identifier = self.start(len(data))
+                self.assertEqual(self.chunk(identifier, 0, data)[0], 200)
+                self.assertEqual(self.post('/api/uploads/finish', {'id': identifier})[0], 202)
+                self.wait()
+            current = self.state()
+            self.assertEqual(self.post('/api/plan', {'revision': current['revision'], 'preserveSections': True,
+                'transitions': 'dissolves', 'explicitSettings': ['transitions'], 'prompt': ''})[0], 202)
+            planned = self.wait()
+            self.assertEqual(planned['directed']['plan']['settings']['transitions'], 'dissolves')
+            self.assertEqual(len(planned['directed']['timeline']), 2)
+            session = next(iter(server.SESSIONS.values()))
+            preview = (session.root/'preview.mp4').read_bytes()
+            # A newly requested transition is not the reviewed soundtrack.
+            payload = dict(revision=planned['revision'], reviewed=True, moments=planned['directed']['plan']['moments'])
+            self.assertEqual(self.post('/api/render', {**payload, 'transitions': 'cuts'})[0], 400)
+            self.assertTrue(all((session.root/c['fileName']).exists() for c in session.clips))
+            self.assertEqual(self.post('/api/render', payload)[0], 202)
+            finished = self.wait()
+            self.assertEqual((session.root/'reel.mp4').read_bytes(), preview)
+            transition = finished['receipt']['audioTransition']
+            self.assertEqual(transition['mode'], 'in-place-fades')
+            self.assertEqual(transition['maxFadeSeconds'], .15)
+            self.assertEqual(transition['overlapSeconds'], 0)
+            self.assertFalse(transition['addsGain'])
+            self.assertEqual(json.loads(self.call('GET', '/api/report', headers=self.h)[2])['receipt']['audioTransition'], transition)
+
     def test_23_export_only_promotes_the_exact_reviewed_preview(self):
         s=self.plan(sources=2); session=next(iter(server.SESSIONS.values()))
         preview=session.root/'preview.mp4'; source=session.root/session.clips[0]['fileName']

@@ -185,7 +185,7 @@ function show(){
   if(!$('reel').getAttribute('src'))$('reel').src='/api/reel';
   $('reelDimensions').textContent=`${state.receipt.width} x ${state.receipt.height}`;
   $('reelTime').textContent=durationLabel(Math.round(state.receipt.seconds));
-  $('receipt').textContent=`${state.receipt.moments} moments rendered in the ${state.receipt.profile}. Complete-file decoding passed. Uploaded source copies deleted. Download it, put it in iCloud Drive, then test playback on your phone.`;
+  $('receipt').textContent=`${state.receipt.moments} moments rendered in the ${state.receipt.profile}. ${state.receipt.audioTransition?.description?state.receipt.audioTransition.description+' ':''}Complete-file decoding passed. Uploaded source copies deleted. Download it, put it in iCloud Drive, then test playback on your phone.`;
   for(const k of Object.keys(labels))if(typeof state.feedback[k]==='boolean')$('fb-'+k).value=String(state.feedback[k]);
  }
  if(state.error)error(Error(state.error));

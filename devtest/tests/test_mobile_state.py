@@ -43,6 +43,38 @@ def planned_state():
 
 
 class MobileStateTests(unittest.TestCase):
+    @unittest.skipUnless(sync_playwright, "Playwright is not installed in this quality container")
+    def test_intact_song_fade_explanation_and_receipt_in_fresh_chromium(self):
+        import sys
+        sys.path.insert(0, str(ROOT))
+        import engine
+        html = (ROOT / "static" / "index.html").read_text()
+        html = re.sub(r'<script[^>]+src="/app.js"[^>]*></script>', '', html)
+        html = re.sub(r'<link[^>]+href="/style.css"[^>]*>', '', html)
+        state = planned_state()
+        state['ready'] = True
+        state['directed']['plan']['settings']['preserveSections'] = True
+        state['directed']['timeline'] = [{}, {}]
+        transition = engine.intact_audio_transition(state['directed'])
+        state['receipt'] = dict(width=160, height=90, seconds=45, moments=2,
+                                profile='synthetic', audioTransition=transition)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(executable_path='/usr/bin/chromium', headless=True,
+                                                 args=['--no-sandbox'])
+            page = browser.new_page(viewport={'width': 390, 'height': 844})
+            page.set_content(html)
+            page.evaluate("""state => {
+                window.fetch = async () => new Response(JSON.stringify(state), {
+                    status: 200, headers: {'content-type': 'application/json'}
+                });
+            }""", state)
+            page.add_script_tag(path=str(ROOT / 'static' / 'app.js'))
+            page.wait_for_function("document.getElementById('result').hidden === false")
+            self.assertIn(transition['description'], page.locator('#receipt').inner_text())
+            self.assertIn('150 ms', page.locator('#preserveSections').locator('..').text_content())
+            self.assertIn('Continuous-source audio has no join fades', page.locator('#preserveSections').locator('..').text_content())
+            browser.close()
+
     def test_source_binds_all_saved_edit_settings_to_visible_controls(self):
         """Regression contract when the optional browser runner is unavailable."""
         source = (ROOT / "static" / "app.js").read_text()

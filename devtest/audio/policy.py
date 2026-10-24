@@ -3,7 +3,8 @@
 This module intentionally does not decode, normalize, denoise, or render media.
 It gives the renderer vetted FFmpeg fragments plus deterministic seam measurements.
 The current renderer owns timeline math and must only call ``seam_filter`` where
-the visual plan already has an overlap of exactly the same duration.
+the visual plan already has an overlap of exactly the same duration. Intact-mode
+``intact_edge_suffix`` instead attenuates existing samples without any overlap.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ class AudioPolicyError(ValueError):
 
 @dataclass(frozen=True)
 class AudioPolicy:
-    """Opt-in cleanup policy; raw source audio remains the default.
+    """Opt-in cleanup and explicit transition policy.
 
     ``gentle_cleanup`` is deliberately limited to the existing mixed high-pass
     filter. It can soften very low handling/rumble energy but cannot separate a
@@ -34,6 +35,8 @@ class AudioPolicy:
     rumble_hz: int = 70
     rumble_mix: float = 0.45
     max_seam_seconds: float = 0.75
+    # Separate from montage crossfades: intact sections never overlap.
+    intact_soft_fades: bool = False
 
     @classmethod
     def from_settings(cls, settings: dict | None) -> "AudioPolicy":
@@ -42,7 +45,24 @@ class AudioPolicy:
         return cls(
             gentle_cleanup=settings.get("gentleCleanup") is True,
             seam_smoothing=settings.get("seamSmoothing") is True,
+            intact_soft_fades=settings.get("preserveSections") is True
+                and settings.get("transitions") in ("automatic", "dissolves"),
         )
+
+    def intact_edge_suffix(self, samples: int, incoming: bool, outgoing: bool) -> str:
+        """Attenuate only join edges on the existing 48kHz PCM timeline.
+
+        A 150ms half-cosine fade gently dips between recordings without mixing
+        vocals. Cap each edge at 1/4 of its section, leaving at least half of
+        even a very short middle section untouched. Cuts retain the old 5ms
+        linear de-click. No boundary search, gain boost, or timing change.
+        """
+        ramp = min(7200 if self.intact_soft_fades else 240, samples // 4)
+        if ramp < 1:
+            return ''
+        curve = ':curve=hsin' if self.intact_soft_fades else ''
+        return ((f',afade=t=in:ss=0:ns={ramp}{curve}' if incoming else '')
+                + (f',afade=t=out:ss={samples-ramp}:ns={ramp}{curve}' if outgoing else ''))
 
     def segment_suffix(self) -> str:
         """FFmpeg filter suffix for a decoded source segment, or an empty string."""

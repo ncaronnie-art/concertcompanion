@@ -491,8 +491,8 @@ def intact_audio(root, clips, timeline, cancel, audio_policy, deadline):
     """Concatenate approved PCM samples independently of the picture frame grid.
 
     Preserve the shared source-video origin and original packet gaps through
-    the existing audio filter. Only bounded 5ms edge gains de-click each join;
-    they neither overlap recordings nor change sample count, pitch or speed.
+    the existing audio filter. The selected policy attenuates only join edges;
+    it never overlaps recordings or changes sample count, pitch or speed.
     """
     by_id = {clip['id']: clip for clip in clips}
     output = root / 'section-audio-final.wav'
@@ -512,11 +512,7 @@ def intact_audio(root, clips, timeline, cancel, audio_policy, deadline):
                     if audible else ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo'])
             af = segment_audio_filter(moment['duration'], moment['duration'])
             af += f',apad,atrim=end_sample={samples}' + audio_policy.segment_suffix()
-            ramp = min(240, samples // 4)
-            if index:
-                af += f',afade=t=in:ss=0:ns={ramp}'
-            if index + 1 < len(timeline):
-                af += f',afade=t=out:ss={samples-ramp}:ns={ramp}'
+            af += audio_policy.intact_edge_suffix(samples, index > 0, index + 1 < len(timeline))
             section = root / f'section-audio-{index:03d}.pcm'
             ff(args + ['-map', '0:a:0', '-vn', '-af', af, '-ac', '2', '-ar', '48000',
                        '-c:a', 'pcm_s16le', '-f', 's16le', str(section)], cancel, remaining_render_time(deadline))
@@ -535,6 +531,24 @@ def intact_audio(root, clips, timeline, cancel, audio_policy, deadline):
         if combined.getnframes() * 4 != expected:
             raise TestError('Intact soundtrack length failed verification.')
     return output
+
+
+def intact_audio_transition(directed):
+    """Describe the policy used by the reviewed preview, not a listening claim."""
+    settings = directed['plan']['settings']
+    if not settings.get('preserveSections'):
+        return None
+    if directed.get('wizard', {}).get('audioMode') == 'single-source':
+        return dict(mode='continuous-source', description='Continuous source audio; no song-join fades.')
+    if len(directed['timeline']) < 2:
+        return dict(mode='single-section', description='One intact section; no song joins to fade.')
+    soft = AudioPolicy.from_settings(settings).intact_soft_fades
+    return dict(mode='in-place-fades' if soft else 'declick-only',
+                maxFadeSeconds=.15 if soft else .005, maxSectionFraction=.25,
+                overlapSeconds=0, addsGain=False,
+                description=('Song joins: up to 150 ms fade out / fade in, inside each section; '
+                             'no overlapping audio or level boost.' if soft else
+                             'Cuts only: 5 ms de-click ramps at joins, shortened for tiny sections.'))
 
 
 def finalize_preview(root: Path):

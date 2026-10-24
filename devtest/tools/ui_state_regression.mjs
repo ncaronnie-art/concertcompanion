@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 class Element {
  constructor(){this.textContent='';this.hidden=false;this.disabled=false;this.checked=false;this.value='';this.options=[];this.style={};this.attrs={};this.classList={toggle(){},remove(){}};this.dataset={};}
- append(){} replaceChildren(){} querySelectorAll(){return [];} setAttribute(k,v){this.attrs[k]=String(v);} getAttribute(k){return this.attrs[k]??null;} removeAttribute(k){delete this.attrs[k];} pause(){} load(){} scrollIntoView(){} showModal(){} close(){}
+ append(){} replaceChildren(){} querySelectorAll(){return [];} setAttribute(k,v){this.attrs[k]=String(v);} getAttribute(k){return this.attrs[k]??null;} removeAttribute(k){delete this.attrs[k];} pause(){} load(){} scrollIntoView(){} showModal(){this.open=true;} close(){this.open=false;this.onclose?.();}
 }
 const elements=new Map(),chip=new Element();chip.dataset={prompt:'15 seconds, cinematic, soft transitions',target:'15'};
 const document={getElementById(id){if(!elements.has(id))elements.set(id,new Element());return elements.get(id);},querySelectorAll(){return [chip];},createElement(){return new Element();},addEventListener(){}};
@@ -31,6 +31,11 @@ await assert.rejects(ui.refresh(),/newer edit/);assert.equal(ui.get().draft[0].i
 const rendered={...old,revision:9,ready:true,directed:null,feedback:{},receipt:{width:720,height:1280,seconds:45,moments:1,profile:'720p compilation'}};
 ui.set({state:rendered,prepared:true});next={...rendered,revision:10};await ui.refresh();assert.equal(ui.get().prepared,null);checks.push('new export revision invalidates prepared share');
 ui.set({state:rendered,prepared:true});$('reel').setAttribute('src','old');next={...rendered,csrf:'new',ready:false};await ui.refresh();assert.equal(ui.get().prepared,null);assert.equal($('reel').getAttribute('src'),null);checks.push('new session with same revision clears loaded reel');
+let clearRequests=0;ui.set({state:old});next=old;ui.override(async path=>{if(path==='/api/clear')clearRequests++;},async()=>{},async()=>{});
+$('clear').onclick();assert.equal($('clearConfirm').open,true);assert.equal(clearRequests,0);
+$('clearCancel').onclick();assert.equal($('clearConfirm').open,false);assert.equal(clearRequests,0);
+$('clear').onclick();const confirmedClear=$('clearConfirmButton').onclick();$('clearConfirmButton').onclick();await confirmedClear;
+assert.equal(clearRequests,1);checks.push('in-app clear dialog only deletes on one explicit confirm');
 const pendingRefreshes=[];fetcher=()=>new Promise((resolve,reject)=>pendingRefreshes.push({resolve,reject}));
 ui.set({state:{...old,previewReady:false},draft:[],dirty:false,observationStopped:true});$('resumeStatus').hidden=false;
 const olderSuccess=ui.refresh(), newerSuccess=ui.refresh();assert.equal(pendingRefreshes.length,2);

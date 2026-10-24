@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let state=null, draft=[], draftRevision=-1, dirty=false, staleDraft=false, running=false, uploading=false;
-let prepared=null, cancelled=false, chunkController=null, editing=null, expiryAt=0, generatedPromptTarget=null, observationStopped=false, refreshSequence=0;
+let prepared=null, cancelled=false, chunkController=null, editing=null, expiryAt=0, generatedPromptTarget=null, observationStopped=false, refreshSequence=0, clearPending=false;
 const explicitSettings=new Set();
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const labels={completePlayback:'Every moment plays to the end',soundInSync:'Picture and sound stay in sync',savedToPhotos:'Saved to Photos',photosSound:'Replays in Photos with sound',capturesNight:'It captures the night',wouldShare:'I would share this'};
@@ -239,7 +239,13 @@ $('reviewed').onchange=show;
 $('render').onclick=()=>operate(async()=>{await request('/api/render',{revision:submittedRevision(),reviewed:$('reviewed').checked,moments:draft});await wait();$('result').scrollIntoView({block:'start'});});
 $('cancel').onclick=async()=>{cancelled=true;chunkController?.abort();try{await request('/api/cancel');await wait();}catch(e){error(e);}};
 $('resumeStatus').onclick=()=>operate(wait);
-$('clear').onclick=()=>{if(!confirm('Delete test copies and the finished reel? Your original Photos videos are unchanged.'))return;operate(async()=>{await request('/api/clear');prepared=null;draftRevision=-1;dirty=false;staleDraft=false;$('reel').pause();$('reel').removeAttribute('src');$('reel').load();$('share').textContent='Prepare iPhone share';await refresh();});};
+$('clear').onclick=()=>{if(!running&&!clearPending)$('clearConfirm').showModal();};
+$('clearCancel').onclick=()=>{$('clearConfirm').close();};
+$('clearConfirmButton').onclick=()=>{
+ if(clearPending||running)return;
+ clearPending=true;$('clearConfirm').close();
+ return operate(async()=>{try{await request('/api/clear');prepared=null;draftRevision=-1;dirty=false;staleDraft=false;$('reel').pause();$('reel').removeAttribute('src');$('reel').load();$('share').textContent='Prepare iPhone share';await refresh();}finally{clearPending=false;}});
+};
 for(const b of document.querySelectorAll('[data-prompt]'))b.onclick=()=>{
  $('prompt').value=b.dataset.prompt;
  generatedPromptTarget=Number(b.dataset.target)||null;

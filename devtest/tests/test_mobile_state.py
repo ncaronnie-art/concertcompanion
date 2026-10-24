@@ -102,6 +102,43 @@ class MobileStateTests(unittest.TestCase):
                 page.close()
             browser.close()
 
+    @unittest.skipUnless(sync_playwright, "Playwright is not installed in this quality container")
+    def test_clear_dialog_requires_confirm_and_escape_or_cancel_do_not_mutate(self):
+        """The private browser path must not depend on native confirm()."""
+        html = (ROOT / "static" / "index.html").read_text()
+        html = re.sub(r'<script[^>]+src="/app.js"[^>]*></script>', '', html)
+        html = re.sub(r'<link[^>]+href="/style.css"[^>]*>', '', html)
+        state = planned_state()
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(executable_path="/usr/bin/chromium", headless=True,
+                                                 args=["--no-sandbox"])
+            page = browser.new_page(viewport={"width": 390, "height": 844})
+            page.set_content(html)
+            page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+            page.evaluate("""state => {
+                window.clearCalls = [];
+                window.fetch = async (url, options = {}) => {
+                    if (url === '/api/clear') window.clearCalls.push({url, method: options.method, csrf: options.headers?.['X-Compass-CSRF']});
+                    return new Response(JSON.stringify(url === '/api/clear' ? {ok: true} : state), {
+                        status: 200, headers: {"content-type": "application/json"}
+                    });
+                };
+            }""", state)
+            page.add_script_tag(path=str(ROOT / "static" / "app.js"))
+            page.wait_for_function("document.getElementById('review').hidden === false")
+            page.locator("#clear").click()
+            self.assertTrue(page.locator("#clearConfirm").evaluate("dialog => dialog.open"))
+            page.keyboard.press("Escape")
+            page.wait_for_function("!document.getElementById('clearConfirm').open")
+            self.assertEqual(page.evaluate("window.clearCalls.length"), 0)
+            page.locator("#clear").click(); page.locator("#clearCancel").click()
+            self.assertEqual(page.evaluate("window.clearCalls.length"), 0)
+            page.locator("#clear").click(); page.locator("#clearConfirmButton").click()
+            page.wait_for_function("window.clearCalls.length === 1")
+            self.assertEqual(page.evaluate("window.clearCalls[0].method"), "POST")
+            self.assertEqual(page.evaluate("window.clearCalls[0].csrf"), "test-csrf")
+            page.close(); browser.close()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -7,6 +7,7 @@ const explicitSettings=new Set();
 // or the server until explicit activation. Reload requires reselecting files.
 const catalog=[], CATALOG_LIMIT=500, CATALOG_PAGE=25;
 let catalogPage=0, catalogMatches=[], localPreviewURL=null;
+let splitEditing=null;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const labels={completePlayback:'Every moment plays to the end',soundInSync:'Picture and sound stay in sync',savedToPhotos:'Saved to Photos',photosSound:'Replays in Photos with sound',capturesNight:'It captures the night',wouldShare:'I would share this'};
 function error(e){const text=e.message||String(e);$('error').textContent=text;$('error').hidden=false;}
@@ -214,6 +215,7 @@ async function refresh(){
  if(state?.error&&!next.error&&$('error').textContent===state.error)clearError();
  const newSession=!!state&&state.csrf!==next.csrf;
  const newRevision=!!state&&state.revision!==next.revision;
+ if((newSession||newRevision)&&$('splitDialog').open)$('splitDialog').close();
  const restore=!state||newSession||newRevision||!!next.directed&&next.revision!==draftRevision;
  if(newSession){discardPreparedMedia();draft=[];dirty=false;staleDraft=false;draftRevision=-1;error(Error('This session expired. Deleted media cannot be restored; choose clips for a new test.'));}
  if(state&&next.revision!==draftRevision&&dirty&&!running){
@@ -260,6 +262,9 @@ function show(){
  $('save').textContent='Update preview';
  $('saveState').textContent=pending?'Output settings changed. Choose Apply settings and preview, or restore saved settings before export.':dirty?'Edits changed. Update preview before export.':!state.previewReady?'Saved edit has no current preview. Choose Update preview to retry; your sources are kept.':'Edits saved in this session.';
  $('moments').querySelectorAll('button').forEach(b=>b.disabled=busy);
+ $('moments').querySelectorAll('[data-split]').forEach(b=>b.disabled=busy||!!splitProblem(draft.find(m=>m.id===b.dataset.split)));
+ $('undoSplit').hidden=!state.canUndoSplit;
+ $('undoSplit').disabled=busy||staleDraft||dirty||pending||state.ready||!state.canUndoSplit;
  $('clips').replaceChildren(...(state.ready?[]:state.clips).map(c=>{
   const el=document.createElement('div');el.className='source';const img=document.createElement('img');img.alt='';img.src=`/api/poster/${c.id}`;
   const info=document.createElement('div');info.append(text('b',c.name),text('small',`${c.duration.toFixed(1)}s / ${c.hasAudio?'original sound':'silent source'} / analyzed / ${catalogIncluded(c.id)?'included in saved edit':'not included in saved edit'}`));el.append(img,info);return el;
@@ -300,6 +305,7 @@ function renderMoments(){
   actions.append(button(m.locked?'Unlock':'Lock',()=>{m.locked=!m.locked;changed();renderMoments();}),button(m.approved?'Reject':'Restore',()=>{m.approved=!m.approved;changed();renderMoments();}));
   const up=button('Earlier',()=>move(index,-1));up.setAttribute('aria-label',`Move moment ${index+1} earlier`);
   const down=button('Later',()=>move(index,1));down.setAttribute('aria-label',`Move moment ${index+1} later`);actions.append(up,down);
+  const split=button('Split range',()=>openSplit(m.id));split.dataset.split=m.id;split.disabled=!!splitProblem(m);split.title=splitProblem(m)||'Split at your chosen point; both halves inherit the current choices.';actions.append(split);
   el.append(top,body,text('p',m.reason,'reason'),actions);$('moments').append(el);
   if(m.approved)$('story').append(text('span',m.role.toUpperCase()));
  });
@@ -307,6 +313,37 @@ function renderMoments(){
 function changed(){dirty=true;$('reviewed').checked=false;show();}
 function settingsChanged(){$('reviewed').checked=false;show();}
 function move(i,d){const j=i+d;if(j<0||j>=draft.length)return;[draft[i],draft[j]]=[draft[j],draft[i]];changed();renderMoments();}
+function splitProblem(moment){
+ if(!state?.directed?.plan.settings.preserveSections)return 'Splitting is available in Keep selected sections intact mode.';
+ if(staleDraft||dirty||pendingSettings())return 'Apply or restore settings and update your saved edit before splitting.';
+ if(state.ready||!moment)return 'Open a saved source range before splitting.';
+ if(draft.length>=120)return 'This test supports at most 120 ranges, including rejected ranges.';
+ if(moment.duration<.2)return 'A split needs at least 0.1 seconds on each side.';
+ return '';
+}
+function openSplit(id){
+ const m=draft.find(m=>m.id===id), problem=splitProblem(m);
+ if(running||state?.busy||uploading)return;
+ if(problem){error(Error(problem));return;}
+ splitEditing={id,revision:submittedRevision(),session:state.csrf,duration:m.duration};
+ $('splitRange').textContent=`${state.clips.find(c=>c.id===m.clipID).name}: ${m.start.toFixed(3)}s to ${(m.start+m.duration).toFixed(3)}s. Both halves stay ${m.approved?'included':'rejected'} and ${m.locked?'locked':'unlocked'}.`;
+ $('splitOffset').value='';$('splitOffset').max=String(m.duration-.1);$('splitError').textContent='';$('splitDialog').showModal();
+}
+$('splitDialog').onclose=()=>{splitEditing=null;};
+$('splitCancel').onclick=()=>$('splitDialog').close();
+$('splitConfirm').onclick=()=>{
+ if(!splitEditing||running||state.busy)return;
+ const captured={...splitEditing}, offset=Number($('splitOffset').value), problem=splitProblem(draft.find(m=>m.id===captured.id));
+ if(problem||captured.session!==state.csrf||captured.revision!==state.revision){$('splitError').textContent=problem||'The saved edit changed. Close this dialog and reopen the current range.';return;}
+ if(!Number.isFinite(offset)||offset<.1||offset>captured.duration-.1+1e-12||Math.abs(offset*1000-Math.round(offset*1000))>1e-7){$('splitError').textContent='Enter seconds from the range start, to millisecond precision, leaving at least 0.1s on each side.';return;}
+ $('splitDialog').close();
+ return operate(async()=>{await request('/api/split',{revision:captured.revision,momentID:captured.id,offset});await wait();});
+};
+$('undoSplit').onclick=()=>{
+ if(!state?.canUndoSplit||dirty||pendingSettings()||state.busy||running)return;
+ const revision=snapshotRevision();if(revision===null)return;
+ return operate(async()=>{await request('/api/split/undo',{revision});await wait();});
+};
 function editorValues(){
  const m=structuredClone(editing);m.clipID=$('editSource').value;m.start=Number($('editStart').value);m.duration=Number($('editDuration').value);
  m.focusX=Number($('focusX').value);m.focusY=Number($('focusY').value);m.muted=$('editMute').checked;m.locked=$('editLock').checked;return m;

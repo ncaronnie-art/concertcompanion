@@ -5,6 +5,7 @@ CSRF + origin/host checks protect writes. GitHub must keep port 8765 private.
 """
 from __future__ import annotations
 import copy, hashlib, http.cookies, json, math, os, re, secrets, shutil, threading, time, uuid
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -89,6 +90,7 @@ class Session:
         self.feedback = {}
         self.receipt = None
         self.preview_revision = None
+        self.split_undo = None  # One revision-bound edit snapshot, never media ownership.
         self.started = None
 
     def touch(self):
@@ -106,6 +108,7 @@ class Session:
                 statusSeconds=max(0, int(time.monotonic() - self.status_since)),
                 clips=[{k: c[k] for k in ('id', 'name', 'duration', 'hasAudio', 'width', 'height')} for c in self.clips],
                 directed=self.directed, upload=self.upload_state(), sourceBytes=self.bytes,
+                canUndoSplit=bool(self.split_undo and self.split_undo['revision'] == self.revision and not self.ready),
                 feedback=self.feedback, receipt=self.receipt, previewReady=self.preview_revision == self.revision,
                 expiresIn=max(0, int(remaining)),
                 limits=dict(clips=MAX_CLIPS, bytesPerClip=MAX_UPLOAD, projectBytes=MAX_PROJECT,
@@ -265,6 +268,39 @@ def patch_plan(s, patches):
             raise engine.TestError('Unlock this moment before changing its source, trim or framing.')
         moments.append(m)
     updated['moments'] = moments
+    return updated
+
+
+def split_plan(s, moment_id, offset):
+    """Only this operation may introduce a server-owned moment ID.
+
+    Millisecond offsets land on the 48 kHz sample grid. Decimal subtraction
+    preserves the selected endpoint (including the exact 0.1s edge case).
+    Ordinary review still requires exactly the existing ID set.
+    """
+    if not s.directed or not s.directed['plan']['settings'].get('preserveSections'):
+        raise engine.TestError('Use Keep selected sections intact before splitting a range.')
+    updated = patch_plan(s, s.directed['plan']['moments'])
+    if len(updated['moments']) >= engine.MAX_RENDER_MOMENTS:
+        raise engine.TestError('This test supports at most 120 ranges, including rejected ranges. No split was saved.')
+    if (not isinstance(moment_id, str) or type(offset) not in (int, float)
+            or not math.isfinite(offset) or offset < .1 or offset > engine.MAX_CLIP_SECONDS
+            or not math.isclose(offset * 1000, round(offset * 1000), rel_tol=0, abs_tol=1e-7)):
+        raise engine.TestError('Choose a split in seconds from the range start, to millisecond precision, leaving at least 0.1s on each side.')
+    index = next((i for i, m in enumerate(updated['moments']) if m['id'] == moment_id), None)
+    if index is None:
+        raise engine.TestError('That range is not in the saved edit. Reload before splitting.')
+    left = updated['moments'][index]
+    start, duration, point = (Decimal(str(v)) for v in (left['start'], left['duration'], offset))
+    remainder = duration - point
+    if remainder < Decimal('0.1'):
+        raise engine.TestError('Leave at least 0.1s on each side of the split. Nothing was changed.')
+    right = copy.deepcopy(left)
+    right.update(id=str(uuid.uuid4()).upper(), start=float(start + point), duration=float(remainder))
+    if round(offset * 48000) + round(right['duration'] * 48000) != round(left['duration'] * 48000):
+        raise engine.TestError('That split cannot preserve the selected audio sample count. Choose another millisecond point.')
+    left['duration'] = offset
+    updated['moments'].insert(index + 1, right)
     return updated
 
 
@@ -518,6 +554,7 @@ class Handler(BaseHTTPRequestHandler):
                     shutil.rmtree(s.root, ignore_errors=True); s.root.mkdir(mode=0o700)
                     s.clips, s.directed, s.ready, s.bytes = [], None, False, 0
                     s.upload, s.receipt, s.feedback, s.preview_revision = None, None, {}, None
+                    s.split_undo = None
                     s.revision += 1; s.phase = 'choose'; s.error = ''; s.progress = 0
                     s.status = 'All test media deleted. Delete the Codespace too when finished.'
                 self.send_json({'ok': True})
@@ -533,6 +570,41 @@ class Handler(BaseHTTPRequestHandler):
                     if not s.upload or s.upload['id'] != body.get('id'):
                         raise engine.TestError('That upload is no longer active.')
                     s.analyze_upload()
+                self.send_json({'ok': True}, 202)
+                return
+            if path in ('/api/split', '/api/split/undo'):
+                body = self.read_json()
+                with s.lock:
+                    if s.busy or s.ready or not s.directed:
+                        raise engine.TestError('Finish the current operation and open a saved edit before splitting or undoing.')
+                    revision = body.get('revision')  # Required, never default to the latest revision.
+                    if type(revision) is not int or revision != s.revision:
+                        self.send_json({'error': 'A newer edit exists or the split revision is missing. Reload before changing it.'}, 409)
+                        return
+                    undoing = path == '/api/split/undo'
+                    before = copy.deepcopy(s.directed)
+                    if undoing:
+                        if not s.split_undo or s.split_undo['revision'] != revision:
+                            raise engine.TestError('Undo is available only for the last split, before another edit is saved.')
+                        updated = copy.deepcopy(s.split_undo['directed']['plan'])
+                    else:
+                        updated = split_plan(s, body.get('momentID'), body.get('offset'))
+                    def split_operation():
+                        checked = annotate(engine.direct(s.root, s.clips, updated['settings'], s.cancel, plan=updated), s.clips)
+                        checked['wizard'] = copy.deepcopy(before.get('wizard', {}))
+                        with s.lock:
+                            if s.cancel.is_set():
+                                raise engine.TestError('Split operation stopped before saving. Your prior edit is unchanged.')
+                            if s.revision != revision:
+                                raise engine.TestError('The edit changed before the split could be saved.')
+                            s.directed = checked
+                            s.revision += 1
+                            s.preview_revision = None
+                            s.split_undo = None if undoing else dict(revision=s.revision, directed=before)
+                            s.update(1, 'Split undone. Update preview before export.' if undoing else
+                                     'Range split saved in order. Both halves keep approval, lock, mute and framing. Update preview before export.')
+                    s.phase = 'review'
+                    s.work(split_operation)
                 self.send_json({'ok': True}, 202)
                 return
             if path in ('/api/plan', '/api/review', '/api/render'):

@@ -1,6 +1,6 @@
 """Private development renderer. Reuses CompassCore; never invokes a remote model."""
 from __future__ import annotations
-import array, copy, json, math, os, signal, subprocess, sys, time, uuid
+import array, copy, json, math, os, signal, subprocess, sys, time, uuid, wave
 from pathlib import Path
 from threading import Event
 from fractions import Fraction
@@ -246,7 +246,7 @@ def settings_from(data):
     if not isinstance(data, dict):
         raise TestError('Expected an edit settings object.')
     result = dict(mode='highlight', style='memory', targetSeconds=15, transitions='automatic',
-                  gentleCleanup=False, seamSmoothing=False, stabilize=False, prompt='')
+                  gentleCleanup=False, preserveSections=False, seamSmoothing=False, stabilize=False, prompt='')
     for key in result:
         if key in data:
             result[key] = data[key]
@@ -260,10 +260,18 @@ def settings_from(data):
         raise TestError('Choose a 15-, 30-, 45-, 60-, 90-, 120-, 180-, or 300-second target.')
     if not isinstance(result['prompt'], str) or len(result['prompt']) > 1500:
         raise TestError('Keep your direction under 1,500 characters.')
-    if (type(result['gentleCleanup']) is not bool or type(result['seamSmoothing']) is not bool
+    if (type(result['gentleCleanup']) is not bool or type(result['preserveSections']) is not bool
+            or type(result['seamSmoothing']) is not bool
             or result['stabilize'] is not False):
         raise TestError('Unsupported cleanup or stabilization setting.')
     return result
+
+
+def render_target(settings, duration=0):
+    # Intact duration may exceed a short requested target. Declare and reserve
+    # the existing long-form profile based on actual output, not that request.
+    seconds = max(settings['targetSeconds'], duration) if settings.get('preserveSections') else settings['targetSeconds']
+    return next((value for value in SUPPORTED_TARGET_SECONDS if value >= seconds), 300)
 
 
 def output_profile(target_seconds, aspect_ratio='9:16'):
@@ -286,25 +294,29 @@ def output_profile(target_seconds, aspect_ratio='9:16'):
 
 def direct(root, clips, settings, cancel, plan=None, previous=None, seed=0, explicit_settings=None):
     request = dict(clips=clips, settings=settings, action='validate' if plan is not None else 'plan', plan=plan, previous=previous, seed=seed,
-                   explicitSettings=explicit_settings or [])
+                   explicitSettings=explicit_settings or [], preserveSections=settings.get('preserveSections', False))
     source, target = root/'request.json', root/'response.json'
     source.write_text(json.dumps(request, allow_nan=False))
     try:
         planner_timeout = max(30, min(120, math.ceil(float(settings['targetSeconds']) / 2)))
         run([str(CLI), str(source), str(target)], cancel, planner_timeout)
-        return json.loads(target.read_text())
+        result = json.loads(target.read_text())
+        if settings.get('preserveSections') and result.get('preserveSections') is not True:
+            raise TestError('Rebuild the private planning adapter before using intact sections. No edit was changed.')
+        result['plan']['settings']['preserveSections'] = result.pop('preserveSections', False)
+        return result
     finally:
         source.unlink(missing_ok=True); target.unlink(missing_ok=True)
 
 
 def render(root, clips, directed, cancel, progress, preview=False):
     """Publish only verified output; on failure keep originals but delete partials."""
-    for p in list(root.glob('segment-*.*')) + list(root.glob('piece-*.*')) + [root / 'pending.mp4', root / 'assembly.ffconcat']:
+    for p in list(root.glob('segment-*.*')) + list(root.glob('piece-*.*')) + list(root.glob('section-audio-*.*')) + [root / 'pending.mp4', root / 'master-pending.mp4', root / 'assembly.ffconcat']:
         p.unlink(missing_ok=True)
     try:
         return _render(root, clips, directed, cancel, progress, preview)
     except BaseException:
-        for p in list(root.glob('segment-*.*')) + list(root.glob('piece-*.*')) + [root / 'pending.mp4', root / 'assembly.ffconcat']:
+        for p in list(root.glob('segment-*.*')) + list(root.glob('piece-*.*')) + list(root.glob('section-audio-*.*')) + [root / 'pending.mp4', root / 'master-pending.mp4', root / 'assembly.ffconcat']:
             p.unlink(missing_ok=True)
         raise
 
@@ -342,6 +354,22 @@ def frame_timeline(timeline):
     return shots
 
 
+def intact_frame_timeline(timeline):
+    # Native validation uses a 1/600s cursor. Re-anchor each *cumulative*
+    # boundary to approved 48k sample counts before the video-only rounding,
+    # so many fractional sections cannot accumulate a picture/sound offset.
+    sequential = copy.deepcopy(timeline)
+    samples = 0
+    for shot in sequential:
+        shot['at'] = samples / 48000
+        samples += round(shot['moment']['duration'] * 48000)
+    shots = frame_timeline(sequential)
+    duration = samples / 48000
+    if shots:
+        shots[-1]['moment']['duration'] = math.ceil(duration * 30 - 1e-8) / 30 - shots[-1]['at']
+    return shots, duration
+
+
 def render_deadline(duration):
     # Bound total work while leaving enough time for the intentionally
     # lower-resolution five-minute profile on two CPU cores.
@@ -356,17 +384,30 @@ def remaining_render_time(deadline, floor=1):
 
 
 def _render(root, clips, directed, cancel, progress, preview=False):
-    shots = frame_timeline(directed['timeline'])
+    settings = directed['plan']['settings']
+    intact = settings.get('preserveSections', False)
+    if intact and any(shot['overlap'] != 0 for shot in directed['timeline']):
+        raise TestError('Intact sections require a sequential timeline without overlaps. Rebuild the preview.')
+    if intact:
+        shots, intact_duration = intact_frame_timeline(directed['timeline'])
+    else:
+        shots = frame_timeline(directed['timeline'])
     if not shots or len(shots) > MAX_RENDER_MOMENTS:
         raise TestError(f'This desktop test supports up to {MAX_RENDER_MOMENTS} moments.')
     by_id = {c['id']: c for c in clips}
     segments = []
     duration = shots[-1]['at'] + shots[-1]['moment']['duration']
-    settings = directed['plan']['settings']
+    if intact:
+        duration = intact_duration
+        if duration > 300:
+            raise TestError('Intact sections exceed 300s. Remove a section or unlock and trim one.')
+        # Picture boundaries stay on the cumulative 30fps grid. Hold the final
+        # frame for less than one frame instead of cutting the soundtrack tail.
+    video_duration = shots[-1]['at'] + shots[-1]['moment']['duration']
     wizard = directed.get('wizard', {})
     deadline = render_deadline(duration)
     master_audio = continuous_audio_source(root, clips, wizard, duration, cancel, deadline)
-    profile = output_profile(settings['targetSeconds'], wizard.get('aspectRatio', '9:16'))
+    profile = output_profile(render_target(settings, duration), wizard.get('aspectRatio', '9:16'))
     audio_policy = AudioPolicy.from_settings(settings)
     if settings.get('stabilize'):
         raise TestError('This test does not implement stabilization.')
@@ -387,6 +428,12 @@ def _render(root, clips, directed, cancel, progress, preview=False):
             audible = False  # This original video interval has no source audio.
         if not audible: args += ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']
         vf = f'trim=start=0:end={source_length},tpad=stop_mode=clone:stop_duration=0.067,'+color_filter(video)+f'scale={profile["width"]}:{profile["height"]}:force_original_aspect_ratio=increase,crop={profile["width"]}:{profile["height"]}:(iw-ow)*{moment["focusX"]}:(ih-oh)*{moment["focusY"]},setsar=1,fps=30:start_time=0,format=yuv420p'
+        if intact and settings['transitions'] != 'cuts':
+            fade = min(.16, length / 4)
+            if i:
+                vf += f',fade=t=in:st=0:d={fade}'
+            if i + 1 < len(shots):
+                vf += f',fade=t=out:st={length-fade}:d={fade}'
         af = segment_audio_filter(source_length, length)
         af += audio_policy.segment_suffix()
         args += ['-map','0:v:0','-map','0:a:0' if audible else '1:a:0', '-t',str(length), '-vf',vf, '-af',af,
@@ -395,7 +442,15 @@ def _render(root, clips, directed, cancel, progress, preview=False):
                  '-color_primaries','bt709','-color_trc','bt709','-colorspace','bt709',str(target)]
         segment_timeout = min(remaining_render_time(deadline), max(180, min(600, math.ceil(length * 30))))
         ff(args,cancel,segment_timeout); segments.append(target); progress((i+1)/len(shots)*.65, 'Rendering selected moments')
-    pending = assemble_bounded(root, segments, shots, duration, cancel, progress, audio_policy, profile, deadline)
+    pending = assemble_bounded(root, segments, shots, video_duration, cancel, progress, audio_policy, profile, deadline)
+    if intact and not master_audio:
+        soundtrack = intact_audio(root, clips, directed['timeline'], cancel, audio_policy, deadline)
+        remux = root / 'master-pending.mp4'
+        ff(inp(soundtrack) + inp(pending) +
+           ['-map', '1:v:0', '-map', '0:a:0', '-t', str(duration), '-c:v', 'copy',
+            '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+            '-map_metadata', '-1', '-movflags', '+faststart', str(remux)], cancel, remaining_render_time(deadline))
+        pending.unlink(); remux.replace(pending)
     if master_audio:
         remux = root / 'master-pending.mp4'
         ff(['-ss', ff_time(master_audio['seek'])] + inp(master_audio['path']) + inp(pending) +
@@ -410,9 +465,59 @@ def _render(root, clips, directed, cancel, progress, preview=False):
     final=root/('preview.mp4' if preview else 'reel.mp4'); pending.replace(final)
     # Preview preserves source copies for revision; final export alone cleans them.
     for p in root.iterdir():
-        if p.is_file() and p != final and (not preview or p.name.startswith(('segment-', 'piece-', 'pending', 'assembly'))): p.unlink()
+        if p.is_file() and p != final and (not preview or p.name.startswith(('segment-', 'piece-', 'section-audio-', 'pending', 'assembly'))): p.unlink()
     progress(1, 'Preview ready. Sources are retained for changes.' if preview else 'Full reel ready. Source copies have been deleted.')
     return final
+
+
+def intact_audio(root, clips, timeline, cancel, audio_policy, deadline):
+    """Concatenate approved PCM samples independently of the picture frame grid.
+
+    Preserve the shared source-video origin and original packet gaps through
+    the existing audio filter. Only bounded 5ms edge gains de-click each join;
+    they neither overlap recordings nor change sample count, pitch or speed.
+    """
+    by_id = {clip['id']: clip for clip in clips}
+    output = root / 'section-audio-final.wav'
+    expected = 0
+    with wave.open(str(output), 'wb') as combined:
+        combined.setnchannels(2); combined.setsampwidth(2); combined.setframerate(48000)
+        for index, shot in enumerate(timeline):
+            moment = shot['moment']; clip = by_id[moment['clipID']]
+            samples = round(moment['duration'] * 48000)
+            source = root / clip['fileName']
+            timing = source_timing(probe(source, cancel))
+            audible = clip['hasAudio'] and not moment['muted']
+            coverage = timing['audioCoverage']
+            if coverage and (moment['start'] >= coverage['end'] or moment['start'] + moment['duration'] <= coverage['start']):
+                audible = False
+            args = (['-ss', ff_time(timing['seekOrigin'] + moment['start'])] + inp(source)
+                    if audible else ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo'])
+            af = segment_audio_filter(moment['duration'], moment['duration'])
+            af += f',apad,atrim=end_sample={samples}' + audio_policy.segment_suffix()
+            ramp = min(240, samples // 4)
+            if index:
+                af += f',afade=t=in:ss=0:ns={ramp}'
+            if index + 1 < len(timeline):
+                af += f',afade=t=out:ss={samples-ramp}:ns={ramp}'
+            section = root / f'section-audio-{index:03d}.pcm'
+            ff(args + ['-map', '0:a:0', '-vn', '-af', af, '-ac', '2', '-ar', '48000',
+                       '-c:a', 'pcm_s16le', '-f', 's16le', str(section)], cancel, remaining_render_time(deadline))
+            if section.stat().st_size != samples * 4:
+                raise TestError('Intact audio sample count disagrees with the approved section. No reel was published.')
+            if cancel.is_set():
+                raise TestError('Stopped safely. No partial reel is shareable.')
+            with section.open('rb') as source_pcm:
+                while block := source_pcm.read(1024 * 1024):
+                    if cancel.is_set():
+                        raise TestError('Stopped safely. No partial reel is shareable.')
+                    combined.writeframesraw(block)
+            expected += samples * 4
+            section.unlink()
+    with wave.open(str(output), 'rb') as combined:
+        if combined.getnframes() * 4 != expected:
+            raise TestError('Intact soundtrack length failed verification.')
+    return output
 
 
 def finalize_preview(root: Path):

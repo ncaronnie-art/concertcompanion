@@ -274,17 +274,19 @@ def annotate(directed, clips):
     directed['coverage'] = dict(used=len(used), total=len(clips),
                                omitted=[c['name'] for c in clips if c['id'] not in used])
     directed['seconds'] = directed['timeline'][-1]['at'] + directed['timeline'][-1]['moment']['duration']
+    if directed['plan']['settings'].get('preserveSections'):
+        directed['seconds'] = sum(round(shot['moment']['duration'] * 48000) for shot in directed['timeline']) / 48000
     # This is intentionally a review-only recommendation.  It gives the
     # client a measurable alternate story order without silently moving a
     # reviewed trim, rejection, lock, mute choice, or manual framing.
-    directed['editorialProposal'] = propose_editorial_refinement(
-        directed['plan'], clips).as_dict()
+    directed['editorialProposal'] = (None if directed['plan']['settings'].get('preserveSections') else
+        propose_editorial_refinement(directed['plan'], clips).as_dict())
     return directed
 
 
-def require_render_workspace(session, settings, wizard=None):
+def require_render_workspace(session, settings, wizard=None, duration=0):
     """Reserve room for bounded segment/piece files before a heavy render."""
-    profile = engine.output_profile(settings['targetSeconds'], (wizard or {}).get('aspectRatio', '9:16'))
+    profile = engine.output_profile(engine.render_target(settings, duration), (wizard or {}).get('aspectRatio', '9:16'))
     reserve = LONG_RENDER_RESERVE if profile['width'] == 720 else 1024**3
     if shutil.disk_usage(session.root).free < reserve:
         raise engine.TestError('Not enough free private workspace for this render. Clear another test or choose a shorter compilation.')
@@ -298,6 +300,10 @@ def require_compilation_approval(settings, approved):
 
 def require_directed_compilation_approval(directed, approved):
     require_compilation_approval(directed['plan']['settings'], approved)
+    if directed['plan']['settings'].get('preserveSections'):
+        actual = sum(shot['moment']['duration'] for shot in directed['timeline'])
+        if actual > 60 and approved is not True:
+            raise engine.TestError(f'Your intact sections total {actual:.1f}s. Confirm the longer 720p compilation, or remove/unlock and trim a section.')
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -555,12 +561,14 @@ class Handler(BaseHTTPRequestHandler):
                                 raise engine.TestError('Make a first cut before asking for an adjustment.')
                             requested = copy.deepcopy(s.directed['plan']['settings'])
                             requested['prompt'] = adjustment
+                            if 'preserveSections' in body:
+                                requested['preserveSections'] = body['preserveSections']
                             wizard['vibePrompt'] = adjustment
                             settings = engine.settings_from(requested)
                         else:
                             settings = engine.settings_from(body)
                         explicit = body.get('explicitSettings', []) if adjustment is None else []
-                        allowed_explicit = {'mode', 'style', 'targetSeconds', 'transitions', 'gentleCleanup'}
+                        allowed_explicit = {'mode', 'style', 'targetSeconds', 'transitions', 'gentleCleanup', 'preserveSections'}
                         if not isinstance(explicit, list) or any(x not in allowed_explicit for x in explicit):
                             raise engine.TestError('Invalid explicit wizard setting.')
                         require_compilation_approval(settings, body.get('compilationApproved'))
@@ -582,7 +590,7 @@ class Handler(BaseHTTPRequestHandler):
                                 s.directed['wizard'] = wizard
                                 s.revision += 1
                                 s.preview_revision = None
-                            profile = require_render_workspace(s, result['plan']['settings'], wizard)
+                            profile = require_render_workspace(s, result['plan']['settings'], wizard, s.directed['seconds'])
                             engine.render(s.root, s.clips, s.directed, s.cancel, s.update, preview=True)
                             with s.lock:
                                 s.preview_revision = s.revision
@@ -598,8 +606,8 @@ class Handler(BaseHTTPRequestHandler):
                             saved = s.directed['plan']
                             if updated != saved:
                                 raise engine.TestError('Your submitted edits differ from the reviewed preview. Update preview before export; uploaded sources were kept.')
-                            for key in ('mode', 'style', 'targetSeconds', 'transitions', 'gentleCleanup', 'prompt'):
-                                if key in body and body[key] != saved['settings'].get(key):
+                            for key in ('mode', 'style', 'targetSeconds', 'transitions', 'gentleCleanup', 'preserveSections', 'prompt'):
+                                if key in body and body[key] != saved['settings'].get(key, False if key == 'preserveSections' else None):
                                     raise engine.TestError('Your submitted settings differ from the reviewed preview. Update preview before export; uploaded sources were kept.')
                             if 'wizard' in body and wizard_from(body, s.directed.get('wizard'), s.clips) != s.directed.get('wizard', {}):
                                 raise engine.TestError('Your submitted output settings differ from the reviewed preview. Update preview before export; uploaded sources were kept.')
@@ -613,6 +621,8 @@ class Handler(BaseHTTPRequestHandler):
                             # Review/render validation recreates a response from
                             # Swift; carry the persisted wizard contract forward.
                             checked['wizard'] = copy.deepcopy(s.directed.get('wizard', {}))
+                            if not rendering and refresh_preview and checked['plan']['settings'].get('preserveSections'):
+                                require_directed_compilation_approval(checked, body.get('compilationApproved'))
                             # Saving edits invalidates the assembled preview; export
                             # may only promote the still-current reviewed preview.
                             if not rendering:
@@ -621,7 +631,7 @@ class Handler(BaseHTTPRequestHandler):
                                     s.preview_revision = None
                             if not rendering:
                                 if refresh_preview:
-                                    profile = require_render_workspace(s, checked['plan']['settings'], checked.get('wizard'))
+                                    profile = require_render_workspace(s, checked['plan']['settings'], checked.get('wizard'), checked['seconds'])
                                     engine.render(s.root, s.clips, s.directed, s.cancel, s.update, preview=True)
                                     with s.lock:
                                         s.preview_revision = s.revision
@@ -632,7 +642,7 @@ class Handler(BaseHTTPRequestHandler):
                             if not RENDER_GATE.acquire(blocking=False):
                                 raise engine.TestError('Another private compilation is rendering. Wait for it to finish, then render this reviewed edit again.')
                             try:
-                                profile = require_render_workspace(s, checked['plan']['settings'], checked.get('wizard'))
+                                profile = require_render_workspace(s, checked['plan']['settings'], checked.get('wizard'), checked['seconds'])
                                 before = time.monotonic()
                                 result = engine.finalize_preview(s.root)
                                 with s.lock:

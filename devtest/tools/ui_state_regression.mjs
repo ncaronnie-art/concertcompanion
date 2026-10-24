@@ -25,7 +25,7 @@ let next,fetcher=async()=>({headers:{get:key=>key==='content-type'?'application/
 let source=readFileSync(new URL('../static/app.js',import.meta.url),'utf8');
 source=source.replace(/refresh\(\)\.then\(\(\)=>\{if\(state\.busy&&!state\.upload\)operate\(wait\);\}\)\.catch\(error\);\s*$/, '');
 source+='\nglobalThis.__ui={refresh,wait,show,pendingSettings,submittedRevision,changed,get:()=>({state,draft,draftRevision,dirty,staleDraft,prepared,observationStopped}),set:(v)=>{state=v.state;draft=v.draft||[];draftRevision=v.draftRevision??v.state?.revision??-1;dirty=!!v.dirty;staleDraft=false;prepared=v.prepared||null;running=false;observationStopped=!!v.observationStopped;if(state){refreshAudioOptions(state,true);if(state.directed){restoreSavedSettings(state.directed.plan.settings);restoreWizard(state.directed.wizard);}}},override:(r,w,u)=>{request=r;wait=w;upload=u;}};';
-const context={document,console,fetch:(...a)=>fetcher(...a),setInterval:()=>0,setTimeout,clearTimeout,AbortController,structuredClone,File:class {constructor(parts){this.parts=parts;}},Error,Number,Math,Object,Array,JSON};
+const context={document,console,fetch:(...a)=>fetcher(...a),setInterval:()=>0,setTimeout,clearTimeout,AbortController,structuredClone,File:class {constructor(parts){this.parts=parts;}},Error,Number,Math,Object,Array,JSON,confirm:()=>true};
 vm.runInNewContext(source,context,{filename:'app.js'});
 const ui=context.__ui,$=document.getElementById,checks=[];
 const settings={targetSeconds:30,mode:'highlight',style:'memory',transitions:'cuts',prompt:''};
@@ -118,15 +118,15 @@ ui.set({state:saved,draft:structuredClone(saved.directed.plan.moments)});next={.
 assert.equal(ui.get().dirty,false);assert.equal($('save').disabled,false);assert.equal(ui.get().draft[0].id,saved.directed.plan.moments[0].id);assert.equal($('audioClipID').options.length,3);
 const addedCalls=[];ui.override(async(path,body)=>addedCalls.push({path,body}),ui.wait,async()=>{});next={...next,revision:9,previewReady:true};await $('save').onclick();assert.equal(addedCalls[0].path,'/api/review');assert.equal(addedCalls[0].body.revision,8);assert.equal(ui.get().state.clips.length,3);
 checks.push('adding a source leaves a clean saved cut eligible for Update preview without replanning');
-const pendingCases=[['mode','trailer','change'],['style','cinematic','change'],['length','45','change'],['transitions','dissolves','change'],['cleanup',true,'change'],['prompt','new brief','input'],['preset','memory','change'],['aspectRatio','16:9','change'],['audioMode','single-source','change']];
+const pendingCases=[['mode','trailer','change'],['style','cinematic','change'],['length','45','change'],['transitions','dissolves','change'],['cleanup',true,'change'],['preserveSections',true,'change'],['prompt','new brief','input'],['preset','memory','change'],['aspectRatio','16:9','change'],['audioMode','single-source','change']];
 for(const [id,value,event] of pendingCases){
  ui.set({state:saved,draft:structuredClone(saved.directed.plan.moments)});$('reviewed').checked=true;ui.show();assert.equal($('render').disabled,false,id+' baseline export');
- if(id==='cleanup')$(id).checked=value;else $(id).value=value;$(id).dispatch(event);
+ if(id==='cleanup'||id==='preserveSections')$(id).checked=value;else $(id).value=value;$(id).dispatch(event);
  assert.equal(ui.pendingSettings(),true,id+' pending');assert.equal($('render').disabled,true,id+' export blocked');assert.equal($('reviewed').checked,false,id+' approval cleared');assert.equal($('revertSettings').hidden,false);assert.match($('saveState').textContent,/Output settings changed/);
  let calls=0;ui.override(async()=>{calls++;},async()=>{},async()=>{});await $('render').onclick();await $('save').onclick();assert.equal(calls,0,id+' handler guard');
  $('revertSettings').onclick();assert.equal(ui.pendingSettings(),false,id+' reverted');assert.equal($('reviewed').checked,false);assert.equal($('render').disabled,true);
 }
-checks.push('all nine output-setting controls disclose pending changes, clear approval and guard direct export/save calls');
+checks.push('all ten output-setting controls disclose pending changes, clear approval and guard direct export/save calls');
 for(const [id,value,event] of [['audioClipID','A','change'],['audioStart','9','input']]){
  ui.set({state:continuous,draft:structuredClone(continuous.directed.plan.moments)});$('reviewed').checked=true;$(id).value=value;$(id).dispatch(event);assert.equal(ui.pendingSettings(),true);assert.equal($('render').disabled,true);$('revertSettings').onclick();assert.equal($('audioClipID').value,'B');assert.equal($('audioStart').value,'8.5');assert.equal(ui.pendingSettings(),false);
 }
@@ -142,10 +142,30 @@ checks.push('applying pending settings saves the intended wizard and requires fr
 const exported=[];$('reviewed').checked=true;$('reviewed').dispatch('change');assert.equal($('render').disabled,false);
 ui.override(async(path,body)=>exported.push({path,body}),async()=>{},async()=>{});await $('render').onclick();
 assert.equal(exported.length,1);const exportedPayload=exported[0].body;assert.equal(exported[0].path,'/api/render');assert.equal(exportedPayload.revision,8);assert.equal(exportedPayload.reviewed,true);
-for(const key of ['mode','style','targetSeconds','transitions','gentleCleanup','prompt'])assert.equal(exportedPayload[key],next.directed.plan.settings[key],key+' export payload');
+for(const key of ['mode','style','targetSeconds','transitions','gentleCleanup','preserveSections','prompt'])assert.equal(exportedPayload[key],next.directed.plan.settings[key]??(key==='preserveSections'?false:undefined),key+' export payload');
 for(const key of ['preset','aspectRatio','audioMode','audioClipID','audioStart','vibePrompt'])assert.equal(exportedPayload.wizard[key],next.directed.wizard[key],key+' wizard payload');
 ui.get().draft[0].duration=9;assert.equal(exportedPayload.moments[0].duration,3);
 checks.push('export snapshots every intended setting and wizard choice for the server equality gate');
+
+// Intact is explicit, persisted and included in every stale-preview guard.
+ui.set({state:saved,draft:structuredClone(saved.directed.plan.moments)});
+assert.equal($('preserveSections').checked,false);$('preserveSections').checked=true;$('preserveSections').dispatch('change');
+assert.equal(ui.pendingSettings(),true);assert.equal($('render').disabled,true);assert.equal($('transitions').options.find(o=>o.value==='dissolves').textContent,'Soft boundary fades (no overlap)');
+let intactPayload;ui.override(async(path,body)=>{intactPayload=body;},async()=>{},async()=>{});await $('plan').onclick();
+assert.equal(intactPayload.preserveSections,true);assert.ok(intactPayload.explicitSettings.includes('preserveSections'));
+const intactSaved={...saved,revision:9,directed:{...saved.directed,plan:{...saved.directed.plan,settings:{...saved.directed.plan.settings,preserveSections:true}},seconds:105}};
+ui.set({state:null});next=intactSaved;await ui.refresh();assert.equal($('preserveSections').checked,true);assert.match($('savedSettings').textContent,/Intact sections/);assert.match($('durationTruth').textContent,/intact sections 105.0s/);
+$('adjustment').value='keep the bridge';let intactAdjustment;ui.override(async(path,body)=>{intactAdjustment=body;},async()=>{},async()=>{});await $('adjust').onclick();assert.equal(intactAdjustment.preserveSections,true);
+checks.push('intact choice survives reload, enters plan/adjust payloads and invalidates old preview approval');
+let confirmation='',confirmedCalls=0;context.confirm=message=>{confirmation=message;return false;};
+ui.set({state:{...saved,directed:null},draft:[]});$('length').value='30';$('preserveSections').checked=true;
+ui.override(async()=>{confirmedCalls++;},async()=>{},async()=>{});await $('plan').onclick();assert.equal(confirmedCalls,0);assert.match(confirmation,/180.0s \(requested 30s\)/);
+context.confirm=()=>true;await $('plan').onclick();assert.equal(confirmedCalls,1);
+const extended=structuredClone(intactSaved.directed.plan.moments);extended[0].duration=80;
+ui.set({state:intactSaved,draft:extended,dirty:true});context.confirm=()=>false;await $('save').onclick();assert.equal(confirmedCalls,1);
+let reviewPayload;context.confirm=()=>true;ui.override(async(path,body)=>{assert.equal(path,'/api/review');reviewPayload=body;},async()=>{},async()=>{});await $('save').onclick();assert.equal(reviewPayload.compilationApproved,true);assert.equal(reviewPayload.moments[0].duration,80);
+checks.push('actual intact duration, not short target, triggers cancellable long-render confirmation for plans and updated previews');
+ui.set({state:saved,draft:structuredClone(saved.directed.plan.moments)});
 
 let polls=0;fetcher=async()=>{if(++polls===1)throw Error('temporary network');return {headers:{get:()=> 'application/json'},ok:true,json:async()=>({...old,busy:false})};};ui.set({state:{...old,busy:true}});await ui.wait();assert.equal(polls,2);checks.push('transient poll failure resumes the same job without a submission');
 fetcher=(_url,opts)=>new Promise((_resolve,reject)=>opts.signal.addEventListener('abort',()=>reject(Object.assign(new Error('aborted'),{name:'AbortError'}))));ui.set({state:{...old,busy:true}});await assert.rejects(ui.refresh(),/timed out/);checks.push('hung state fetch reaches the bounded observation deadline');

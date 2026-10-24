@@ -27,15 +27,16 @@ function durationTruth(directed){
  const planned=Number(directed?.seconds);
  if(!Number.isFinite(requested)||!Number.isFinite(planned))return '';
  const target=`Requested ${durationLabel(requested)}`;
+ if(directed.plan.settings.preserveSections)return `${target} · intact sections ${planned.toFixed(1)}s. Ranges and order stay unchanged; no trimming, looping or stretching to fit the target.`;
  const output=`first cut ${planned.toFixed(1)}s`;
  if(Math.abs(requested-planned)<=.08)return `${target} \u00b7 ${output}. Review the selected moments before rendering.`;
  const gap=planned<requested?'shorter':'longer';
  return `${target} \u00b7 ${output} (${gap} than requested). Nothing is padded, looped, stretched, or invented. To preserve a longer musical section, extend and lock an approved source moment, then save again.`;
 }
 function savedSettingsLabel(settings){
- const mode=settings.mode==='trailer'?'Trailer':'Highlights';
+ const mode=settings.preserveSections?'Intact sections':settings.mode==='trailer'?'Trailer':'Highlight montage';
  const style={cinematic:'Cinematic',hype:'Hype',memory:'Memory',musicVideo:'Music video',surprise:'Surprise me'}[settings.style]||settings.style;
- const transitions={automatic:'Automatic transitions',cuts:'Cuts only',dissolves:'Dissolves'}[settings.transitions]||settings.transitions;
+ const transitions=settings.preserveSections&&settings.transitions!=='cuts'?'Soft fades through black':{automatic:'Automatic transitions',cuts:'Cuts only',dissolves:'Dissolves'}[settings.transitions]||settings.transitions;
  return `${mode} · ${style} · ${durationLabel(settings.targetSeconds)} · ${transitions}${settings.gentleCleanup?' · gentle cleanup':''}`;
 }
 function restoreSavedSettings(settings){
@@ -46,10 +47,18 @@ function restoreSavedSettings(settings){
   if(control&&(id==='prompt'||[...control.options].some(option=>option.value===value)))control.value=value;
  }
  $('cleanup').checked=settings.gentleCleanup===true;
+ $('preserveSections').checked=settings.preserveSections===true;
  $('savedSettings').textContent=`Saved edit settings restored: ${savedSettingsLabel(settings)}.`;
 }
-function settingsPayload(){return {mode:$('mode').value,style:$('style').value,targetSeconds:Number($('length').value),transitions:$('transitions').value,gentleCleanup:$('cleanup').checked,prompt:$('prompt').value};}
-function normalizedSettings(settings){return {mode:settings.mode,style:settings.style,targetSeconds:Number(settings.targetSeconds),transitions:settings.transitions,gentleCleanup:settings.gentleCleanup===true,prompt:settings.prompt||''};}
+function selectedSeconds(){
+ return $('preserveSections').checked?(state?.directed?draft.filter(m=>m.approved).reduce((sum,m)=>sum+m.duration,0):state.clips.reduce((sum,c)=>sum+c.duration,0)):Number($('length').value);
+}
+function approveCompilation(targetSeconds){
+ const actual=selectedSeconds(), length=Math.max(targetSeconds,actual);
+ return length<=60||confirm(`${$('preserveSections').checked?`Your intact sections total ${actual.toFixed(1)}s (requested ${targetSeconds}s).`:`This ${durationLabel(targetSeconds)}.`} The longer output uses a 720p profile and can take longer to render. Keep this private page open. Continue?`);
+}
+function settingsPayload(){return {mode:$('mode').value,style:$('style').value,targetSeconds:Number($('length').value),transitions:$('transitions').value,gentleCleanup:$('cleanup').checked,preserveSections:$('preserveSections').checked,prompt:$('prompt').value};}
+function normalizedSettings(settings){return {mode:settings.mode,style:settings.style,targetSeconds:Number(settings.targetSeconds),transitions:settings.transitions,gentleCleanup:settings.gentleCleanup===true,preserveSections:settings.preserveSections===true,prompt:settings.prompt||''};}
 function normalizedWizard(wizard={},prompt=''){
  const value={preset:wizard.preset||'wizard',aspectRatio:wizard.aspectRatio||'9:16',audioMode:wizard.audioMode||'selected-moment-original',vibePrompt:wizard.vibePrompt??prompt};
  // The server ignores source/start when original moment audio is selected.
@@ -135,7 +144,9 @@ function show(){
  const clipLimit=state.limits?.clips||3;
  $('files').disabled=busy||state.ready||state.clips.length>=clipLimit;
  $('plan').disabled=busy||staleDraft||state.ready||!state.clips.length;$('clear').disabled=busy;
- for(const id of ['preset','aspectRatio','audioMode','audioClipID','audioStart','prompt','mode','style','length','transitions','cleanup'])$(id).disabled=busy||state.ready;
+ for(const id of ['preset','aspectRatio','audioMode','audioClipID','audioStart','prompt','mode','style','length','transitions','cleanup','preserveSections'])$(id).disabled=busy||state.ready;
+ const transitionLabels=$('preserveSections').checked?{automatic:'Soft boundary fades',cuts:'Cuts only',dissolves:'Soft boundary fades (no overlap)'}:{automatic:'Automatic',cuts:'Cuts only',dissolves:'Dissolves'};
+ for(const option of $('transitions').options)option.textContent=transitionLabels[option.value]||option.textContent;
  document.querySelectorAll('[data-prompt]').forEach(b=>b.disabled=busy);
  $('controls').hidden=state.ready;$('review').hidden=state.ready||!state.directed;$('result').hidden=!state.ready;
  $('step1').classList.toggle('active',!state.directed&&!state.ready);
@@ -260,13 +271,13 @@ $('files').onchange=()=>operate(async()=>{
 });
 $('plan').onclick=()=>{
  const revision=snapshotRevision();if(revision===null)return;
- const targetSeconds=Number($('length').value), payload={revision,mode:$('mode').value,style:$('style').value,targetSeconds,transitions:$('transitions').value,gentleCleanup:$('cleanup').checked,prompt:$('prompt').value,wizard:wizardPayload(),explicitSettings:[...explicitSettings],previousMoments:state.directed?structuredClone(draft):null};
- const compilationApproved=targetSeconds<=60||confirm(`This ${durationLabel(targetSeconds)} stays vertical at 720 × 1280 and can take longer to render. Keep this private page open, then download the MP4 to iCloud Drive. Continue?`);
+ const targetSeconds=Number($('length').value), payload={revision,mode:$('mode').value,style:$('style').value,targetSeconds,transitions:$('transitions').value,gentleCleanup:$('cleanup').checked,preserveSections:$('preserveSections').checked,prompt:$('prompt').value,wizard:wizardPayload(),explicitSettings:[...explicitSettings],previousMoments:state.directed?structuredClone(draft):null};
+ const compilationApproved=approveCompilation(targetSeconds);
  if(!compilationApproved)return;
  payload.compilationApproved=compilationApproved;
  return operate(async()=>{await request('/api/plan',payload);await wait();$('reviewed').checked=false;$('review').scrollIntoView({block:'start'});});
 };
-$('save').onclick=()=>{if(pendingSettings()){error(Error('Apply settings and preview, or restore saved settings before updating this edit.'));return;}const revision=snapshotRevision();if(revision===null)return;const payload={revision,moments:structuredClone(draft),preview:true};return operate(async()=>{await request('/api/review',payload);await wait();$('reviewed').checked=false;});};
+$('save').onclick=()=>{if(pendingSettings()){error(Error('Apply settings and preview, or restore saved settings before updating this edit.'));return;}const revision=snapshotRevision();if(revision===null)return;const payload={revision,moments:structuredClone(draft),preview:true};if($('preserveSections').checked){payload.compilationApproved=approveCompilation(Number(state.directed.plan.settings.targetSeconds));if(!payload.compilationApproved)return;}return operate(async()=>{await request('/api/review',payload);await wait();$('reviewed').checked=false;});};
 $('reviewed').onchange=show;
 $('revertSettings').onclick=()=>{
  if(running||state.busy||uploading||staleDraft||!state.directed)return;
@@ -295,7 +306,7 @@ for(const b of document.querySelectorAll('[data-prompt]'))b.onclick=()=>{
  settingsChanged();
 };
 $('prompt').oninput=()=>{generatedPromptTarget=null;settingsChanged();};
-const parameterControls={mode:'mode',style:'style',length:'targetSeconds',transitions:'transitions',cleanup:'gentleCleanup'};
+const parameterControls={mode:'mode',style:'style',length:'targetSeconds',transitions:'transitions',cleanup:'gentleCleanup',preserveSections:'preserveSections'};
 for(const [id,key] of Object.entries(parameterControls))if(typeof $(id).addEventListener==='function')$(id).addEventListener('change',()=>{explicitSettings.add(key);settingsChanged();});
 $('preset').onchange=()=>{
  const p=$('preset').value;
@@ -318,8 +329,8 @@ $('adjust').onclick=()=>{
  const editRequest=$('adjustment').value.trim();
  if(!editRequest)throw Error('Describe an adjustment, or render this reviewed first cut.');
  const revision=snapshotRevision();if(revision===null)return;
- const targetSeconds=Number(state.directed.plan.settings.targetSeconds), payload={revision,editRequest,wizard:wizardPayload(),previousMoments:structuredClone(draft)};
- const compilationApproved=targetSeconds<=60||confirm(`This ${durationLabel(targetSeconds)} stays vertical at 720 × 1280. Continue?`);
+ const targetSeconds=Number(state.directed.plan.settings.targetSeconds), payload={revision,editRequest,preserveSections:$('preserveSections').checked,wizard:wizardPayload(),previousMoments:structuredClone(draft)};
+ const compilationApproved=approveCompilation(targetSeconds);
  if(!compilationApproved)return;
  payload.compilationApproved=compilationApproved;
  return operate(async()=>{await request('/api/plan',payload);await wait();$('adjustment').value='';$('reviewed').checked=false;$('review').scrollIntoView({block:'start'});});

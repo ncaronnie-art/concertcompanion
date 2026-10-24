@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let state=null, draft=[], draftRevision=-1, dirty=false, staleDraft=false, running=false, uploading=false;
-let prepared=null, cancelled=false, chunkController=null, editing=null, expiryAt=0, generatedPromptTarget=null, observationStopped=false;
+let prepared=null, cancelled=false, chunkController=null, editing=null, expiryAt=0, generatedPromptTarget=null, observationStopped=false, refreshSequence=0;
 const explicitSettings=new Set();
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const labels={completePlayback:'Every moment plays to the end',soundInSync:'Picture and sound stay in sync',savedToPhotos:'Saved to Photos',photosSound:'Replays in Photos with sound',capturesNight:'It captures the night',wouldShare:'I would share this'};
@@ -82,7 +82,9 @@ async function stateFetch(){
  finally{clearTimeout(timer);}
 }
 async function refresh(){
- const next=await stateFetch();
+ const sequence=++refreshSequence;let next;
+ try{next=await stateFetch();}catch(e){if(sequence!==refreshSequence)return state;throw e;}
+ if(sequence!==refreshSequence)return state;
  if(state&&state.csrf!==next.csrf){discardPreparedMedia();draft=[];dirty=false;staleDraft=false;draftRevision=-1;error(Error('This session expired. Deleted media cannot be restored; choose clips for a new test.'));}
  if(state&&next.revision!==draftRevision&&dirty&&!running){
   staleDraft=true;show();

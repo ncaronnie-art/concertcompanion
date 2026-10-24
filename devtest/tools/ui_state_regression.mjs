@@ -11,7 +11,7 @@ const document={getElementById(id){if(!elements.has(id))elements.set(id,new Elem
 let next,fetcher=async()=>({headers:{get:key=>key==='content-type'?'application/json':null},ok:true,json:async()=>next});
 let source=readFileSync(new URL('../static/app.js',import.meta.url),'utf8');
 source=source.replace(/refresh\(\)\.then\(\(\)=>\{if\(state\.busy&&!state\.upload\)operate\(wait\);\}\)\.catch\(error\);\s*$/, '');
-source+='\nglobalThis.__ui={refresh,wait,submittedRevision,get:()=>({state,draft,draftRevision,dirty,staleDraft,prepared}),set:(v)=>{state=v.state;draft=v.draft||[];draftRevision=v.draftRevision??v.state.revision;dirty=!!v.dirty;staleDraft=false;prepared=v.prepared||null;running=false;},override:(r,w,u)=>{request=r;wait=w;upload=u;}};';
+source+='\nglobalThis.__ui={refresh,wait,submittedRevision,get:()=>({state,draft,draftRevision,dirty,staleDraft,prepared,observationStopped}),set:(v)=>{state=v.state;draft=v.draft||[];draftRevision=v.draftRevision??v.state.revision;dirty=!!v.dirty;staleDraft=false;prepared=v.prepared||null;running=false;observationStopped=!!v.observationStopped;},override:(r,w,u)=>{request=r;wait=w;upload=u;}};';
 const context={document,console,fetch:(...a)=>fetcher(...a),setInterval:()=>0,setTimeout,clearTimeout,AbortController,structuredClone,File:class {constructor(parts){this.parts=parts;}},Error,Number,Math,Object,Array,JSON};
 vm.runInNewContext(source,context,{filename:'app.js'});
 const ui=context.__ui,$=document.getElementById,checks=[];
@@ -31,6 +31,22 @@ await assert.rejects(ui.refresh(),/newer edit/);assert.equal(ui.get().draft[0].i
 const rendered={...old,revision:9,ready:true,directed:null,feedback:{},receipt:{width:720,height:1280,seconds:45,moments:1,profile:'720p compilation'}};
 ui.set({state:rendered,prepared:true});next={...rendered,revision:10};await ui.refresh();assert.equal(ui.get().prepared,null);checks.push('new export revision invalidates prepared share');
 ui.set({state:rendered,prepared:true});$('reel').setAttribute('src','old');next={...rendered,csrf:'new',ready:false};await ui.refresh();assert.equal(ui.get().prepared,null);assert.equal($('reel').getAttribute('src'),null);checks.push('new session with same revision clears loaded reel');
+const pendingRefreshes=[];fetcher=()=>new Promise((resolve,reject)=>pendingRefreshes.push({resolve,reject}));
+ui.set({state:{...old,previewReady:false},draft:[],dirty:false,observationStopped:true});$('resumeStatus').hidden=false;
+const olderSuccess=ui.refresh(), newerSuccess=ui.refresh();assert.equal(pendingRefreshes.length,2);
+const currentPreview={...old,csrf:'fresh-session',revision:11,previewReady:true,busy:true,status:'Preparing preview'};
+pendingRefreshes[1].resolve({headers:{get:()=> 'application/json'},ok:true,json:async()=>currentPreview});await newerSuccess;
+pendingRefreshes[0].resolve({headers:{get:()=> 'application/json'},ok:true,json:async()=>({...old,csrf:'old-session',revision:8,previewReady:false,busy:false})});await olderSuccess;
+assert.equal(ui.get().state.csrf,'fresh-session');assert.equal(ui.get().state.revision,11);assert.equal(ui.get().state.previewReady,true);assert.equal(ui.get().observationStopped,false);assert.equal($('resumeStatus').hidden,true);
+checks.push('reverse-order stale success cannot roll back a newer session or preview');
+const pendingFailure=[];fetcher=()=>new Promise((resolve,reject)=>pendingFailure.push({resolve,reject}));
+const olderFailure=ui.refresh(), newerAfterFailure=ui.refresh();assert.equal(pendingFailure.length,2);
+const currentObservation={...currentPreview,csrf:'newest-session',revision:12,status:'Rendering preview'};
+pendingFailure[1].resolve({headers:{get:()=> 'application/json'},ok:true,json:async()=>currentObservation});await newerAfterFailure;
+pendingFailure[0].reject(Error('late offline response'));const discarded=await olderFailure;
+assert.equal(discarded.csrf,'newest-session');assert.equal(ui.get().state.csrf,'newest-session');assert.equal(ui.get().state.revision,12);assert.equal(ui.get().state.previewReady,true);assert.equal(ui.get().observationStopped,false);assert.equal($('resumeStatus').hidden,true);
+checks.push('reverse-order stale failure cannot stop or replace current observation');
+fetcher=async()=>({headers:{get:key=>key==='content-type'?'application/json':null},ok:true,json:async()=>next});
 for(const seconds of [15,30,45,60,90,120,180,300]){chip.onclick();$('length').value=String(seconds);$('length').onchange();assert.equal($('prompt').value,`${seconds} seconds, cinematic, soft transitions`);}
 checks.push('all eight generated target directives use exact integer seconds');
 ui.set({state:old,draft:[{id:'chorus',duration:45}],dirty:true});$('files').files=[{size:1}];const calls=[];

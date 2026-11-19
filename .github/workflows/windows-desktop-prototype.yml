@@ -25,6 +25,8 @@ jobs:
         run: npm run build
       - name: Test synthetic media export
         run: npm test
+      - name: Package the Windows application
+        run: npm run package:win -- "$env:RUNNER_TEMP\compass-package"
       - name: Open desktop window and check bridge
         shell: pwsh
         run: |
@@ -33,7 +35,7 @@ jobs:
           $env:COMPASS_SMOKE_OUTPUT = "$env:RUNNER_TEMP\compass-synthetic-output.mp4"
           & '.\node_modules\ffmpeg-static\ffmpeg.exe' -hide_banner -loglevel error -y -f lavfi -i 'testsrc2=size=320x240:rate=30:duration=3' -f lavfi -i 'sine=frequency=440:sample_rate=48000:duration=3' -c:v libx264 -c:a aac $env:COMPASS_SMOKE_INPUT
           if ($LASTEXITCODE -ne 0) { throw 'Synthetic fixture generation failed.' }
-          $process = Start-Process -FilePath '.\node_modules\electron\dist\electron.exe' -ArgumentList '.' -PassThru -WindowStyle Hidden -RedirectStandardOutput "$env:RUNNER_TEMP\compass-stdout.log" -RedirectStandardError "$env:RUNNER_TEMP\compass-stderr.log"
+          $process = Start-Process -FilePath "$env:RUNNER_TEMP\compass-package\Concert Compass-win32-x64\Concert Compass.exe" -PassThru -WindowStyle Hidden -RedirectStandardOutput "$env:RUNNER_TEMP\compass-stdout.log" -RedirectStandardError "$env:RUNNER_TEMP\compass-stderr.log"
           if (-not $process.WaitForExit(110000)) { Stop-Process -Id $process.Id -Force; throw 'Desktop app timed out.' }
           Get-Content "$env:RUNNER_TEMP\compass-stdout.log" -ErrorAction SilentlyContinue
           Get-Content "$env:RUNNER_TEMP\compass-stderr.log" -ErrorAction SilentlyContinue

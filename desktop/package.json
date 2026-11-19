@@ -8,6 +8,7 @@
     "dev": "bun run build && concurrently -k \"vite --host 127.0.0.1 --strictPort\" \"wait-on http://127.0.0.1:5173 && cross-env COMPASS_DEV=1 electron .\"",
     "build": "vite build && tsc -p tsconfig.electron.json && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/electron/preload.cjs",
     "start": "electron .",
+    "package:win": "node tools/package.mjs",
     "test": "tsx --test tests/**/*.test.ts"
   },
   "dependencies": {
@@ -20,6 +21,7 @@
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@electron/packager": "^18.4.0",
     "@vitejs/plugin-react": "^5.0.0",
     "concurrently": "^9.0.0",
     "cross-env": "^7.0.3",

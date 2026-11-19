@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, net, protocol } from "electron";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { mkdtemp, rename, rm, stat } from "node:fs/promises";
+import { access, mkdtemp, rename, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import ffmpegPath from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
@@ -12,6 +12,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.COMPASS_DEV === "1";
 const ffmpegBinary = ffmpegPath as unknown as string;
 const selectedFiles = new Map<string, string>();
+const smoke = process.env.COMPASS_SMOKE_TEST === "1";
 protocol.registerSchemesAsPrivileged([{ scheme: "compass-media", privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true } }]);
 
 function createWindow() {
@@ -25,14 +26,26 @@ function createWindow() {
   });
   if (isDev) win.loadURL("http://127.0.0.1:5173");
   else win.loadFile(path.join(here, "../../dist/index.html"));
-  if (process.env.COMPASS_SMOKE_TEST === "1") {
-    const timer = setTimeout(() => { console.error("Desktop smoke test timed out"); app.exit(1); }, 30000);
+  if (smoke) {
+    const timer = setTimeout(() => { console.error("Desktop smoke test timed out"); app.exit(1); }, 90000);
     win.webContents.once("did-fail-load", (_event, code, description) => { console.error(`Page load failed: ${code} ${description}`); clearTimeout(timer); app.exit(1); });
     win.webContents.once("did-finish-load", async () => {
       try {
         const state = await win.webContents.executeJavaScript(`({title: document.title, bridge: typeof window.concertCompass?.pickVideos, root: !!document.getElementById('root')})`);
         if (state.title !== "Concert Compass" || state.bridge !== "function" || !state.root) throw new Error(JSON.stringify(state));
-        console.log("Desktop window and secure bridge loaded successfully"); clearTimeout(timer); app.exit(0);
+        await win.webContents.executeJavaScript(`document.querySelector('button.primary').click()`);
+        const waitFor = async (expression: string, label: string) => {
+          for (let attempt = 0; attempt < 300; attempt++) {
+            if (await win.webContents.executeJavaScript(expression)) return;
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
+          throw new Error(`Timed out waiting for ${label}`);
+        };
+        await waitFor(`document.body.innerText.includes('1 selected')`, "import");
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Export MP4')).click()`);
+        await waitFor(`document.body.innerText.includes('Finished MP4:')`, "export");
+        await access(process.env.COMPASS_SMOKE_OUTPUT!);
+        console.log("Desktop window, import, selection and MP4 export passed"); clearTimeout(timer); app.exit(0);
       } catch (error) { console.error("Desktop smoke test failed", error); clearTimeout(timer); app.exit(1); }
     });
   }
@@ -50,7 +63,7 @@ function run(command: string, args: string[]): Promise<string> {
 }
 
 ipcMain.handle("media:pick", async () => {
-  const result = await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"], filters: [{ name: "Video", extensions: ["mov", "mp4", "m4v", "avi", "mkv"] }] });
+  const result = smoke ? { canceled: false, filePaths: [process.env.COMPASS_SMOKE_INPUT!] } : await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"], filters: [{ name: "Video", extensions: ["mov", "mp4", "m4v", "avi", "mkv"] }] });
   if (result.canceled) return [];
   return result.filePaths.map((filePath) => {
     const id = randomUUID();
@@ -70,7 +83,7 @@ ipcMain.handle("media:probe", async (_event, filePath: string): Promise<MediaAss
 
 ipcMain.handle("media:render", async (event, selections: RenderSelection[]) => {
   if (!Array.isArray(selections) || selections.some((selection) => ![...selectedFiles.values()].includes(selection.asset.path))) throw new Error("Choose the videos in the file picker first.");
-  const destination = await dialog.showSaveDialog({ defaultPath: "Concert Compass Reel.mp4", filters: [{ name: "MP4 video", extensions: ["mp4"] }] });
+  const destination = smoke ? { canceled: false, filePath: process.env.COMPASS_SMOKE_OUTPUT! } : await dialog.showSaveDialog({ defaultPath: "Concert Compass Reel.mp4", filters: [{ name: "MP4 video", extensions: ["mp4"] }] });
   if (destination.canceled || !destination.filePath) return { cancelled: true };
   const output = path.resolve(destination.filePath);
   for (const sourcePath of selectedFiles.values()) {

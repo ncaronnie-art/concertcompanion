@@ -44,13 +44,22 @@ function createWindow() {
           }
           throw new Error(`Timed out waiting for ${label}`);
         };
-        await waitFor(`document.body.innerText.includes('1 selected')`, "import");
+        await waitFor(`document.body.innerText.includes('2 selected')`, "import");
         await waitFor(`(() => { const v = document.querySelector('video'); return v && v.videoWidth > 0 && v.readyState >= 2 })()`, "video picture");
         const picture = await win.webContents.executeJavaScript(`(() => { const v=document.querySelector('video'), c=document.createElement('canvas'); c.width=8; c.height=8; c.getContext('2d').drawImage(v,0,0,8,8); return Array.from(c.getContext('2d').getImageData(0,0,8,8).data).some((n,i)=>i%4!==3 && n>20) })()`);
         if (!picture) throw new Error("Preview has no visible picture");
+        await win.webContents.executeJavaScript(`document.querySelectorAll('button[aria-label^="Move "]')[2].click()`);
+        const firstName = await win.webContents.executeJavaScript(`document.querySelector('.clips article h2').textContent`);
+        if (!firstName.includes('compass-second')) throw new Error(`Reorder failed: ${firstName}`);
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Export MP4')).click()`);
         await waitFor(`document.body.innerText.includes('Finished MP4:')`, "export");
         await access(process.env.COMPASS_SMOKE_OUTPUT!);
+        const color = await new Promise<Buffer>((resolve, reject) => {
+          const child = spawn(ffmpegBinary, ["-v", "error", "-ss", "0.4", "-i", process.env.COMPASS_SMOKE_OUTPUT!, "-frames:v", "1", "-vf", "scale=1:1,format=rgb24", "-f", "rawvideo", "pipe:1"], { windowsHide: true });
+          const chunks: Buffer[] = []; child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk)); child.on("error", reject);
+          child.on("close", (code) => code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error("Could not inspect exported frame")));
+        });
+        if (color.length < 3 || color[0] < color[1] * 2 || color[0] < color[2] * 2) throw new Error(`Export order was wrong: ${color.toString("hex")}`);
         console.log("Desktop window, import, selection and MP4 export passed"); clearTimeout(timer); app.exit(0);
       } catch (error) { console.error("Desktop smoke test failed", error); clearTimeout(timer); app.exit(1); }
     });
@@ -69,7 +78,7 @@ function run(command: string, args: string[]): Promise<string> {
 }
 
 ipcMain.handle("media:pick", async () => {
-  const result = smoke ? { canceled: false, filePaths: [process.env.COMPASS_SMOKE_INPUT!] } : await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"], filters: [{ name: "Video", extensions: ["mov", "mp4", "m4v", "avi", "mkv"] }] });
+  const result = smoke ? { canceled: false, filePaths: [process.env.COMPASS_SMOKE_INPUT!, process.env.COMPASS_SMOKE_SECOND!] } : await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"], filters: [{ name: "Video", extensions: ["mov", "mp4", "m4v", "avi", "mkv"] }] });
   if (result.canceled) return [];
   return result.filePaths.map((filePath) => {
     const id = randomUUID();

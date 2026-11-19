@@ -31,6 +31,7 @@ function createWindow() {
   if (isDev) win.loadURL("http://127.0.0.1:5173");
   else win.loadFile(path.join(here, "../../dist/index.html"));
   if (smoke) {
+    win.webContents.on("console-message", (_event, level, message) => { if (level >= 2) console.error(`Renderer: ${message}`); });
     const timer = setTimeout(() => { console.error("Desktop smoke test timed out"); app.exit(1); }, 90000);
     win.webContents.once("did-fail-load", (_event, code, description) => { console.error(`Page load failed: ${code} ${description}`); clearTimeout(timer); app.exit(1); });
     win.webContents.once("did-finish-load", async () => {
@@ -47,7 +48,8 @@ function createWindow() {
         };
         await waitFor(`document.body.innerText.includes('2 selected')`, "import");
         await waitFor(`(() => { const v = document.querySelector('video'); return v && v.videoWidth > 0 && v.readyState >= 2 })()`, "video picture");
-        const picture = await win.webContents.executeJavaScript(`(() => { const v=document.querySelector('video'), c=document.createElement('canvas'); c.width=8; c.height=8; c.getContext('2d').drawImage(v,0,0,8,8); return Array.from(c.getContext('2d').getImageData(0,0,8,8).data).some((n,i)=>i%4!==3 && n>20) })()`);
+        const picture = await win.webContents.executeJavaScript(`(() => { try { const v=document.querySelector('video'), c=document.createElement('canvas'); c.width=8; c.height=8; c.getContext('2d').drawImage(v,0,0,8,8); return Array.from(c.getContext('2d').getImageData(0,0,8,8).data).some((n,i)=>i%4!==3 && n>20) } catch(e) { return String(e) } })()`);
+        if (typeof picture === "string") throw new Error(`Picture inspection failed: ${picture}`);
         if (!picture) throw new Error("Preview has no visible picture");
         await win.webContents.executeJavaScript(`document.querySelector('video').currentTime = 2`);
         await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && Math.abs(v.currentTime - 2) < 0.15 && v.readyState >= 2 })()`, "seeking forward");

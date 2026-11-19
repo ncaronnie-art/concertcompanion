@@ -1,5 +1,10 @@
 :root { color: #f8f7ff; background: #09090d; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
-video { width: 200px; max-width: 100%; max-height: 160px; background: #000; border-radius: 8px; }
+video { width: 300px; max-width: 100%; max-height: 220px; background: #000; border-radius: 8px; }
+.preview { width: 300px; max-width: 100%; }
+.seek { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.seek input { flex: 1; min-width: 0; accent-color: #c084fc; }
+.seek button { border: 1px solid #464050; border-radius: 7px; background: #1c1825; color: #eee8f8; padding: 6px; cursor: pointer; }
+.preview small { color: #b7b2c2; }
 .clip-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .clip-actions button { padding: 8px 10px; border-radius: 8px; border: 1px solid #464050; background: #1c1825; color: #eee8f8; cursor: pointer; }
 .clip-actions button:disabled { cursor: default; }

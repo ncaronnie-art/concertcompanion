@@ -1,5 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol } from "electron";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { app, BrowserWindow, dialog, ipcMain, protocol } from "electron";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import ffmpegPath from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
 import { buildRenderCommand, type MediaAsset, type RenderSelection } from "../src/shared/render-plan.js";
+import { previewResponse } from "./preview-stream.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.COMPASS_DEV === "1";
@@ -48,6 +49,14 @@ function createWindow() {
         await waitFor(`(() => { const v = document.querySelector('video'); return v && v.videoWidth > 0 && v.readyState >= 2 })()`, "video picture");
         const picture = await win.webContents.executeJavaScript(`(() => { const v=document.querySelector('video'), c=document.createElement('canvas'); c.width=8; c.height=8; c.getContext('2d').drawImage(v,0,0,8,8); return Array.from(c.getContext('2d').getImageData(0,0,8,8).data).some((n,i)=>i%4!==3 && n>20) })()`);
         if (!picture) throw new Error("Preview has no visible picture");
+        await win.webContents.executeJavaScript(`document.querySelector('video').currentTime = 2`);
+        await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && Math.abs(v.currentTime - 2) < 0.15 && v.readyState >= 2 })()`, "seeking forward");
+        await win.webContents.executeJavaScript(`document.querySelector('video').currentTime = 0.5`);
+        await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && Math.abs(v.currentTime - 0.5) < 0.15 && v.readyState >= 2 })()`, "seeking backward");
+        await win.webContents.executeJavaScript(`document.querySelector('button[aria-label^="Forward five seconds"]').click()`);
+        await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && v.currentTime > 2.8 })()`, "forward button");
+        await win.webContents.executeJavaScript(`document.querySelector('button[aria-label^="Back five seconds"]').click()`);
+        await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && v.currentTime < 0.2 })()`, "back button");
         await win.webContents.executeJavaScript(`document.querySelectorAll('button[aria-label^="Move "]')[2].click()`);
         const firstName = await win.webContents.executeJavaScript(`document.querySelector('.clips article h2').textContent`);
         if (!firstName.includes('compass-second')) throw new Error(`Reorder failed: ${firstName}`);
@@ -155,9 +164,7 @@ app.whenReady().then(() => {
     const url = new URL(request.url);
     const file = url.hostname === "preview" ? previews.get(url.pathname.slice(1)) : undefined;
     if (!file) return new Response("Not found", { status: 404 });
-    const result = await net.fetch(pathToFileURL(file).toString(), { headers: request.headers });
-    const headers = new Headers(result.headers); headers.set("Access-Control-Allow-Origin", "*");
-    return new Response(result.body, { status: result.status, headers });
+    return previewResponse(file, request);
   });
   createWindow();
 });

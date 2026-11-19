@@ -10,6 +10,7 @@ export function App() {
   const [message, setMessage] = useState("Choose videos from iCloud Drive or anywhere on this PC.");
   const [progress, setProgress] = useState(0);
   const [exporting, setExporting] = useState(false);
+  const [positions, setPositions] = useState<Record<string, number>>({});
   const players = useRef(new Map<string, HTMLVideoElement>());
 
   useEffect(() => { window.concertCompass.onProgress(setProgress); }, []);
@@ -41,6 +42,12 @@ export function App() {
   function update(index: number, update: Partial<Chosen>) { setClips((old) => old.map((clip, current) => current === index ? { ...clip, ...update } : clip)); }
   function useWholeClip(index: number) { setClips((old) => old.map((clip, current) => current === index ? { ...clip, start: 0, end: clip.asset.duration } : clip)); }
   function move(index: number, offset: number) { setClips((old) => { const next = [...old], target = index + offset; if (target < 0 || target >= next.length) return old; [next[index], next[target]] = [next[target], next[index]]; return next; }); }
+  function seek(clip: Chosen, seconds: number) {
+    const player = players.current.get(clip.asset.path);
+    if (!player || !Number.isFinite(player.duration)) return;
+    player.currentTime = Math.max(0, Math.min(player.duration, seconds));
+    setPositions((old) => ({ ...old, [clip.asset.path]: player.currentTime }));
+  }
   function mark(index: number, side: "start" | "end") {
     const clip = clips[index], current = players.current.get(clip.asset.path)?.currentTime;
     if (current === undefined || !Number.isFinite(current)) return;
@@ -67,7 +74,7 @@ export function App() {
       <section className="toolbar"><div><b>{selected.length} selected</b><span>{clock(totalSeconds)} planned output · clips play from top to bottom</span></div><button className="primary" disabled={busy || !selected.length} onClick={exportReel}>Export MP4</button></section>
       <section className="clips">{clips.map((clip, index) => <article className={!clip.included ? "off" : ""} key={clip.asset.path}>
         <div className="clip-title"><label><input type="checkbox" disabled={busy} checked={clip.included} onChange={(event) => update(index, { included: event.target.checked })} /> Include</label><h2>{index + 1}. {clip.asset.name}</h2><p>{clock(clip.asset.duration)} · {clip.asset.hasAudio ? "Original audio" : "Silent video"}</p><div className="clip-actions"><button disabled={busy || index === 0} aria-label={`Move ${clip.asset.name} earlier`} onClick={() => move(index, -1)}>↑ Earlier</button><button disabled={busy || index === clips.length - 1} aria-label={`Move ${clip.asset.name} later`} onClick={() => move(index, 1)}>↓ Later</button></div></div>
-        <video ref={(element) => { if (element) players.current.set(clip.asset.path, element); else players.current.delete(clip.asset.path); }} controls preload="auto" crossOrigin="anonymous" src={clip.previewUrl} aria-label={`Preview ${clip.asset.name}`} />
+        <div className="preview"><video ref={(element) => { if (element) players.current.set(clip.asset.path, element); else players.current.delete(clip.asset.path); }} onTimeUpdate={(event) => setPositions((old) => ({ ...old, [clip.asset.path]: event.currentTarget.currentTime }))} controls preload="auto" crossOrigin="anonymous" src={clip.previewUrl} aria-label={`Preview ${clip.asset.name}`} /><div className="seek"><button disabled={busy} aria-label={`Back five seconds in ${clip.asset.name}`} onClick={() => seek(clip, (positions[clip.asset.path] ?? 0) - 5)}>−5s</button><input disabled={busy} aria-label={`Move through ${clip.asset.name}`} type="range" min="0" max={clip.asset.duration} step="0.1" value={Math.min(clip.asset.duration, positions[clip.asset.path] ?? 0)} onChange={(event) => seek(clip, Number(event.target.value))} /><button disabled={busy} aria-label={`Forward five seconds in ${clip.asset.name}`} onClick={() => seek(clip, (positions[clip.asset.path] ?? 0) + 5)}>+5s</button></div><small>{clock(positions[clip.asset.path] ?? 0)} / {clock(clip.asset.duration)}</small></div>
         <div className="trim"><p>Pause the video where you want to start or end.</p><div className="clip-actions"><button disabled={busy} onClick={() => mark(index, "start")}>Set start here</button><button disabled={busy} onClick={() => mark(index, "end")}>Set end here</button><button disabled={busy} onClick={() => useWholeClip(index)}>Use whole clip</button></div><label>Start (seconds) <input disabled={busy} aria-label={`${clip.asset.name} start`} type="number" min="0" max={clip.asset.duration} step="0.1" value={Math.round(clip.start * 100) / 100} onChange={(event) => update(index, { start: Math.max(0, Math.min(Number(event.target.value), clip.end - 0.1)) })} /></label><label>End (seconds) <input disabled={busy} aria-label={`${clip.asset.name} end`} type="number" min="0.1" max={clip.asset.duration} step="0.1" value={Math.round(clip.end * 100) / 100} onChange={(event) => update(index, { end: Math.min(clip.asset.duration, Math.max(Number(event.target.value), clip.start + 0.1)) })} /></label></div>
         <p className="note">Selected range: {clock(clip.start)}–{clock(clip.end)} ({(clip.end - clip.start).toFixed(1)} seconds)</p>
       </article>)}</section>

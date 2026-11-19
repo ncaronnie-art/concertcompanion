@@ -17,12 +17,21 @@ export function App() {
   async function importVideos() {
     const paths = await window.concertCompass.pickVideos();
     if (!paths.length) return;
-    setBusy(true); setMessage(`Checking ${paths.length} video${paths.length === 1 ? "" : "s"}…`);
+    setBusy(true); setMessage(`Preparing previews for ${paths.length} video${paths.length === 1 ? "" : "s"}…`);
     try {
-      const results = await Promise.allSettled(paths.map(async (file) => ({ asset: await window.concertCompass.probe(file.path), previewUrl: file.previewUrl })));
-      const usable = results.flatMap((result) => result.status === "fulfilled" && result.value.asset.duration >= 0.1 && result.value.asset.width > 0 ? [result.value] : []);
+      const usable: { asset: MediaAsset; previewUrl: string }[] = [];
+      let failed = 0;
+      for (const [index, file] of paths.entries()) {
+        setMessage(`Preparing video ${index + 1} of ${paths.length}…`);
+        try {
+          const asset = await window.concertCompass.probe(file.path);
+          if (asset.duration < 0.1 || !asset.width) throw new Error("Not a usable video");
+          const previewUrl = await window.concertCompass.preview(file.id);
+          usable.push({ asset, previewUrl });
+        } catch { failed++; }
+      }
       setClips((previous) => [...previous, ...usable.filter(({ asset }) => !previous.some((clip) => clip.asset.path === asset.path)).map(({ asset, previewUrl }) => ({ asset, previewUrl, ...suggestedRange(asset), included: true }))]);
-      setMessage(`${usable.length} video${usable.length === 1 ? "" : "s"} ready. The suggested trims are mechanical starting points—review them before export.`);
+      setMessage(`${usable.length} video${usable.length === 1 ? "" : "s"} ready.${failed ? ` ${failed} could not be prepared; check that the files are downloaded and playable.` : ""} Review the suggested trims before export.`);
     } catch (error) { setMessage(`Could not read a video: ${error instanceof Error ? error.message : String(error)}`); }
     finally { setBusy(false); }
   }
@@ -48,7 +57,7 @@ export function App() {
       <section className="toolbar"><div><b>{selected.length} selected</b><span>{clock(totalSeconds)} planned output</span></div><button className="primary" disabled={busy || !selected.length} onClick={exportReel}>Export MP4</button></section>
       <section className="clips">{clips.map((clip, index) => <article className={!clip.included ? "off" : ""} key={clip.asset.path}>
         <div className="clip-title"><label><input type="checkbox" checked={clip.included} onChange={(event) => update(index, { included: event.target.checked })} /> Include</label><h2>{clip.asset.name}</h2><p>{clock(clip.asset.duration)} · {clip.asset.width}×{clip.asset.height} · {clip.asset.hasAudio ? "Original audio" : "Silent video"}</p></div>
-        <video controls preload="metadata" src={clip.previewUrl} aria-label={`Preview ${clip.asset.name}`} />
+        <video controls preload="auto" crossOrigin="anonymous" src={clip.previewUrl} aria-label={`Preview ${clip.asset.name}`} />
         <div className="trim"><label>Start (seconds) <input aria-label={`${clip.asset.name} start`} type="number" min="0" max={clip.asset.duration} step="0.1" value={clip.start} onChange={(event) => update(index, { start: Math.max(0, Math.min(Number(event.target.value), clip.end - 0.1)) })} /></label><label>End (seconds) <input aria-label={`${clip.asset.name} end`} type="number" min="0.1" max={clip.asset.duration} step="0.1" value={clip.end} onChange={(event) => update(index, { end: Math.min(clip.asset.duration, Math.max(Number(event.target.value), clip.start + 0.1)) })} /></label><button disabled={busy} onClick={() => useWholeClip(index)}>Use whole clip</button></div>
         <p className="note">Selected range: {clock(clip.start)}–{clock(clip.end)} ({(clip.end - clip.start).toFixed(1)} seconds)</p>
       </article>)}</section>

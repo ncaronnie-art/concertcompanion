@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, net, protocol } from "electron";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { access, mkdtemp, rename, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -12,8 +13,10 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.COMPASS_DEV === "1";
 const ffmpegBinary = ffmpegPath as unknown as string;
 const selectedFiles = new Map<string, string>();
+const previews = new Map<string, string>();
+let previewDirectory: string | undefined;
 const smoke = process.env.COMPASS_SMOKE_TEST === "1";
-protocol.registerSchemesAsPrivileged([{ scheme: "compass-media", privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true } }]);
+protocol.registerSchemesAsPrivileged([{ scheme: "compass-media", privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } }]);
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -42,6 +45,9 @@ function createWindow() {
           throw new Error(`Timed out waiting for ${label}`);
         };
         await waitFor(`document.body.innerText.includes('1 selected')`, "import");
+        await waitFor(`(() => { const v = document.querySelector('video'); return v && v.videoWidth > 0 && v.readyState >= 2 })()`, "video picture");
+        const picture = await win.webContents.executeJavaScript(`(() => { const v=document.querySelector('video'), c=document.createElement('canvas'); c.width=8; c.height=8; c.getContext('2d').drawImage(v,0,0,8,8); return Array.from(c.getContext('2d').getImageData(0,0,8,8).data).some((n,i)=>i%4!==3 && n>20) })()`);
+        if (!picture) throw new Error("Preview has no visible picture");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Export MP4')).click()`);
         await waitFor(`document.body.innerText.includes('Finished MP4:')`, "export");
         await access(process.env.COMPASS_SMOKE_OUTPUT!);
@@ -68,8 +74,23 @@ ipcMain.handle("media:pick", async () => {
   return result.filePaths.map((filePath) => {
     const id = randomUUID();
     selectedFiles.set(id, filePath);
-    return { path: filePath, previewUrl: `compass-media://source/${id}` };
+    return { path: filePath, id };
   });
+});
+
+ipcMain.handle("media:preview", async (_event, id: string) => {
+  const source = selectedFiles.get(id);
+  if (!source) throw new Error("Choose the video in the file picker first.");
+  previewDirectory ??= await mkdtemp(path.join(tmpdir(), "concert-compass-preview-"));
+  const output = path.join(previewDirectory, `${id}.webm`);
+  try {
+    await run(ffmpegBinary, ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", source, "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=640:640:force_original_aspect_ratio=decrease:force_divisible_by=2", "-r", "24", "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "5", "-b:v", "1200k", "-c:a", "libopus", "-b:a", "96k", output]);
+    previews.set(id, output);
+    return `compass-media://preview/${id}`;
+  } catch (error) {
+    await rm(output, { force: true });
+    throw error;
+  }
 });
 
 ipcMain.handle("media:probe", async (_event, filePath: string): Promise<MediaAsset> => {
@@ -121,11 +142,20 @@ ipcMain.handle("media:render", async (event, selections: RenderSelection[]) => {
 });
 
 app.whenReady().then(() => {
-  protocol.handle("compass-media", (request) => {
+  protocol.handle("compass-media", async (request) => {
     const url = new URL(request.url);
-    const file = url.hostname === "source" ? selectedFiles.get(url.pathname.slice(1)) : undefined;
-    return file ? net.fetch(pathToFileURL(file).toString(), { headers: request.headers }) : new Response("Not found", { status: 404 });
+    const file = url.hostname === "preview" ? previews.get(url.pathname.slice(1)) : undefined;
+    if (!file) return new Response("Not found", { status: 404 });
+    const result = await net.fetch(pathToFileURL(file).toString(), { headers: request.headers });
+    const headers = new Headers(result.headers); headers.set("Access-Control-Allow-Origin", "*");
+    return new Response(result.body, { status: result.status, headers });
   });
   createWindow();
 });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
+let cleaning = false;
+app.on("before-quit", (event) => {
+  if (cleaning || !previewDirectory) return;
+  event.preventDefault(); cleaning = true;
+  void rm(previewDirectory, { recursive: true, force: true }).catch(() => {}).finally(() => app.quit());
+});

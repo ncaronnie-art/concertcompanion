@@ -16,6 +16,14 @@ function execute(binary: string, args: string[]) {
   });
 }
 
+function samples(file: string) {
+  return new Promise<Buffer>((resolve, reject) => {
+    const child = spawn(ffmpegPath as unknown as string, ["-v", "error", "-i", file, "-vn", "-ac", "1", "-ar", "8000", "-f", "f32le", "pipe:1"], { windowsHide: true });
+    const chunks: Buffer[] = []; child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk)); child.on("error", reject);
+    child.on("close", (code) => code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error("Audio decoding failed")));
+  });
+}
+
 test("bundled FFmpeg renders a decodable vertical H.264/AAC MP4 from synthetic sources", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "concert-compass-"));
   try {
@@ -41,5 +49,14 @@ test("bundled FFmpeg renders a decodable vertical H.264/AAC MP4 from synthetic s
     const mixedMeta = JSON.parse(await execute(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type", "-of", "json", mixed]));
     assert.ok(mixedMeta.streams.some((stream: {codec_type: string}) => stream.codec_type === "audio"));
     assert.ok(Math.abs(Number(mixedMeta.format.duration) - 2) < 0.2);
+    const rumble = path.join(root, "rumble.mp4"), cleaned = path.join(root, "cleaned.mp4");
+    await execute(ffmpegPath as unknown as string, ["-hide_banner", "-y", "-f", "lavfi", "-i", "color=c=blue:size=320x240:rate=30:duration=2", "-f", "lavfi", "-i", "sine=frequency=40:sample_rate=48000:duration=2", "-c:v", "libx264", "-c:a", "aac", rumble]);
+    const landscape = buildRenderCommand([{ asset: { ...asset(rumble), duration: 2 }, start: 0, end: 2 }], cleaned, { aspect: "landscape", reduceRumble: true });
+    await execute(ffmpegPath as unknown as string, landscape.args);
+    const cleanMeta = JSON.parse(await execute(ffprobe.path, ["-v", "error", "-show_entries", "stream=codec_type,width,height", "-of", "json", cleaned]));
+    const cleanVideo = cleanMeta.streams.find((stream: {codec_type: string}) => stream.codec_type === "video");
+    assert.equal(cleanVideo.width, 1280); assert.equal(cleanVideo.height, 720);
+    const rms = (buffer: Buffer) => { let sum = 0, n = 0; for (let i = Math.floor(buffer.length / 2 / 4) * 4; i + 4 <= buffer.length; i += 4) { const x = buffer.readFloatLE(i); sum += x * x; n++; } return Math.sqrt(sum / n); };
+    assert.ok(rms(await samples(cleaned)) < rms(await samples(rumble)) * 0.65, "40 Hz rumble should be reduced");
   } finally { await rm(root, { recursive: true, force: true }); }
 }, { timeout: 60_000 });

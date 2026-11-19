@@ -42,4 +42,7 @@ jobs:
           if (-not $process.WaitForExit(110000)) { Stop-Process -Id $process.Id -Force; throw 'Desktop app timed out.' }
           Get-Content "$env:RUNNER_TEMP\compass-stdout.log" -ErrorAction SilentlyContinue
           Get-Content "$env:RUNNER_TEMP\compass-stderr.log" -ErrorAction SilentlyContinue
-          if ($process.ExitCode -ne 0) { throw "Desktop app failed with exit code $($process.ExitCode)." }
+          if ($process.ExitCode -ne 0) {
+            Get-Content "$env:RUNNER_TEMP\compass-stderr.log" -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "::error::$($_ -replace '%','%25')" }
+            throw "Desktop app failed with exit code $($process.ExitCode)."
+          }

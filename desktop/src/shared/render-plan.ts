@@ -1,5 +1,6 @@
 export type MediaAsset = { path: string; name: string; duration: number; width: number; height: number; hasAudio: boolean };
 export type RenderSelection = { asset: MediaAsset; start: number; end: number };
+export type ExportOptions = { aspect: "vertical" | "landscape"; reduceRumble: boolean };
 
 const fixed = (value: number) => value.toFixed(3);
 
@@ -9,8 +10,10 @@ export function suggestedRange(asset: MediaAsset, maxSeconds = 12): Pick<RenderS
   return { start: Math.max(0, (duration - length) / 2), end: Math.min(duration, (duration + length) / 2) };
 }
 
-export function buildRenderCommand(selections: RenderSelection[], output: string) {
+export function buildRenderCommand(selections: RenderSelection[], output: string, options: ExportOptions = { aspect: "vertical", reduceRumble: false }) {
   if (!selections.length) throw new Error("Choose at least one clip for the reel.");
+  if (!options || !["vertical", "landscape"].includes(options.aspect) || typeof options.reduceRumble !== "boolean") throw new Error("Choose valid export settings.");
+  const [width, height] = options.aspect === "landscape" ? [1280, 720] : [720, 1280];
   const args = ["-hide_banner", "-y"];
   const filters: string[] = [];
   const joins: string[] = [];
@@ -27,8 +30,8 @@ export function buildRenderCommand(selections: RenderSelection[], output: string
       args.push("-f", "lavfi", "-t", fixed(duration), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
       audioInput = inputIndex++;
     }
-    filters.push(`[${fileInput}:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30,setsar=1,format=yuv420p[v${index}]`);
-    filters.push(`[${audioInput}:a]aresample=48000,aformat=channel_layouts=stereo[a${index}]`);
+    filters.push(`[${fileInput}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},fps=30,setsar=1,format=yuv420p[v${index}]`);
+    filters.push(`[${audioInput}:a]aresample=48000,aformat=channel_layouts=stereo${options.reduceRumble ? ",highpass=f=80" : ""}[a${index}]`);
     joins.push(`[v${index}][a${index}]`);
     totalSeconds += duration;
   }

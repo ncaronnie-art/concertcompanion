@@ -7,7 +7,7 @@ import { access, mkdtemp, rename, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import ffmpegPath from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
-import { buildRenderCommand, type MediaAsset, type RenderSelection } from "../src/shared/render-plan.js";
+import { buildRenderCommand, type ExportOptions, type MediaAsset, type RenderSelection } from "../src/shared/render-plan.js";
 import { previewResponse } from "./preview-stream.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -120,7 +120,7 @@ ipcMain.handle("media:probe", async (_event, filePath: string): Promise<MediaAss
   return { path: filePath, name: path.basename(filePath), duration: Number(data.format?.duration ?? 0), width: video?.width ?? 0, height: video?.height ?? 0, hasAudio: streams.some((stream: { codec_type: string }) => stream.codec_type === "audio") };
 });
 
-ipcMain.handle("media:render", async (event, selections: RenderSelection[]) => {
+ipcMain.handle("media:render", async (event, selections: RenderSelection[], options: ExportOptions) => {
   if (!Array.isArray(selections) || selections.some((selection) => ![...selectedFiles.values()].includes(selection.asset.path))) throw new Error("Choose the videos in the file picker first.");
   const destination = smoke ? { canceled: false, filePath: process.env.COMPASS_SMOKE_OUTPUT! } : await dialog.showSaveDialog({ defaultPath: "Concert Compass Reel.mp4", filters: [{ name: "MP4 video", extensions: ["mp4"] }] });
   if (destination.canceled || !destination.filePath) return { cancelled: true };
@@ -135,7 +135,7 @@ ipcMain.handle("media:render", async (event, selections: RenderSelection[]) => {
   const tempDir = await mkdtemp(path.join(path.dirname(output), ".compass-"));
   const temporaryOutput = path.join(tempDir, `${randomUUID()}.mp4`);
   try {
-  const { args, totalSeconds } = buildRenderCommand(selections, temporaryOutput);
+  const { args, totalSeconds } = buildRenderCommand(selections, temporaryOutput, options);
   await new Promise<void>((resolve, reject) => {
     const child = spawn(ffmpegBinary, args, { windowsHide: true });
     let stderr = "", progressBuffer = "";

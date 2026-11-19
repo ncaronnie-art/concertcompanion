@@ -1,0 +1,36 @@
+name: Concert Compass Windows prototype verification
+on:
+  push:
+    branches: ['native/windows-desktop-prototype']
+permissions:
+  contents: read
+jobs:
+  windows-test:
+    if: github.event.repository.private == false
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Install prototype dependencies
+        run: npm install --no-package-lock --no-audit --no-fund
+      - name: Build desktop app
+        run: npm run build
+      - name: Test synthetic media export
+        run: npm test
+      - name: Open desktop window and check bridge
+        shell: pwsh
+        run: |
+          $env:COMPASS_SMOKE_TEST = '1'
+          $process = Start-Process -FilePath '.\node_modules\electron\dist\electron.exe' -ArgumentList '.' -PassThru -WindowStyle Hidden -RedirectStandardOutput "$env:RUNNER_TEMP\compass-stdout.log" -RedirectStandardError "$env:RUNNER_TEMP\compass-stderr.log"
+          if (-not $process.WaitForExit(45000)) { Stop-Process -Id $process.Id -Force; throw 'Desktop app timed out.' }
+          Get-Content "$env:RUNNER_TEMP\compass-stdout.log" -ErrorAction SilentlyContinue
+          Get-Content "$env:RUNNER_TEMP\compass-stderr.log" -ErrorAction SilentlyContinue
+          if ($process.ExitCode -ne 0) { throw "Desktop app failed with exit code $($process.ExitCode)." }

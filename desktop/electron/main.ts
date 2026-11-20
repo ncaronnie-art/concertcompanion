@@ -84,8 +84,9 @@ function createWindow() {
         await waitFor(`document.body.innerText.includes('Suggested for stronger sound energy')`, "sound-based suggestion");
         await win.webContents.executeJavaScript(`document.querySelector('video').currentTime = 1`);
         await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && Math.abs(v.currentTime - 1) < 0.15 })()`, "mark position");
-        await win.webContents.executeJavaScript(`document.querySelector('.clips article .trim button').click()`);
+        await win.webContents.executeJavaScript(`Array.from(document.querySelector('.clips article').querySelectorAll('button')).find(b => b.textContent === 'Set start here').click()`);
         await waitFor(`(() => { const first = document.querySelector('.clips article'); return first.querySelector('.trim-heading input[type=checkbox]').checked && Number(first.querySelector('input[aria-label$=" start"]').value) > 0.8 })()`, "protected manual section");
+        smokeStage("protected manual section");
         await win.webContents.executeJavaScript(`document.querySelectorAll('button[aria-label^="Move "]')[2].click()`);
         const firstName = await win.webContents.executeJavaScript(`document.querySelector('.clips article h2').textContent`);
         if (!firstName.includes('compass-second')) throw new Error(`Reorder failed: ${firstName}`);

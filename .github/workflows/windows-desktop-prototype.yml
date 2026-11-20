@@ -58,3 +58,38 @@ jobs:
             Get-Content "$env:RUNNER_TEMP\compass-stderr.log" -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "::error::$($_ -replace '%','%25')" }
             throw "Desktop app failed with exit code $($process.ExitCode)."
           }
+      - name: Check desktop page loaded
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'page loaded' -Quiet -ErrorAction SilentlyContinue)) { throw 'Desktop page did not load.' }
+      - name: Check video import completed
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'videos imported' -Quiet -ErrorAction SilentlyContinue)) { throw 'Video import did not complete.' }
+      - name: Check source picture decoded
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'source picture ready' -Quiet -ErrorAction SilentlyContinue)) { throw 'Source picture was not ready.' }
+      - name: Check creative brief and first cut
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'first cut planned' -Quiet -ErrorAction SilentlyContinue)) { throw 'First cut was not planned.' }
+      - name: Check assembled draft picture
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'draft picture ready' -Quiet -ErrorAction SilentlyContinue)) { throw 'Assembled draft picture was not ready.' }
+      - name: Check project save and export
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'export completed' -Quiet -ErrorAction SilentlyContinue)) { throw 'Project save or export did not complete.' }
+      - name: Check full creative workflow
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'smoke passed' -Quiet -ErrorAction SilentlyContinue)) { throw 'Full creative workflow did not complete.' }

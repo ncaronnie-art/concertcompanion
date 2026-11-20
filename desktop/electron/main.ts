@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawn, type ChildProcess } from "node:child_process";
+import { appendFileSync } from "node:fs";
 import { access, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import ffmpegPath from "ffmpeg-static";
@@ -29,9 +30,14 @@ let activeRender: ChildProcess | undefined;
 let cancelRender = false;
 let smokeCancelPending = true;
 const smoke = process.env.COMPASS_SMOKE_TEST === "1";
+function smokeStage(stage: string) {
+  if (smoke && process.env.COMPASS_SMOKE_STAGE_FILE) appendFileSync(process.env.COMPASS_SMOKE_STAGE_FILE, `${new Date().toISOString()} ${stage}\n`);
+}
+smokeStage("process started");
 protocol.registerSchemesAsPrivileged([{ scheme: "compass-media", privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } }]);
 
 function createWindow() {
+  smokeStage("creating window");
   const win = new BrowserWindow({
     width: 1200,
     height: 820,
@@ -44,10 +50,11 @@ function createWindow() {
   else win.loadFile(path.join(here, "../../dist/index.html"));
   if (smoke) {
     win.webContents.on("console-message", (_event, level, message) => { if (level >= 2) console.error(`Renderer: ${message}`); });
-    const timer = setTimeout(() => { console.error("Desktop smoke test timed out"); app.exit(1); }, 150000);
-    win.webContents.once("did-fail-load", (_event, code, description) => { console.error(`Page load failed: ${code} ${description}`); clearTimeout(timer); app.exit(1); });
+    const timer = setTimeout(() => { smokeStage("desktop smoke test timed out"); console.error("Desktop smoke test timed out"); app.exit(1); }, 150000);
+    win.webContents.once("did-fail-load", (_event, code, description) => { smokeStage(`page load failed: ${code} ${description}`); console.error(`Page load failed: ${code} ${description}`); clearTimeout(timer); app.exit(1); });
     win.webContents.once("did-finish-load", async () => {
       try {
+        smokeStage("page loaded");
         const state = await win.webContents.executeJavaScript(`({title: document.title, bridge: typeof window.concertCompass?.pickVideos, root: !!document.getElementById('root')})`);
         if (state.title !== "Concert Compass" || state.bridge !== "function" || !state.root) throw new Error(JSON.stringify(state));
         await win.webContents.executeJavaScript(`document.querySelector('button.primary').click()`);
@@ -59,7 +66,9 @@ function createWindow() {
           throw new Error(`Timed out waiting for ${label}`);
         };
         await waitFor(`document.body.innerText.includes('2 selected')`, "import");
+        smokeStage("videos imported");
         await waitFor(`(() => { const v = document.querySelector('video'); return v && v.videoWidth > 0 && v.readyState >= 2 })()`, "video picture");
+        smokeStage("source picture ready");
         const picture = await win.webContents.executeJavaScript(`(() => { try { const v=document.querySelector('video'), c=document.createElement('canvas'); c.width=8; c.height=8; c.getContext('2d').drawImage(v,0,0,8,8); return Array.from(c.getContext('2d').getImageData(0,0,8,8).data).some((n,i)=>i%4!==3 && n>20) } catch(e) { return String(e) } })()`);
         if (typeof picture === "string") throw new Error(`Picture inspection failed: ${picture}`);
         if (!picture) throw new Error("Preview has no visible picture");
@@ -83,13 +92,16 @@ function createWindow() {
         await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('.brief textarea'); const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(input, 'A four-second energetic recap. Keep my selected section and choose the rest.'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Review my plan').click()`);
         await waitFor(`(() => { const plan = document.querySelector('.brief-review h3'); return plan && plan.textContent.includes('recap') && plan.textContent.includes('energetic') && plan.textContent.includes('your marked sections stay') })()`, "interpreted creative brief");
+        smokeStage("brief interpreted");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Make my first cut').click()`);
         await waitFor(`document.body.innerText.includes('First cut ready:')`, "first cut");
+        smokeStage("first cut planned");
         await win.webContents.executeJavaScript(`document.querySelector('.clips article .refine-actions button').click()`);
         await waitFor(`document.body.innerText.includes('Other sections stayed the same')`, "first-cut adjustment");
         await win.webContents.executeJavaScript(`document.querySelector('.draft-heading button').click()`);
         await waitFor(`document.body.innerText.includes('Draft preview is ready')`, "assembled draft render");
         await waitFor(`(() => { const v=document.querySelector('.draft-player'); return v && v.videoWidth > 0 && v.readyState >= 1 })()`, "assembled draft picture");
+        smokeStage("draft picture ready");
         const draftSize = await win.webContents.executeJavaScript(`(() => { const v=document.querySelector('.draft-player'); return [v.videoWidth,v.videoHeight] })()`);
         if (draftSize[0] !== 360 || draftSize[1] !== 640) throw new Error(`Draft video shape was wrong: ${draftSize}`);
         const protectedStart = await win.webContents.executeJavaScript(`(() => { const clip = document.querySelectorAll('.clips article')[1]; if (!clip.querySelector('.trim-heading input[type=checkbox]').checked) throw new Error('Marked section was unlocked'); return Number(clip.querySelector('input[aria-label$=" start"]').value) })()`);
@@ -99,6 +111,7 @@ function createWindow() {
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Save project').click()`);
         await waitFor(`document.body.innerText.includes('Project saved:')`, "project save");
         await access(process.env.COMPASS_SMOKE_PROJECT!);
+        smokeStage("project saved");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Open project').click()`);
         await waitFor(`document.body.innerText.includes('Project opened. Your sections and protected moments are ready.')`, "project open");
         const restored = await win.webContents.executeJavaScript(`(() => ({ description: document.querySelector('.brief textarea').value, locked: document.querySelectorAll('.clips article')[1].querySelector('.trim-heading input[type=checkbox]').checked, aspect: document.querySelector('.options button[aria-pressed="true"]').textContent, rumble: document.querySelector('.options input[type=checkbox]').checked }))()`);
@@ -107,10 +120,12 @@ function createWindow() {
         await waitFor(`(() => { const p = document.querySelector('.status progress'); return p && p.value > 0 && p.value < 1 })()`, "export progress");
         await win.webContents.executeJavaScript(`document.querySelector('.stop').click()`);
         await waitFor(`document.body.innerText.includes('Export stopped. Your selections are still here.')`, "cancellation");
+        smokeStage("export cancelled");
         try { await access(process.env.COMPASS_SMOKE_OUTPUT!); throw new Error("Cancelled export exposed an output file"); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Export MP4')).click()`);
         await waitFor(`document.body.innerText.includes('Finished MP4:')`, "export");
+        smokeStage("export completed");
         if (process.env.COMPASS_SMOKE_CLEANUP_FAIL === "1") await waitFor(`document.body.innerText.includes('video is saved, but a temporary folder could not be removed')`, "cleanup warning");
         await access(process.env.COMPASS_SMOKE_OUTPUT!);
         const outputProbe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", process.env.COMPASS_SMOKE_OUTPUT!]));
@@ -131,8 +146,9 @@ function createWindow() {
         await waitFor(`(() => { const plan=document.querySelector('.brief-review h3'); return plan && plan.textContent.includes('one-recording performance') })()`, "one-song interpretation");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Make my first cut').click()`);
         await waitFor(`document.body.innerText.includes('First cut ready:') && document.body.innerText.includes('1 selected')`, "one-song first cut");
+        smokeStage("smoke passed");
         console.log("Desktop creative brief, protected selection, first cut, refinement, project save/open and MP4 export passed"); clearTimeout(timer); app.exit(0);
-      } catch (error) { console.error("Desktop smoke test failed", error); clearTimeout(timer); app.exit(1); }
+      } catch (error) { smokeStage(`desktop smoke test failed: ${error instanceof Error ? error.stack : String(error)}`); console.error("Desktop smoke test failed", error); clearTimeout(timer); app.exit(1); }
     });
   }
 }
@@ -354,6 +370,7 @@ ipcMain.handle("media:cancel-render", () => {
 });
 
 app.whenReady().then(() => {
+  smokeStage("electron ready");
   protocol.handle("compass-media", async (request) => {
     const url = new URL(request.url);
     const file = url.hostname === "preview" ? previews.get(url.pathname.slice(1)) :

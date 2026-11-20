@@ -37,6 +37,7 @@ jobs:
           $env:COMPASS_SMOKE_INPUT = "$env:RUNNER_TEMP\compass-synthetic-input.mov"
           $env:COMPASS_SMOKE_SECOND = "$env:RUNNER_TEMP\compass-second.mp4"
           $env:COMPASS_SMOKE_OUTPUT = "$env:RUNNER_TEMP\compass-synthetic-output.mp4"
+          $env:COMPASS_SMOKE_PROJECT = "$env:RUNNER_TEMP\compass-synthetic-project.json"
           & '.\node_modules\ffmpeg-static\ffmpeg.exe' -hide_banner -loglevel error -y -f lavfi -i 'testsrc2=size=320x240:rate=30:duration=3' -f lavfi -i 'sine=frequency=440:sample_rate=48000:duration=3' -c:v libx265 -x265-params 'pools=1:log-level=error' -tag:v hvc1 -c:a aac $env:COMPASS_SMOKE_INPUT
           if ($LASTEXITCODE -ne 0) { throw 'Synthetic fixture generation failed.' }
           & '.\node_modules\ffmpeg-static\ffmpeg.exe' -hide_banner -loglevel error -y -f lavfi -i 'color=red:size=320x240:rate=30:duration=3' -f lavfi -i 'sine=frequency=660:sample_rate=48000:duration=3' -c:v libx264 -c:a aac $env:COMPASS_SMOKE_SECOND

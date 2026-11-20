@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawn, type ChildProcess } from "node:child_process";
-import { access, mkdtemp, rename, rm, stat } from "node:fs/promises";
+import { access, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import ffmpegPath from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
@@ -12,6 +12,7 @@ import { previewResponse } from "./preview-stream.js";
 import { measureAudio } from "./audio-analysis.js";
 import { chooseAudioHighlight } from "../src/shared/suggestions.js";
 import { withTemporaryCleanup } from "./temporary-cleanup.js";
+import { parseProjectSnapshot, type ProjectSnapshot } from "../src/shared/project-file.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.COMPASS_DEV === "1";
@@ -67,10 +68,30 @@ function createWindow() {
         await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && v.currentTime < 0.2 })()`, "back button");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Suggest a moment').click()`);
         await waitFor(`document.body.innerText.includes('Suggested for stronger sound energy')`, "sound-based suggestion");
+        await win.webContents.executeJavaScript(`document.querySelector('video').currentTime = 1`);
+        await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && Math.abs(v.currentTime - 1) < 0.15 })()`, "mark position");
+        await win.webContents.executeJavaScript(`document.querySelector('.clips article .trim button').click()`);
+        await waitFor(`(() => { const first = document.querySelector('.clips article'); return first.querySelector('.trim-heading input[type=checkbox]').checked && Number(first.querySelector('input[aria-label$=" start"]').value) > 0.8 })()`, "protected manual section");
         await win.webContents.executeJavaScript(`document.querySelectorAll('button[aria-label^="Move "]')[2].click()`);
         const firstName = await win.webContents.executeJavaScript(`document.querySelector('.clips article h2').textContent`);
         if (!firstName.includes('compass-second')) throw new Error(`Reorder failed: ${firstName}`);
+        await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('.brief textarea'); const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(input, 'A four-second energetic recap. Keep my selected section and choose the rest.'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Review my plan').click()`);
+        await waitFor(`(() => { const plan = document.querySelector('.brief-review h3'); return plan && plan.textContent.includes('recap') && plan.textContent.includes('energetic') && plan.textContent.includes('your marked sections stay') })()`, "interpreted creative brief");
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Make my first cut').click()`);
+        await waitFor(`document.body.innerText.includes('First cut ready:')`, "first cut");
+        await win.webContents.executeJavaScript(`document.querySelector('.clips article .refine-actions button').click()`);
+        await waitFor(`document.body.innerText.includes('Other sections stayed the same')`, "first-cut adjustment");
+        const protectedStart = await win.webContents.executeJavaScript(`(() => { const clip = document.querySelectorAll('.clips article')[1]; if (!clip.querySelector('.trim-heading input[type=checkbox]').checked) throw new Error('Marked section was unlocked'); return Number(clip.querySelector('input[aria-label$=" start"]').value) })()`);
+        if (protectedStart < 0.8 || protectedStart > 1.2) throw new Error(`Marked section moved: ${protectedStart}`);
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Widescreen')).click(); document.querySelector('.options input[type=checkbox]').click()`);
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Save project').click()`);
+        await waitFor(`document.body.innerText.includes('Project saved:')`, "project save");
+        await access(process.env.COMPASS_SMOKE_PROJECT!);
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Open project').click()`);
+        await waitFor(`document.body.innerText.includes('Project opened. Your sections and protected moments are ready.')`, "project open");
+        const restored = await win.webContents.executeJavaScript(`(() => ({ description: document.querySelector('.brief textarea').value, locked: document.querySelectorAll('.clips article')[1].querySelector('.trim-heading input[type=checkbox]').checked, aspect: document.querySelector('.options button[aria-pressed="true"]').textContent, rumble: document.querySelector('.options input[type=checkbox]').checked }))()`);
+        if (!restored.description.includes('energetic recap') || !restored.locked || !restored.aspect.includes('Widescreen') || !restored.rumble) throw new Error(`Project restore failed: ${JSON.stringify(restored)}`);
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Export MP4')).click()`);
         await waitFor(`(() => { const p = document.querySelector('.status progress'); return p && p.value > 0 && p.value < 1 })()`, "export progress");
         await win.webContents.executeJavaScript(`document.querySelector('.stop').click()`);
@@ -89,7 +110,7 @@ function createWindow() {
           child.on("close", (code) => code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error("Could not inspect exported frame")));
         });
         if (color.length < 3 || color[0] < color[1] * 2 || color[0] < color[2] * 2) throw new Error(`Export order was wrong: ${color.toString("hex")}`);
-        console.log("Desktop window, import, selection and MP4 export passed"); clearTimeout(timer); app.exit(0);
+        console.log("Desktop creative brief, protected selection, first cut, refinement, project save/open and MP4 export passed"); clearTimeout(timer); app.exit(0);
       } catch (error) { console.error("Desktop smoke test failed", error); clearTimeout(timer); app.exit(1); }
     });
   }
@@ -114,6 +135,68 @@ ipcMain.handle("media:pick", async () => {
     selectedFiles.set(id, filePath);
     return { path: filePath, id };
   });
+});
+
+ipcMain.handle("project:save", async (_event, candidate: unknown) => {
+  const snapshot = parseProjectSnapshot(candidate);
+  if (snapshot.clips.some((clip) => ![...selectedFiles.values()].includes(clip.asset.path))) {
+    throw new Error("Import these recordings before saving the project.");
+  }
+  const destination = smoke ? { canceled: false, filePath: process.env.COMPASS_SMOKE_PROJECT! } : await dialog.showSaveDialog({
+    defaultPath: "Concert Compass Project.compass.json",
+    filters: [{ name: "Concert Compass project", extensions: ["json"] }],
+  });
+  if (destination.canceled || !destination.filePath) return { cancelled: true };
+  const output = path.resolve(destination.filePath);
+  for (const sourcePath of selectedFiles.values()) {
+    if (path.resolve(sourcePath).toLowerCase() === output.toLowerCase()) {
+      throw new Error("Choose a project name different from your original video.");
+    }
+    try {
+      const [source, target] = await Promise.all([stat(sourcePath), stat(output)]);
+      if (source.dev === target.dev && source.ino === target.ino) {
+        throw new Error("Choose a project name different from your original video.");
+      }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+  const temporary = path.join(path.dirname(output), `.compass-project-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, JSON.stringify(snapshot, null, 2), { encoding: "utf8", flag: "wx" });
+    await rename(temporary, output);
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
+  return { cancelled: false, path: output };
+});
+
+ipcMain.handle("project:open", async () => {
+  const source = smoke ? { canceled: false, filePaths: [process.env.COMPASS_SMOKE_PROJECT!] } : await dialog.showOpenDialog({
+    properties: ["openFile"],
+    filters: [{ name: "Concert Compass project", extensions: ["json"] }],
+  });
+  if (source.canceled || !source.filePaths[0]) return null;
+  const projectPath = source.filePaths[0];
+  if ((await stat(projectPath)).size > 1024 * 1024) throw new Error("This project file is too large to open.");
+  let snapshot: ProjectSnapshot;
+  try { snapshot = parseProjectSnapshot(JSON.parse(await readFile(projectPath, "utf8"))); }
+  catch (error) { throw new Error(`Could not open this project: ${error instanceof Error ? error.message : String(error)}`); }
+  const missing: string[] = [];
+  for (const clip of snapshot.clips) {
+    const filePath = clip.asset.path;
+    if (!path.isAbsolute(filePath) || !/[.](mov|mp4|m4v|avi|mkv)$/i.test(filePath)) {
+      throw new Error(`The project has an invalid recording path: ${clip.asset.name}.`);
+    }
+    try { if (!(await stat(filePath)).isFile()) missing.push(clip.asset.name); }
+    catch { missing.push(clip.asset.name); }
+  }
+  if (missing.length) throw new Error(`These recordings could not be found: ${missing.join(", ")}. Reconnect or download them, then open the project again.`);
+  const files = snapshot.clips.map((clip) => {
+    const id = randomUUID();
+    selectedFiles.set(id, clip.asset.path);
+    return { path: clip.asset.path, id };
+  });
+  return { snapshot, files };
 });
 
 ipcMain.handle("media:preview", async (_event, id: string) => {

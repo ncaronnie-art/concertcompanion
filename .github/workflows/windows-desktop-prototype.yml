@@ -25,6 +25,8 @@ jobs:
         run: npm run build
       - name: Test synthetic media export
         run: npm test
+      - name: Test five-minute compilation and long source
+        run: npx tsx tools/long-render.ts
       - name: Package the Windows application
         run: npm run package:win -- "$env:RUNNER_TEMP\compass-package"
       - name: Open desktop window and check bridge

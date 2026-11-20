@@ -45,7 +45,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Second synthetic fixture generation failed.' }
           $process = Start-Process -FilePath "$env:RUNNER_TEMP\compass-package\Concert Compass-win32-x64\Concert Compass.exe" -PassThru -WindowStyle Hidden -RedirectStandardOutput "$env:RUNNER_TEMP\compass-stdout.log" -RedirectStandardError "$env:RUNNER_TEMP\compass-stderr.log"
           $finished = $process.WaitForExit(170000)
-          Get-Content "$env:RUNNER_TEMP\compass-stages.log" -ErrorAction SilentlyContinue
+          $stages = @(Get-Content "$env:RUNNER_TEMP\compass-stages.log" -ErrorAction SilentlyContinue)
+          $stages | ForEach-Object { Write-Output $_ }
+          "### Desktop test stages" | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          if ($stages.Count -eq 0) { "- No stage was recorded." | Add-Content -Path $env:GITHUB_STEP_SUMMARY }
+          else { $stages | ForEach-Object { "- $_" | Add-Content -Path $env:GITHUB_STEP_SUMMARY } }
+          "- Process exit: $($process.ExitCode)" | Add-Content -Path $env:GITHUB_STEP_SUMMARY
           Get-Content "$env:RUNNER_TEMP\compass-stdout.log" -ErrorAction SilentlyContinue
           Get-Content "$env:RUNNER_TEMP\compass-stderr.log" -ErrorAction SilentlyContinue
           if (-not $finished) { Stop-Process -Id $process.Id -Force; throw 'Desktop app timed out.' }

@@ -75,7 +75,7 @@ export function App() {
     setBusy(true); setExporting(true); setProgress(0); setMessage("Choose where to save your MP4…");
     try {
       const result = await window.concertCompass.render(selected, { aspect, reduceRumble });
-      setMessage(result.cancelled ? "Export cancelled. Your original recordings were not changed." : `Finished MP4: ${result.output}`);
+      setMessage(result.cancelled ? "Export cancelled. Your original recordings were not changed." : `Finished MP4: ${result.output}${result.cleanupWarning ? " The video is saved, but a temporary folder could not be removed." : ""}`);
     } catch (error) { const detail = error instanceof Error ? error.message : String(error); setMessage(detail.includes("Export stopped.") ? "Export stopped. Your selections are still here." : `Export failed. Your originals are safe. ${detail}`); }
     finally { setBusy(false); setExporting(false); }
   }

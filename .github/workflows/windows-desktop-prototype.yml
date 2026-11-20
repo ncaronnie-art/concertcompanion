@@ -33,6 +33,7 @@ jobs:
         shell: pwsh
         run: |
           $env:COMPASS_SMOKE_TEST = '1'
+          $env:COMPASS_SMOKE_CLEANUP_FAIL = '1'
           $env:COMPASS_SMOKE_INPUT = "$env:RUNNER_TEMP\compass-synthetic-input.mov"
           $env:COMPASS_SMOKE_SECOND = "$env:RUNNER_TEMP\compass-second.mp4"
           $env:COMPASS_SMOKE_OUTPUT = "$env:RUNNER_TEMP\compass-synthetic-output.mp4"

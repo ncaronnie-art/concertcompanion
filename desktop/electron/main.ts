@@ -11,6 +11,7 @@ import { buildRenderCommand, type ExportOptions, type MediaAsset, type RenderSel
 import { previewResponse } from "./preview-stream.js";
 import { measureAudio } from "./audio-analysis.js";
 import { chooseAudioHighlight } from "../src/shared/suggestions.js";
+import { withTemporaryCleanup } from "./temporary-cleanup.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.COMPASS_DEV === "1";
@@ -78,6 +79,7 @@ function createWindow() {
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Export MP4')).click()`);
         await waitFor(`document.body.innerText.includes('Finished MP4:')`, "export");
+        if (process.env.COMPASS_SMOKE_CLEANUP_FAIL === "1") await waitFor(`document.body.innerText.includes('video is saved, but a temporary folder could not be removed')`, "cleanup warning");
         await access(process.env.COMPASS_SMOKE_OUTPUT!);
         const outputProbe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", process.env.COMPASS_SMOKE_OUTPUT!]));
         if (outputProbe.streams?.[0]?.width !== 1280 || outputProbe.streams?.[0]?.height !== 720) throw new Error("Widescreen output dimensions are incorrect");
@@ -160,7 +162,7 @@ ipcMain.handle("media:render", async (event, selections: RenderSelection[], opti
   }
   const tempDir = await mkdtemp(path.join(path.dirname(output), ".compass-"));
   const temporaryOutput = path.join(tempDir, `${randomUUID()}.mp4`);
-  try {
+  const { cleanupWarning } = await withTemporaryCleanup(tempDir, async () => {
   const { args, totalSeconds } = buildRenderCommand(selections, temporaryOutput, options);
   if (smoke && smokeCancelPending) { args.splice(2, 0, "-re"); smokeCancelPending = false; }
   cancelRender = false;
@@ -184,8 +186,8 @@ ipcMain.handle("media:render", async (event, selections: RenderSelection[], opti
   if (!probe.streams?.some((stream: {codec_type: string; codec_name: string}) => stream.codec_type === "video" && stream.codec_name === "h264") || !probe.streams?.some((stream: {codec_type: string; codec_name: string}) => stream.codec_type === "audio" && stream.codec_name === "aac") || Math.abs(Number(probe.format?.duration) - totalSeconds) > Math.max(0.25, totalSeconds * 0.01)) throw new Error("The exported video did not pass its checks. Please try again.");
   await rename(temporaryOutput, output);
   event.sender.send("media:progress", 1);
-  } finally { await rm(tempDir, { recursive: true, force: true }); }
-  return { cancelled: false, output };
+  }, smoke && process.env.COMPASS_SMOKE_CLEANUP_FAIL === "1" ? async () => { throw new Error("Simulated temporary-folder permission error"); } : undefined);
+  return { cancelled: false, output, cleanupWarning };
 });
 
 ipcMain.handle("media:cancel-render", () => {

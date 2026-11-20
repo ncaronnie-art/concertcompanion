@@ -8,7 +8,7 @@ declare global {
       probe(filePath: string): Promise<MediaAsset>;
       preview(id: string): Promise<string>;
       suggest(asset: MediaAsset): Promise<Suggestion>;
-      render(selections: RenderSelection[], options: ExportOptions): Promise<{ cancelled: boolean; output?: string }>;
+      render(selections: RenderSelection[], options: ExportOptions): Promise<{ cancelled: boolean; output?: string; cleanupWarning?: boolean }>;
       cancelRender(): Promise<boolean>;
       onProgress(callback: (progress: number) => void): void;
     };

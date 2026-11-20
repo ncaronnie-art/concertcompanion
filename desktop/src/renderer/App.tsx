@@ -76,14 +76,14 @@ export function App() {
     try {
       const result = await window.concertCompass.render(selected, { aspect, reduceRumble });
       setMessage(result.cancelled ? "Export cancelled. Your original recordings were not changed." : `Finished MP4: ${result.output}`);
-    } catch (error) { setMessage(`Export failed. Your originals are safe. ${error instanceof Error ? error.message : String(error)}`); }
+    } catch (error) { const detail = error instanceof Error ? error.message : String(error); setMessage(detail.includes("Export stopped.") ? "Export stopped. Your selections are still here." : `Export failed. Your originals are safe. ${detail}`); }
     finally { setBusy(false); setExporting(false); }
   }
 
   return <main>
     <header><div><p className="eyebrow">CONCERT COMPASS · WINDOWS PROTOTYPE</p><h1>Keep the night. Skip the timeline.</h1></div><button className="primary" disabled={busy} onClick={importVideos}>Import videos</button></header>
     <section className="intro"><strong>How this works</strong><span>Choose videos from a synced iCloud Drive folder or local storage. This prototype reads them where they are; it never edits or deletes the originals.</span></section>
-    <section className="status" aria-live="polite"><span>{message}</span>{busy && (exporting ? <progress max="1" value={progress} /> : <progress aria-label="Preparing videos" />)}</section>
+    <section className="status" aria-live="polite"><span>{message}</span>{busy && (exporting ? <><progress max="1" value={progress} /><button className="stop" onClick={async () => { if (await window.concertCompass.cancelRender()) setMessage("Stopping export…"); }}>Stop export</button></> : <progress aria-label="Preparing videos" />)}</section>
     {!clips.length ? <section className="empty"><h2>Your footage goes here</h2><p>Start with a few short recordings. Longer sources are supported by the project design, but quality and five-minute exports still need real-footage testing.</p><button className="primary" disabled={busy} onClick={importVideos}>Choose videos</button></section> : <>
       <section className="toolbar"><div><b>{selected.length} selected</b><span>{clock(totalSeconds)} planned output · clips play from top to bottom</span></div><button className="primary" disabled={busy || !selected.length} onClick={exportReel}>Export MP4</button></section>
       <section className="options" aria-label="Export options"><div><b>Video shape</b><div className="clip-actions"><button disabled={busy} aria-pressed={aspect === "vertical"} onClick={() => setAspect("vertical")}>Vertical 9:16</button><button disabled={busy} aria-pressed={aspect === "landscape"} onClick={() => setAspect("landscape")}>Widescreen 16:9</button></div><p>The middle of each recording fills the chosen shape; edges may be cropped. The preview shows the original frame.</p></div><label><input disabled={busy} type="checkbox" checked={reduceRumble} onChange={(event) => setReduceRumble(event.target.checked)} /> Reduce low rumble <small>Gently lowers very low bass; it does not remove crowd voices. Off keeps the original sound.</small></label></section>

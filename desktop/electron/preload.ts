@@ -6,5 +6,6 @@ contextBridge.exposeInMainWorld("concertCompass", {
   preview: (id: string) => ipcRenderer.invoke("media:preview", id),
   suggest: (asset: unknown) => ipcRenderer.invoke("media:suggest", asset),
   render: (selections: unknown, options: unknown) => ipcRenderer.invoke("media:render", selections, options),
+  cancelRender: () => ipcRenderer.invoke("media:cancel-render"),
   onProgress: (callback: (progress: number) => void) => ipcRenderer.on("media:progress", (_event, progress) => callback(progress)),
 });

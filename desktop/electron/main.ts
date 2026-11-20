@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, protocol } from "electron";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { access, mkdtemp, rename, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import ffmpegPath from "ffmpeg-static";
@@ -18,6 +18,9 @@ const ffmpegBinary = ffmpegPath as unknown as string;
 const selectedFiles = new Map<string, string>();
 const previews = new Map<string, string>();
 let previewDirectory: string | undefined;
+let activeRender: ChildProcess | undefined;
+let cancelRender = false;
+let smokeCancelPending = true;
 const smoke = process.env.COMPASS_SMOKE_TEST === "1";
 protocol.registerSchemesAsPrivileged([{ scheme: "compass-media", privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } }]);
 
@@ -67,6 +70,12 @@ function createWindow() {
         const firstName = await win.webContents.executeJavaScript(`document.querySelector('.clips article h2').textContent`);
         if (!firstName.includes('compass-second')) throw new Error(`Reorder failed: ${firstName}`);
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Widescreen')).click(); document.querySelector('.options input[type=checkbox]').click()`);
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Export MP4')).click()`);
+        await waitFor(`(() => { const p = document.querySelector('.status progress'); return p && p.value > 0 && p.value < 1 })()`, "export progress");
+        await win.webContents.executeJavaScript(`document.querySelector('.stop').click()`);
+        await waitFor(`document.body.innerText.includes('Export stopped. Your selections are still here.')`, "cancellation");
+        try { await access(process.env.COMPASS_SMOKE_OUTPUT!); throw new Error("Cancelled export exposed an output file"); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Export MP4')).click()`);
         await waitFor(`document.body.innerText.includes('Finished MP4:')`, "export");
         await access(process.env.COMPASS_SMOKE_OUTPUT!);
@@ -137,6 +146,7 @@ ipcMain.handle("media:suggest", async (_event, asset: MediaAsset) => {
 });
 
 ipcMain.handle("media:render", async (event, selections: RenderSelection[], options: ExportOptions) => {
+  if (activeRender) throw new Error("A video is already being exported.");
   if (!Array.isArray(selections) || selections.some((selection) => ![...selectedFiles.values()].includes(selection.asset.path))) throw new Error("Choose the videos in the file picker first.");
   const destination = smoke ? { canceled: false, filePath: process.env.COMPASS_SMOKE_OUTPUT! } : await dialog.showSaveDialog({ defaultPath: "Concert Compass Reel.mp4", filters: [{ name: "MP4 video", extensions: ["mp4"] }] });
   if (destination.canceled || !destination.filePath) return { cancelled: true };
@@ -152,8 +162,11 @@ ipcMain.handle("media:render", async (event, selections: RenderSelection[], opti
   const temporaryOutput = path.join(tempDir, `${randomUUID()}.mp4`);
   try {
   const { args, totalSeconds } = buildRenderCommand(selections, temporaryOutput, options);
+  if (smoke && smokeCancelPending) { args.splice(2, 0, "-re"); smokeCancelPending = false; }
+  cancelRender = false;
   await new Promise<void>((resolve, reject) => {
     const child = spawn(ffmpegBinary, args, { windowsHide: true });
+    activeRender = child;
     let stderr = "", progressBuffer = "";
     child.stderr.on("data", (data) => (stderr += data));
     child.stdout.on("data", (data) => {
@@ -165,7 +178,7 @@ ipcMain.handle("media:render", async (event, selections: RenderSelection[], opti
       }
     });
     child.on("error", reject);
-    child.on("close", (code) => code === 0 ? resolve() : reject(new Error(stderr || `FFmpeg stopped (${code}).`)));
+    child.on("close", (code) => { activeRender = undefined; code === 0 && !cancelRender ? resolve() : reject(new Error(cancelRender ? "Export stopped. Your selections are still here." : stderr || `FFmpeg stopped (${code}).`)); });
   });
   const probe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name", "-of", "json", temporaryOutput]));
   if (!probe.streams?.some((stream: {codec_type: string; codec_name: string}) => stream.codec_type === "video" && stream.codec_name === "h264") || !probe.streams?.some((stream: {codec_type: string; codec_name: string}) => stream.codec_type === "audio" && stream.codec_name === "aac") || Math.abs(Number(probe.format?.duration) - totalSeconds) > Math.max(0.25, totalSeconds * 0.01)) throw new Error("The exported video did not pass its checks. Please try again.");
@@ -173,6 +186,12 @@ ipcMain.handle("media:render", async (event, selections: RenderSelection[], opti
   event.sender.send("media:progress", 1);
   } finally { await rm(tempDir, { recursive: true, force: true }); }
   return { cancelled: false, output };
+});
+
+ipcMain.handle("media:cancel-render", () => {
+  if (!activeRender) return false;
+  cancelRender = true;
+  return activeRender.kill();
 });
 
 app.whenReady().then(() => {

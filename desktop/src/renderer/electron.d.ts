@@ -9,6 +9,7 @@ declare global {
       preview(id: string): Promise<string>;
       suggest(asset: MediaAsset): Promise<Suggestion>;
       render(selections: RenderSelection[], options: ExportOptions): Promise<{ cancelled: boolean; output?: string }>;
+      cancelRender(): Promise<boolean>;
       onProgress(callback: (progress: number) => void): void;
     };
   }

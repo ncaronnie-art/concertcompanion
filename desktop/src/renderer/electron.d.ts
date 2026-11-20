@@ -1,4 +1,5 @@
 import type { ExportOptions, MediaAsset, RenderSelection } from "../shared/render-plan";
+import type { Suggestion } from "../shared/suggestions";
 
 declare global {
   interface Window {
@@ -6,6 +7,7 @@ declare global {
       pickVideos(): Promise<{ path: string; id: string }[]>;
       probe(filePath: string): Promise<MediaAsset>;
       preview(id: string): Promise<string>;
+      suggest(asset: MediaAsset): Promise<Suggestion>;
       render(selections: RenderSelection[], options: ExportOptions): Promise<{ cancelled: boolean; output?: string }>;
       onProgress(callback: (progress: number) => void): void;
     };

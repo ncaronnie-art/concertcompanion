@@ -58,6 +58,18 @@ export function App() {
     update(index, { [side]: Math.max(0, Math.min(clip.asset.duration, time)) });
   }
 
+  async function suggest(index: number) {
+    const clip = clips[index];
+    setBusy(true); setMessage(`Listening for stronger sound in ${clip.asset.name}…`);
+    try {
+      const suggestion = await window.concertCompass.suggest(clip.asset);
+      update(index, { start: suggestion.start, end: suggestion.end });
+      seek(clip, suggestion.start);
+      setMessage(suggestion.reason);
+    } catch { setMessage("Couldn't analyze this recording's sound. Your selection is unchanged; you can still choose the moment yourself."); }
+    finally { setBusy(false); }
+  }
+
   async function exportReel() {
     if (!selected.length) return;
     setBusy(true); setExporting(true); setProgress(0); setMessage("Choose where to save your MP4…");
@@ -78,10 +90,10 @@ export function App() {
       <section className="clips">{clips.map((clip, index) => <article className={!clip.included ? "off" : ""} key={clip.asset.path}>
         <div className="clip-title"><label><input type="checkbox" disabled={busy} checked={clip.included} onChange={(event) => update(index, { included: event.target.checked })} /> Include</label><h2>{index + 1}. {clip.asset.name}</h2><p>{clock(clip.asset.duration)} · {clip.asset.hasAudio ? "Original audio" : "Silent video"}</p><div className="clip-actions"><button disabled={busy || index === 0} aria-label={`Move ${clip.asset.name} earlier`} onClick={() => move(index, -1)}>↑ Earlier</button><button disabled={busy || index === clips.length - 1} aria-label={`Move ${clip.asset.name} later`} onClick={() => move(index, 1)}>↓ Later</button></div></div>
         <div className="preview"><video ref={(element) => { if (element) players.current.set(clip.asset.path, element); else players.current.delete(clip.asset.path); }} onTimeUpdate={(event) => { const time = event.currentTarget.currentTime; setPositions((old) => ({ ...old, [clip.asset.path]: time })); }} controls preload="auto" crossOrigin="anonymous" src={clip.previewUrl} aria-label={`Preview ${clip.asset.name}`} /><div className="seek"><button disabled={busy} aria-label={`Back five seconds in ${clip.asset.name}`} onClick={() => seek(clip, (positions[clip.asset.path] ?? 0) - 5)}>−5s</button><input disabled={busy} aria-label={`Move through ${clip.asset.name}`} type="range" min="0" max={clip.asset.duration} step="0.1" value={Math.min(clip.asset.duration, positions[clip.asset.path] ?? 0)} onChange={(event) => seek(clip, Number(event.target.value))} /><button disabled={busy} aria-label={`Forward five seconds in ${clip.asset.name}`} onClick={() => seek(clip, (positions[clip.asset.path] ?? 0) + 5)}>+5s</button></div><small>{clock(positions[clip.asset.path] ?? 0)} / {clock(clip.asset.duration)}</small></div>
-        <div className="trim"><p>Pause the video where you want to start or end.</p><div className="clip-actions"><button disabled={busy} onClick={() => mark(index, "start")}>Set start here</button><button disabled={busy} onClick={() => mark(index, "end")}>Set end here</button><button disabled={busy} onClick={() => useWholeClip(index)}>Use whole clip</button></div><label>Start (seconds) <input disabled={busy} aria-label={`${clip.asset.name} start`} type="number" min="0" max={clip.asset.duration} step="0.1" value={Math.round(clip.start * 100) / 100} onChange={(event) => update(index, { start: Math.max(0, Math.min(Number(event.target.value), clip.end - 0.1)) })} /></label><label>End (seconds) <input disabled={busy} aria-label={`${clip.asset.name} end`} type="number" min="0.1" max={clip.asset.duration} step="0.1" value={Math.round(clip.end * 100) / 100} onChange={(event) => update(index, { end: Math.min(clip.asset.duration, Math.max(Number(event.target.value), clip.start + 0.1)) })} /></label></div>
+        <div className="trim"><p>Pause the video where you want to start or end.</p><div className="clip-actions"><button disabled={busy} onClick={() => mark(index, "start")}>Set start here</button><button disabled={busy} onClick={() => mark(index, "end")}>Set end here</button><button disabled={busy} onClick={() => useWholeClip(index)}>Use whole clip</button><button disabled={busy} onClick={() => suggest(index)}>Suggest a moment</button></div><p>Suggest a moment replaces this clip’s current trim using sound energy, not song or performer recognition.</p><label>Start (seconds) <input disabled={busy} aria-label={`${clip.asset.name} start`} type="number" min="0" max={clip.asset.duration} step="0.1" value={Math.round(clip.start * 100) / 100} onChange={(event) => update(index, { start: Math.max(0, Math.min(Number(event.target.value), clip.end - 0.1)) })} /></label><label>End (seconds) <input disabled={busy} aria-label={`${clip.asset.name} end`} type="number" min="0.1" max={clip.asset.duration} step="0.1" value={Math.round(clip.end * 100) / 100} onChange={(event) => update(index, { end: Math.min(clip.asset.duration, Math.max(Number(event.target.value), clip.start + 0.1)) })} /></label></div>
         <p className="note">Selected range: {clock(clip.start)}–{clock(clip.end)} ({(clip.end - clip.start).toFixed(1)} seconds)</p>
       </article>)}</section>
     </>}
-    <footer><b>Prototype boundary:</b> automatic suggestions are time-based starting trims, not scene recognition. Export is local H.264/AAC MP4 via FFmpeg. No media is uploaded or posted.</footer>
+    <footer><b>Prototype boundary:</b> suggested moments use sound energy, not scene, song, or performer recognition. Export is local H.264/AAC MP4. No media is uploaded or posted.</footer>
   </main>;
 }

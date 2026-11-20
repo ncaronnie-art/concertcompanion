@@ -9,6 +9,8 @@ import ffmpegPath from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
 import { buildRenderCommand, type ExportOptions, type MediaAsset, type RenderSelection } from "../src/shared/render-plan.js";
 import { previewResponse } from "./preview-stream.js";
+import { measureAudio } from "./audio-analysis.js";
+import { chooseAudioHighlight } from "../src/shared/suggestions.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.COMPASS_DEV === "1";
@@ -59,6 +61,8 @@ function createWindow() {
         await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && v.currentTime > 2.8 })()`, "forward button");
         await win.webContents.executeJavaScript(`document.querySelector('button[aria-label^="Back five seconds"]').click()`);
         await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && v.currentTime < 0.2 })()`, "back button");
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Suggest a moment').click()`);
+        await waitFor(`document.body.innerText.includes('Suggested for stronger sound energy')`, "sound-based suggestion");
         await win.webContents.executeJavaScript(`document.querySelectorAll('button[aria-label^="Move "]')[2].click()`);
         const firstName = await win.webContents.executeJavaScript(`document.querySelector('.clips article h2').textContent`);
         if (!firstName.includes('compass-second')) throw new Error(`Reorder failed: ${firstName}`);
@@ -123,6 +127,13 @@ ipcMain.handle("media:probe", async (_event, filePath: string): Promise<MediaAss
   const streams = data.streams ?? [];
   const video = streams.find((stream: { codec_type: string }) => stream.codec_type === "video");
   return { path: filePath, name: path.basename(filePath), duration: Number(data.format?.duration ?? 0), width: video?.width ?? 0, height: video?.height ?? 0, hasAudio: streams.some((stream: { codec_type: string }) => stream.codec_type === "audio") };
+});
+
+ipcMain.handle("media:suggest", async (_event, asset: MediaAsset) => {
+  if (![...selectedFiles.values()].includes(asset.path)) throw new Error("Choose the video in the file picker first.");
+  if (!asset.hasAudio) return chooseAudioHighlight(asset, []);
+  const bins = await measureAudio(ffmpegBinary, asset.path);
+  return chooseAudioHighlight(asset, bins);
 });
 
 ipcMain.handle("media:render", async (event, selections: RenderSelection[], options: ExportOptions) => {

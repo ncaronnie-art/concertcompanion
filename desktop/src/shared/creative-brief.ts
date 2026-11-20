@@ -22,7 +22,8 @@ export type CreativeBriefInput = {
 };
 
 export type BriefConflict = {
-  kind: "protected-over-target" | "one-song-multiple-sections" | "insufficient-footage" | "no-marked-sections";
+  kind: "protected-over-target" | "one-song-multiple-sections" | "one-song-choose-recording" |
+    "intact-vs-marked" | "insufficient-footage" | "no-marked-sections";
   message: string;
   requestedSeconds?: number;
   availableSeconds?: number;
@@ -33,6 +34,7 @@ export type CreativeBrief = {
   videoType: VideoType;
   vibe: Vibe;
   selectionMode: SelectionMode;
+  keepWholePerformance: boolean;
   targetSeconds: number | null;
   aspect: ExportOptions["aspect"];
   customVibe: string;
@@ -78,10 +80,14 @@ function parseSeconds(description: string): number | null {
 }
 
 function parsedType(text: string): VideoType | undefined {
-  if (/\b(one|single)[\s-]*song\b|\bjust this song\b|\bfull performance\b/i.test(text)) return "one-song";
+  if (/\b(one|single)[\s-]*song\b|\bjust this song\b|\bfull performance\b|\bkeep (?:this|the) performance intact\b/i.test(text)) return "one-song";
   if (/\brecap\b|\bwhole night\b/i.test(text)) return "recap";
   if (/\bcompilation\b|\bmontage\b/i.test(text)) return "compilation";
   if (/\bhighlights?\b/i.test(text)) return "highlight";
+}
+
+function asksForWholePerformance(text: string): boolean {
+  return /\b(?:keep|leave) (?:this|the) (?:song|performance) (?:fully )?intact\b|\b(?:full|entire|whole) (?:song|performance)\b|\bkeep (?:this|the) (?:song|performance) whole\b/i.test(text);
 }
 
 function parsedVibe(text: string): Vibe | undefined {
@@ -127,6 +133,7 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   const vibe = input.vibe ?? parsedVibe(description) ?? "clean-live";
   const selectionMode = input.selectionMode ?? parsedSelection(description) ??
     (clips.some((clip) => clip.included && (clip.locked || clip.selectionSource === "manual")) ? "keep-and-choose" : "choose-for-me");
+  const keepWholePerformance = videoType === "one-song" && asksForWholePerformance(description);
   if (!["highlight", "one-song", "recap", "compilation"].includes(videoType) ||
     !["energetic", "cinematic", "nostalgic", "intimate", "clean-live", "custom"].includes(vibe) ||
     !["use-my-sections", "choose-for-me", "keep-and-choose"].includes(selectionMode)) {
@@ -140,19 +147,30 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   const options: ExportOptions = { ...current, aspect, ...styleFor(vibe) };
   const protectedClips = clips.filter((clip) => clip.included && !clip.excludedByUser && (clip.locked || clip.selectionSource === "manual" || selectionMode === "use-my-sections"));
   const markedClips = clips.filter((clip) => clip.included && !clip.excludedByUser && (clip.locked || clip.selectionSource === "manual"));
-  const protectedSeconds = selectionMode === "use-my-sections" ? total(markedClips) : total(protectedClips);
   const eligible = clips.filter((clip) => !clip.excludedByUser);
-  const oneSongChoice = markedClips[0] ?? eligible.find((clip) => clip.included) ?? eligible[0];
+  const active = eligible.filter((clip) => clip.included);
+  const oneSongChoice = markedClips[0] ?? active[0] ?? eligible[0];
+  const markedPartial = keepWholePerformance && markedClips.length === 1 &&
+    (markedClips[0].start > 0.05 || markedClips[0].end < markedClips[0].asset.duration - 0.05);
+  const protectedSeconds = selectionMode === "use-my-sections" ? total(markedClips) :
+    keepWholePerformance && oneSongChoice ? oneSongChoice.asset.duration : total(protectedClips);
   const availableSeconds = selectionMode === "use-my-sections" ? total(markedClips) : videoType === "one-song" ?
-    (markedClips.length ? protectedSeconds : oneSongChoice?.asset.duration ?? 0) :
+    (keepWholePerformance ? oneSongChoice?.asset.duration ?? 0 : markedClips.length ? protectedSeconds : oneSongChoice?.asset.duration ?? 0) :
     protectedSeconds + eligible.filter((clip) => !protectedClips.includes(clip)).reduce((sum, clip) => sum + clip.asset.duration, 0);
   let conflict: BriefConflict | null = null;
   if (selectionMode === "use-my-sections" && markedClips.length === 0) {
     conflict = { kind: "no-marked-sections", message: "No sections are marked yet. Mark a section, or let Concert Compass choose for you." };
   } else if (videoType === "one-song" && markedClips.length > 1) {
     conflict = { kind: "one-song-multiple-sections", message: "Several marked recordings are protected. Which one belongs in this one-song video?" };
+  } else if (videoType === "one-song" && markedClips.length === 0 && eligible.length > 1 && active.length !== 1) {
+    conflict = { kind: "one-song-choose-recording", message: "Which recording contains this song? Choose one recording before making the cut." };
+  } else if (markedPartial) {
+    conflict = { kind: "intact-vs-marked", message: `You marked ${time(total(markedClips))} of ${markedClips[0].asset.name}, but asked to keep the whole performance. Keep your marked section or use the whole recording?` };
   } else if (targetSeconds !== null && protectedSeconds > targetSeconds + 0.05) {
-    conflict = { kind: "protected-over-target", message: `Your marked sections total ${time(protectedSeconds)}, longer than ${time(targetSeconds)}. Keep them all and extend the video, or adjust the sections?`, requestedSeconds: targetSeconds, availableSeconds: protectedSeconds };
+    const message = keepWholePerformance ?
+      `The whole recording is ${time(protectedSeconds)}, longer than ${time(targetSeconds)}. Keep it intact and extend the video, or choose a shorter section?` :
+      `Your marked sections total ${time(protectedSeconds)}, longer than ${time(targetSeconds)}. Keep them all and extend the video, or adjust the sections?`;
+    conflict = { kind: "protected-over-target", message, requestedSeconds: targetSeconds, availableSeconds: protectedSeconds };
   } else if (targetSeconds !== null && availableSeconds + 0.05 < targetSeconds) {
     const message = selectionMode === "use-my-sections" ?
       `Your marked sections total ${time(availableSeconds)}, less than ${time(targetSeconds)}. Mark more footage or choose a shorter length.` :
@@ -162,15 +180,16 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
     conflict = { kind: "insufficient-footage", message, requestedSeconds: targetSeconds, availableSeconds };
   }
   const typeLabel: Record<VideoType, string> = { highlight: "highlight", "one-song": "one-recording performance", recap: "recap", compilation: "compilation" };
-  const preserved = markedClips.length ? "your marked sections stay" : "you can adjust every section";
+  const preserved = markedClips.length ? "your marked sections stay" : keepWholePerformance ? "the whole performance stays" : "you can adjust every section";
   const labelPool = selectionMode === "use-my-sections" ? markedClips : eligible;
   const labeledSongs = new Set(labelPool.map((clip) => clip.label?.trim().toLowerCase()).filter(Boolean)).size;
   const variety = /\b(several|multiple|different|many) songs?\b/i.test(description) ? labeledSongs > 1 ? " · your labeled songs" : " · several recordings" : "";
-  const naturalSeconds = selectionMode === "use-my-sections" || videoType === "one-song" && markedClips.length ? protectedSeconds : total(clips);
+  const naturalSeconds = keepWholePerformance && oneSongChoice ? oneSongChoice.asset.duration :
+    selectionMode === "use-my-sections" || videoType === "one-song" && markedClips.length ? protectedSeconds : total(clips);
   const summary = `${time(targetSeconds ?? naturalSeconds)} ${typeLabel[videoType]}${variety} · ${vibe === "clean-live" ? "clean/live" : vibe} pacing · ${options.finish} look · ${options.transition === "fade" ? "soft joins" : "direct cuts"} · ${aspect === "landscape" ? "horizontal" : "vertical"} · ${preserved}.`;
   const limitations = supportedLimits(description, videoType, vibe, customVibe, labeledSongs);
   if (vibe === "energetic" && eligible.length < 2) limitations.push("Quicker cuts need multiple recordings; this cut keeps the available footage continuous.");
-  return { description, videoType, vibe, selectionMode, targetSeconds, aspect, customVibe, summary, limitations, conflict, options };
+  return { description, videoType, vibe, selectionMode, keepWholePerformance, targetSeconds, aspect, customVibe, summary, limitations, conflict, options };
 }
 
 function pace(vibe: Vibe): number {
@@ -194,10 +213,30 @@ function outcome<T extends CreativeClip>(clips: T[], options: ExportOptions, not
   return { clips, options, plannedSeconds: total(clips), notes };
 }
 
-export function makeFirstCut<T extends CreativeClip>(clips: T[], brief: CreativeBrief, resolution?: "extend"): CutResult<T> {
+export function makeFirstCut<T extends CreativeClip>(clips: T[], brief: CreativeBrief, resolution?: "extend" | "keep-marked"): CutResult<T> {
   validateClips(clips);
-  if (brief.conflict && !(brief.conflict.kind === "protected-over-target" && resolution === "extend")) throw new Error(brief.conflict.message);
+  if (brief.conflict && !(brief.conflict.kind === "protected-over-target" && resolution === "extend") &&
+    !(brief.conflict.kind === "intact-vs-marked" && resolution === "keep-marked")) throw new Error(brief.conflict.message);
+  if (resolution === "keep-marked") {
+    const next = clips.map((clip) => ({ ...clip, included: clip.included && !clip.excludedByUser &&
+      (clip.locked || clip.selectionSource === "manual") }));
+    return outcome(next, brief.options, ["Kept your marked section at its exact start and end points. The whole recording was not added."]);
+  }
   if (brief.selectionMode === "use-my-sections") return outcome(clips.map((clip) => ({ ...clip, included: clip.included && !clip.excludedByUser && (clip.locked || clip.selectionSource === "manual") })), brief.options, ["Kept your marked sections unchanged and left unmarked suggestions out."]);
+  if (brief.videoType === "one-song" && brief.keepWholePerformance) {
+    const chosenIndex = clips.findIndex((clip) => clip.included && !clip.excludedByUser &&
+      (clip.locked || clip.selectionSource === "manual"));
+    const index = chosenIndex >= 0 ? chosenIndex : clips.findIndex((clip) => clip.included && !clip.excludedByUser);
+    if (index < 0) throw new Error("Choose a recording to keep intact.");
+    const next = clips.map((clip, current) => current === index ?
+      { ...clip, start: 0, end: clip.asset.duration, included: true, locked: true, selectionSource: "manual" as const } :
+      { ...clip, included: false });
+    const notes = [`Kept ${clips[index].asset.name} from beginning to end without changing its speed.`];
+    if (resolution === "extend" && brief.targetSeconds !== null && clips[index].asset.duration > brief.targetSeconds) {
+      notes.push(`Extended the output to ${time(clips[index].asset.duration)} to keep the full performance.`);
+    }
+    return outcome(next, brief.options, notes);
+  }
   const protectedIndices = clips.flatMap((clip, index) => clip.included && !clip.excludedByUser && (clip.locked || clip.selectionSource === "manual") ? [index] : []);
   const protectedSeconds = protectedIndices.reduce((sum, index) => sum + duration(clips[index]), 0);
   const requested = brief.targetSeconds ?? (brief.videoType === "one-song" && protectedIndices.length ? protectedSeconds : total(clips));

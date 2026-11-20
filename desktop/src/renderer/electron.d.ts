@@ -10,6 +10,7 @@ declare global {
       preview(id: string): Promise<string>;
       suggest(asset: MediaAsset): Promise<Suggestion>;
       render(selections: RenderSelection[], options: ExportOptions): Promise<{ cancelled: boolean; output?: string; cleanupWarning?: boolean }>;
+      previewCut(selections: RenderSelection[], options: ExportOptions): Promise<{ url: string }>;
       cancelRender(): Promise<boolean>;
       saveProject(snapshot: ProjectSnapshot): Promise<{ cancelled: boolean; path?: string }>;
       openProject(): Promise<{ snapshot: ProjectSnapshot; files: { path: string; id: string }[] } | null>;

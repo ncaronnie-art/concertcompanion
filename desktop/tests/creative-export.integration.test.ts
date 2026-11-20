@@ -49,7 +49,7 @@ test("creative brief preserves a marked section and exports its first cut throug
     const plan = buildRenderCommand(cut.clips.filter((clip) => clip.included), output, cut.options);
     const filters = plan.args[plan.args.indexOf("-filter_complex") + 1];
     assert.match(filters, /eq=contrast=1[.]07/, "cinematic look reaches the render plan");
-    assert.ok(!/\[0:v\][^;]*eq=/.test(filters), "the protected video does not get the color look");
+    assert.match(filters, /\[0:v\][^;]*eq=contrast=1[.]07/, "a protected section keeps its timing while the selected look stays consistent");
     await run(ffmpeg, plan.args);
     await run(ffmpeg, ["-v", "error", "-i", output, "-f", "null", "-"]);
     const metadata = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,width,height", "-of", "json", output]));

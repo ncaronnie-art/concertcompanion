@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld("concertCompass", {
   pickVideos: () => ipcRenderer.invoke("media:pick"),
   probe: (filePath: string) => ipcRenderer.invoke("media:probe", filePath),
   preview: (id: string) => ipcRenderer.invoke("media:preview", id),
+  previewCut: (selections: unknown, options: unknown) => ipcRenderer.invoke("media:preview-cut", selections, options),
   suggest: (asset: unknown) => ipcRenderer.invoke("media:suggest", asset),
   render: (selections: unknown, options: unknown) => ipcRenderer.invoke("media:render", selections, options),
   cancelRender: () => ipcRenderer.invoke("media:cancel-render"),

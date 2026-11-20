@@ -17,5 +17,9 @@ test("preview serves complete files and byte ranges for seeking", async () => {
     assert.equal(await suffix.text(), "789");
     const bad = await previewResponse(file, new Request("https://preview/", { headers: { Range: "bytes=15-" } }));
     assert.equal(bad.status, 416);
+    const mp4 = path.join(root, "draft.mp4"); await writeFile(mp4, "video");
+    const draft = await previewResponse(mp4, new Request("https://draft/"));
+    assert.equal(draft.headers.get("content-type"), "video/mp4");
+    assert.equal(await draft.text(), "video");
   } finally { await rm(root, { recursive: true, force: true }); }
 });

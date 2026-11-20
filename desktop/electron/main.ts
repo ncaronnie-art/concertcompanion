@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, protocol, type IpcMainInvokeEvent } from "electron";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -12,13 +12,18 @@ import { previewResponse } from "./preview-stream.js";
 import { measureAudio } from "./audio-analysis.js";
 import { chooseAudioHighlight } from "../src/shared/suggestions.js";
 import { withTemporaryCleanup } from "./temporary-cleanup.js";
+import { commitOutput } from "./output-commit.js";
+import { displayDimensions } from "./media-orientation.js";
 import { parseProjectSnapshot, type ProjectSnapshot } from "../src/shared/project-file.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.COMPASS_DEV === "1";
 const ffmpegBinary = ffmpegPath as unknown as string;
 const selectedFiles = new Map<string, string>();
+const probedDurations = new Map<string, number>();
 const previews = new Map<string, string>();
+const drafts = new Map<string, string>();
+const draftKeys = new Map<string, string>();
 let previewDirectory: string | undefined;
 let activeRender: ChildProcess | undefined;
 let cancelRender = false;
@@ -39,7 +44,7 @@ function createWindow() {
   else win.loadFile(path.join(here, "../../dist/index.html"));
   if (smoke) {
     win.webContents.on("console-message", (_event, level, message) => { if (level >= 2) console.error(`Renderer: ${message}`); });
-    const timer = setTimeout(() => { console.error("Desktop smoke test timed out"); app.exit(1); }, 90000);
+    const timer = setTimeout(() => { console.error("Desktop smoke test timed out"); app.exit(1); }, 150000);
     win.webContents.once("did-fail-load", (_event, code, description) => { console.error(`Page load failed: ${code} ${description}`); clearTimeout(timer); app.exit(1); });
     win.webContents.once("did-finish-load", async () => {
       try {
@@ -47,7 +52,7 @@ function createWindow() {
         if (state.title !== "Concert Compass" || state.bridge !== "function" || !state.root) throw new Error(JSON.stringify(state));
         await win.webContents.executeJavaScript(`document.querySelector('button.primary').click()`);
         const waitFor = async (expression: string, label: string) => {
-          for (let attempt = 0; attempt < 300; attempt++) {
+          for (let attempt = 0; attempt < 600; attempt++) {
             if (await win.webContents.executeJavaScript(expression)) return;
             await new Promise((resolve) => setTimeout(resolve, 200));
           }
@@ -82,9 +87,15 @@ function createWindow() {
         await waitFor(`document.body.innerText.includes('First cut ready:')`, "first cut");
         await win.webContents.executeJavaScript(`document.querySelector('.clips article .refine-actions button').click()`);
         await waitFor(`document.body.innerText.includes('Other sections stayed the same')`, "first-cut adjustment");
+        await win.webContents.executeJavaScript(`document.querySelector('.draft-heading button').click()`);
+        await waitFor(`document.body.innerText.includes('Draft preview is ready')`, "assembled draft render");
+        await waitFor(`(() => { const v=document.querySelector('.draft-player'); return v && v.videoWidth > 0 && v.readyState >= 1 })()`, "assembled draft picture");
+        const draftSize = await win.webContents.executeJavaScript(`(() => { const v=document.querySelector('.draft-player'); return [v.videoWidth,v.videoHeight] })()`);
+        if (draftSize[0] !== 360 || draftSize[1] !== 640) throw new Error(`Draft video shape was wrong: ${draftSize}`);
         const protectedStart = await win.webContents.executeJavaScript(`(() => { const clip = document.querySelectorAll('.clips article')[1]; if (!clip.querySelector('.trim-heading input[type=checkbox]').checked) throw new Error('Marked section was unlocked'); return Number(clip.querySelector('input[aria-label$=" start"]').value) })()`);
         if (protectedStart < 0.8 || protectedStart > 1.2) throw new Error(`Marked section moved: ${protectedStart}`);
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Widescreen')).click(); document.querySelector('.options input[type=checkbox]').click()`);
+        await waitFor(`!!document.querySelector('.draft-stale')`, "draft invalidation after settings change");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Save project').click()`);
         await waitFor(`document.body.innerText.includes('Project saved:')`, "project save");
         await access(process.env.COMPASS_SMOKE_PROJECT!);
@@ -110,6 +121,16 @@ function createWindow() {
           child.on("close", (code) => code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error("Could not inspect exported frame")));
         });
         if (color.length < 3 || color[0] < color[1] * 2 || color[0] < color[2] * 2) throw new Error(`Export order was wrong: ${color.toString("hex")}`);
+        await win.webContents.executeJavaScript(`document.querySelectorAll('.clips article')[1].querySelector('.trim-heading input[type=checkbox]').click()`);
+        await win.webContents.executeJavaScript(`(() => { const input=document.querySelector('.brief textarea'), set=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set; set.call(input,'Just this song, keep the performance intact.'); input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Review my plan').click()`);
+        await waitFor(`document.body.innerText.includes('Which recording contains this song?')`, "one-song recording question");
+        await win.webContents.executeJavaScript(`document.querySelector('.conflict .choices button').click()`);
+        await waitFor(`document.body.innerText.includes('Recording chosen.')`, "one-song choice");
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Review my plan').click()`);
+        await waitFor(`(() => { const plan=document.querySelector('.brief-review h3'); return plan && plan.textContent.includes('one-recording performance') })()`, "one-song interpretation");
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Make my first cut').click()`);
+        await waitFor(`document.body.innerText.includes('First cut ready:') && document.body.innerText.includes('1 selected')`, "one-song first cut");
         console.log("Desktop creative brief, protected selection, first cut, refinement, project save/open and MP4 export passed"); clearTimeout(timer); app.exit(0);
       } catch (error) { console.error("Desktop smoke test failed", error); clearTimeout(timer); app.exit(1); }
     });
@@ -124,6 +145,40 @@ function run(command: string, args: string[]): Promise<string> {
     child.stderr.on("data", (data) => (stderr += data));
     child.on("error", reject);
     child.on("close", (code) => code === 0 ? resolve(stdout) : reject(new Error(stderr || `Process stopped (${code}).`)));
+  });
+}
+
+async function assertOutputIsNotOriginal(output: string): Promise<void> {
+  for (const sourcePath of selectedFiles.values()) {
+    if (path.resolve(sourcePath).toLowerCase() === output.toLowerCase()) throw new Error("Choose a different name from your original video.");
+    try {
+      const [source, target] = await Promise.all([stat(sourcePath), stat(output)]);
+      if (source.dev === target.dev && source.ino === target.ino) throw new Error("Choose a different name from your original video.");
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+}
+
+function runPlannedRender(event: IpcMainInvokeEvent, args: string[], totalSeconds: number, stoppedMessage: string): Promise<void> {
+  if (activeRender) throw new Error("Another video is still being prepared.");
+  cancelRender = false;
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(ffmpegBinary, args, { windowsHide: true });
+    activeRender = child;
+    let stderr = "", progressBuffer = "";
+    child.stderr.on("data", (data) => (stderr += data));
+    child.stdout.on("data", (data) => {
+      progressBuffer += data.toString();
+      const lines = progressBuffer.split(/\r?\n/); progressBuffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const match = /^out_time_ms=(\d+)/.exec(line);
+        if (match) event.sender.send("media:progress", Math.min(0.99, Number(match[1]) / 1_000_000 / totalSeconds));
+      }
+    });
+    child.once("error", (error) => { activeRender = undefined; reject(error); });
+    child.once("close", (code) => {
+      activeRender = undefined;
+      code === 0 && !cancelRender ? resolve() : reject(new Error(cancelRender ? stoppedMessage : stderr || `FFmpeg stopped (${code}).`));
+    });
   });
 }
 
@@ -203,9 +258,13 @@ ipcMain.handle("media:preview", async (_event, id: string) => {
   const source = selectedFiles.get(id);
   if (!source) throw new Error("Choose the video in the file picker first.");
   previewDirectory ??= await mkdtemp(path.join(tmpdir(), "concert-compass-preview-"));
-  const output = path.join(previewDirectory, `${id}.webm`);
+  const output = path.join(previewDirectory, `${id}.mp4`);
   try {
-    await run(ffmpegBinary, ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", source, "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=640:640:force_original_aspect_ratio=decrease:force_divisible_by=2", "-r", "24", "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "5", "-b:v", "1200k", "-c:a", "libopus", "-b:a", "96k", output]);
+    await runPlannedRender(_event, ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", source,
+      "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=480:480:force_original_aspect_ratio=decrease:force_divisible_by=2",
+      "-r", "24", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-pix_fmt", "yuv420p",
+      "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", output],
+      probedDurations.get(source) ?? 1, "Preview stopped. Your recordings are safe.");
     previews.set(id, output);
     return `compass-media://preview/${id}`;
   } catch (error) {
@@ -216,11 +275,15 @@ ipcMain.handle("media:preview", async (_event, id: string) => {
 
 ipcMain.handle("media:probe", async (_event, filePath: string): Promise<MediaAsset> => {
   if (![...selectedFiles.values()].includes(filePath)) throw new Error("Choose the video in the file picker first.");
-  const raw = await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height", "-of", "json", filePath]);
+  const raw = await run(ffprobe.path, ["-v", "error", "-show_streams", "-show_format", "-of", "json", filePath]);
   const data = JSON.parse(raw);
   const streams = data.streams ?? [];
   const video = streams.find((stream: { codec_type: string }) => stream.codec_type === "video");
-  return { path: filePath, name: path.basename(filePath), duration: Number(data.format?.duration ?? 0), width: video?.width ?? 0, height: video?.height ?? 0, hasAudio: streams.some((stream: { codec_type: string }) => stream.codec_type === "audio") };
+  const dimensions = video ? displayDimensions(video) : { width: 0, height: 0 };
+  const asset = { path: filePath, name: path.basename(filePath), duration: Number(data.format?.duration ?? 0),
+    width: dimensions.width, height: dimensions.height, hasAudio: streams.some((stream: { codec_type: string }) => stream.codec_type === "audio") };
+  probedDurations.set(filePath, asset.duration);
+  return asset;
 });
 
 ipcMain.handle("media:suggest", async (_event, asset: MediaAsset) => {
@@ -230,44 +293,55 @@ ipcMain.handle("media:suggest", async (_event, asset: MediaAsset) => {
   return chooseAudioHighlight(asset, bins);
 });
 
+ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[], options: ExportOptions) => {
+  if (activeRender) throw new Error("Another video is still being prepared.");
+  if (!Array.isArray(selections) || selections.some((selection) => ![...selectedFiles.values()].includes(selection.asset.path))) {
+    throw new Error("Choose the videos in the file picker first.");
+  }
+  const key = JSON.stringify({ sections: selections.map((selection) => ({ path: selection.asset.path, start: selection.start,
+    end: selection.end, framing: selection.framing, locked: selection.locked })), options });
+  const existing = draftKeys.get(key);
+  if (existing && drafts.has(existing)) {
+    try { await access(drafts.get(existing)!); return { url: `compass-media://draft/${existing}` }; }
+    catch { draftKeys.delete(key); drafts.delete(existing); }
+  }
+  previewDirectory ??= await mkdtemp(path.join(tmpdir(), "concert-compass-preview-"));
+  const id = randomUUID();
+  const output = path.join(previewDirectory, `draft-${id}.mp4`);
+  try {
+    const { args, totalSeconds } = buildRenderCommand(selections, output, options, "draft");
+    await runPlannedRender(event, args, totalSeconds, "Preview stopped. Your edit is still here.");
+    const probe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name", "-of", "json", output]));
+    if (!probe.streams?.some((stream: {codec_type: string; codec_name: string}) => stream.codec_type === "video" && stream.codec_name === "h264") ||
+      !probe.streams?.some((stream: {codec_type: string; codec_name: string}) => stream.codec_type === "audio" && stream.codec_name === "aac") ||
+      Math.abs(Number(probe.format?.duration) - totalSeconds) > Math.max(0.25, totalSeconds * 0.01)) {
+      throw new Error("The preview did not pass its checks. Try again or export the video.");
+    }
+    drafts.set(id, output); draftKeys.set(key, id);
+    event.sender.send("media:progress", 1);
+    return { url: `compass-media://draft/${id}` };
+  } catch (error) {
+    await rm(output, { force: true }).catch(() => {});
+    throw error;
+  }
+});
+
 ipcMain.handle("media:render", async (event, selections: RenderSelection[], options: ExportOptions) => {
   if (activeRender) throw new Error("A video is already being exported.");
   if (!Array.isArray(selections) || selections.some((selection) => ![...selectedFiles.values()].includes(selection.asset.path))) throw new Error("Choose the videos in the file picker first.");
   const destination = smoke ? { canceled: false, filePath: process.env.COMPASS_SMOKE_OUTPUT! } : await dialog.showSaveDialog({ defaultPath: "Concert Compass Reel.mp4", filters: [{ name: "MP4 video", extensions: ["mp4"] }] });
   if (destination.canceled || !destination.filePath) return { cancelled: true };
   const output = path.resolve(destination.filePath);
-  for (const sourcePath of selectedFiles.values()) {
-    if (path.resolve(sourcePath).toLowerCase() === output.toLowerCase()) throw new Error("Choose a different name from your original video.");
-    try {
-      const [source, target] = await Promise.all([stat(sourcePath), stat(output)]);
-      if (source.dev === target.dev && source.ino === target.ino) throw new Error("Choose a different name from your original video.");
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  }
-  const tempDir = await mkdtemp(path.join(path.dirname(output), ".compass-"));
+  await assertOutputIsNotOriginal(output);
+  const tempDir = await mkdtemp(path.join(tmpdir(), "concert-compass-export-"));
   const temporaryOutput = path.join(tempDir, `${randomUUID()}.mp4`);
   const { cleanupWarning } = await withTemporaryCleanup(tempDir, async () => {
   const { args, totalSeconds } = buildRenderCommand(selections, temporaryOutput, options);
   if (smoke && smokeCancelPending) { args.splice(2, 0, "-re"); smokeCancelPending = false; }
-  cancelRender = false;
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(ffmpegBinary, args, { windowsHide: true });
-    activeRender = child;
-    let stderr = "", progressBuffer = "";
-    child.stderr.on("data", (data) => (stderr += data));
-    child.stdout.on("data", (data) => {
-      progressBuffer += data.toString();
-      const lines = progressBuffer.split(/\r?\n/); progressBuffer = lines.pop() ?? "";
-      for (const line of lines) {
-        const match = /^out_time_ms=(\d+)/.exec(line);
-        if (match) event.sender.send("media:progress", Math.min(0.99, Number(match[1]) / 1_000_000 / totalSeconds));
-      }
-    });
-    child.on("error", reject);
-    child.on("close", (code) => { activeRender = undefined; code === 0 && !cancelRender ? resolve() : reject(new Error(cancelRender ? "Export stopped. Your selections are still here." : stderr || `FFmpeg stopped (${code}).`)); });
-  });
+  await runPlannedRender(event, args, totalSeconds, "Export stopped. Your selections are still here.");
   const probe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name", "-of", "json", temporaryOutput]));
   if (!probe.streams?.some((stream: {codec_type: string; codec_name: string}) => stream.codec_type === "video" && stream.codec_name === "h264") || !probe.streams?.some((stream: {codec_type: string; codec_name: string}) => stream.codec_type === "audio" && stream.codec_name === "aac") || Math.abs(Number(probe.format?.duration) - totalSeconds) > Math.max(0.25, totalSeconds * 0.01)) throw new Error("The exported video did not pass its checks. Please try again.");
-  await rename(temporaryOutput, output);
+  await commitOutput(temporaryOutput, output, () => assertOutputIsNotOriginal(output));
   event.sender.send("media:progress", 1);
   }, smoke && process.env.COMPASS_SMOKE_CLEANUP_FAIL === "1" ? async () => { throw new Error("Simulated temporary-folder permission error"); } : undefined);
   return { cancelled: false, output, cleanupWarning };
@@ -282,7 +356,8 @@ ipcMain.handle("media:cancel-render", () => {
 app.whenReady().then(() => {
   protocol.handle("compass-media", async (request) => {
     const url = new URL(request.url);
-    const file = url.hostname === "preview" ? previews.get(url.pathname.slice(1)) : undefined;
+    const file = url.hostname === "preview" ? previews.get(url.pathname.slice(1)) :
+      url.hostname === "draft" ? drafts.get(url.pathname.slice(1)) : undefined;
     if (!file) return new Response("Not found", { status: 404 });
     return previewResponse(file, request);
   });

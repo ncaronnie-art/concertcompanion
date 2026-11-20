@@ -36,9 +36,13 @@ function parseLength(value: string): number | undefined {
 export function App() {
   const [clips, setClips] = useState<Chosen[]>([]);
   const [busy, setBusy] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [message, setMessage] = useState("Choose videos from iCloud Drive or anywhere on this PC.");
   const [progress, setProgress] = useState(0);
   const [exporting, setExporting] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+  const [draftUrl, setDraftUrl] = useState<string | null>(null);
+  const [draftSignature, setDraftSignature] = useState<string | null>(null);
   const [aspect, setAspect] = useState<ExportOptions["aspect"]>("vertical");
   const [reduceRumble, setReduceRumble] = useState(false);
   const [finish, setFinish] = useState<NonNullable<ExportOptions["finish"]>>("natural");
@@ -51,11 +55,16 @@ export function App() {
   const [positions, setPositions] = useState<Record<string, number>>({});
   const players = useRef(new Map<string, HTMLVideoElement>());
   const audioSuggestions = useRef(new Map<string, { start: number; end: number }>());
+  const importCancelled = useRef(false);
 
   useEffect(() => { window.concertCompass.onProgress(setProgress); }, []);
+  useEffect(() => {
+    if (stage === "cut") document.getElementById("watch-first-cut")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [stage]);
   const selected = useMemo(() => clips.filter((clip) => clip.included && !clip.excludedByUser), [clips]);
   const totalSeconds = selected.reduce((sum, clip) => sum + (clip.end - clip.start), 0);
   const options: ExportOptions = { aspect, reduceRumble, finish, transition };
+  const cutSignature = JSON.stringify({ clips: selected.map((clip) => ({ path: clip.asset.path, start: clip.start, end: clip.end, locked: clip.locked, framing: clip.framing ?? "auto" })), options });
 
   function remember() {
     setUndoStack((old) => [...old.slice(-24), { clips, options }]);
@@ -91,28 +100,40 @@ export function App() {
     setMessage("Undid the last edit. Your earlier choices are back.");
   }
 
+  async function stopImport() {
+    importCancelled.current = true;
+    await window.concertCompass.cancelRender();
+    setMessage("Stopping import…");
+  }
+
   async function importVideos() {
     const paths = await window.concertCompass.pickVideos();
     if (!paths.length) return;
-    setBusy(true); setMessage(`Preparing previews for ${paths.length} video${paths.length === 1 ? "" : "s"}…`);
+    importCancelled.current = false;
+    setBusy(true); setImporting(true); setProgress(0); setMessage(`Preparing previews for ${paths.length} video${paths.length === 1 ? "" : "s"}…`);
     try {
       const usable: { asset: MediaAsset; previewUrl: string }[] = [];
       let failed = 0;
+      let duplicates = 0;
+      const knownPaths = new Set(clips.map((clip) => clip.asset.path.toLowerCase()));
       for (const [index, file] of paths.entries()) {
-        setMessage(`Preparing video ${index + 1} of ${paths.length}…`);
+        if (importCancelled.current) break;
+        if (knownPaths.has(file.path.toLowerCase())) { duplicates++; continue; }
+        knownPaths.add(file.path.toLowerCase());
+        setProgress(0); setMessage(`Preparing video ${index + 1} of ${paths.length}…`);
         try {
           const asset = await window.concertCompass.probe(file.path);
           if (asset.duration < 0.1 || !asset.width) throw new Error("Not a usable video");
+          if (importCancelled.current) break;
           usable.push({ asset, previewUrl: await window.concertCompass.preview(file.id) });
-        } catch { failed++; }
+        } catch { if (importCancelled.current) break; failed++; }
       }
-      const newClips = usable.filter(({ asset }) => !clips.some((clip) => clip.asset.path === asset.path))
-        .map(({ asset, previewUrl }) => ({ asset, previewUrl, ...suggestedRange(asset), included: true,
+      const newClips = usable.map(({ asset, previewUrl }) => ({ asset, previewUrl, ...suggestedRange(asset), included: true,
           selectionSource: "suggested" as const, locked: false, excludedByUser: false }));
       if (newClips.length) changeClips([...clips, ...newClips]);
-      setMessage(`${newClips.length} new video${newClips.length === 1 ? "" : "s"} ready.${failed ? ` ${failed} could not be prepared; check that the files are downloaded and playable.` : ""} Describe what you want, or edit sections below.`);
+      setMessage(importCancelled.current ? `Import stopped. ${newClips.length} video${newClips.length === 1 ? "" : "s"} already prepared are ready; your originals are safe.` : `${newClips.length} new video${newClips.length === 1 ? "" : "s"} ready.${duplicates ? ` ${duplicates} already imported.` : ""}${failed ? ` ${failed} could not be prepared; check that the files are downloaded and playable.` : ""} Describe what you want, or edit sections below.`);
     } catch (error) { setMessage(`Could not read a video: ${error instanceof Error ? error.message : String(error)}`); }
-    finally { setBusy(false); }
+    finally { setBusy(false); setImporting(false); }
   }
 
   async function saveProject() {
@@ -166,14 +187,15 @@ export function App() {
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
   }
 
-  async function firstCut(extend = false) {
+  async function firstCut(resolution?: "extend" | "keep-marked") {
     if (!reviewBrief) return;
     setBusy(true);
     try {
       let candidates = clips.map((clip) => ({ ...clip }));
-      if (reviewBrief.selectionMode !== "use-my-sections") {
+      if (reviewBrief.selectionMode !== "use-my-sections" && !reviewBrief.keepWholePerformance && resolution !== "keep-marked") {
         for (let index = 0; index < candidates.length; index++) {
           const clip = candidates[index];
+          if (reviewBrief.videoType === "one-song" && index !== candidates.findIndex((candidate) => candidate.included && !candidate.excludedByUser)) continue;
           if (clip.excludedByUser || clip.locked || clip.selectionSource === "manual") continue;
           try {
             setMessage(`Finding a starting moment in ${clip.asset.name}…`);
@@ -186,11 +208,11 @@ export function App() {
           } catch { /* The current section remains a valid fallback. */ }
         }
       }
-      const result = makeFirstCut(candidates, reviewBrief, extend ? "extend" : undefined);
+      const result = makeFirstCut(candidates, reviewBrief, resolution);
       remember(); setClips(result.clips);
       setAspect(result.options.aspect); setReduceRumble(result.options.reduceRumble);
       setFinish(result.options.finish ?? "natural"); setTransition(result.options.transition ?? "cut");
-      setStage("cut"); setMessage(`First cut ready: ${clock(result.plannedSeconds)}. ${result.notes.join(" ")} Preview the sections, adjust anything, then export.`);
+      setStage("cut"); setMessage(`First cut ready: ${clock(result.plannedSeconds)}. ${result.notes.join(" ")} Watch the first cut, adjust anything, then export.`);
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   }
@@ -245,40 +267,73 @@ export function App() {
       setMessage(detail.includes("Export stopped.") ? "Export stopped. Your selections are still here." : `Export failed. Your originals are safe. ${detail}`);
     } finally { setBusy(false); setExporting(false); }
   }
+  async function previewFirstCut() {
+    if (!selected.length) return;
+    const signature = cutSignature;
+    setBusy(true); setPreviewing(true); setProgress(0);
+    setMessage("Preparing a watchable draft with your current sections and look…");
+    try {
+      const result = await window.concertCompass.previewCut(selected, options);
+      setDraftUrl(result.url); setDraftSignature(signature);
+      setMessage("Draft preview is ready. Watch it through, then adjust or export.");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setMessage(detail.includes("stopped") || detail.includes("cancel") ? "Preview stopped. Your edit is still here." : `Could not make the preview: ${detail}`);
+    } finally { setBusy(false); setPreviewing(false); }
+  }
+  function chooseOneSong(path: string) {
+    changeClips(clips.map((clip) => {
+      if (clip.asset.path === path) return { ...clip, included: true, excludedByUser: false };
+      if (clip.excludedByUser) return clip;
+      return { ...clip, included: false, excludedByUser: clip.locked || clip.selectionSource === "manual" };
+    }));
+    setReviewBrief(null); setStage("describe");
+    setMessage("Recording chosen. Review the plan once more before making the cut.");
+  }
+  function useWholePerformance() {
+    const marked = clips.find((clip) => clip.included && !clip.excludedByUser && (clip.locked || clip.selectionSource === "manual") && (clip.start > 0.05 || clip.end < clip.asset.duration - 0.05));
+    if (!marked) return;
+    changeClips(clips.map((clip) => clip.asset.path === marked.asset.path ? { ...clip, start: 0, end: clip.asset.duration, locked: true, selectionSource: "manual" as const } : clip));
+    setReviewBrief(null); setStage("describe");
+    setMessage(`Using all of ${marked.asset.name}. Review the plan again.`);
+  }
 
-  return <main>
-    <header><div><p className="eyebrow">CONCERT COMPASS · WINDOWS PROTOTYPE</p><h1>Make a vibe capsule.</h1><p className="subhead">Tell us the feeling. Keep the moments you love. We’ll build a first cut you can change.</p></div><div className="header-actions"><button disabled={busy} onClick={openProject}>Open project</button><button className="primary" disabled={busy} onClick={importVideos}>Import videos</button></div></header>
-    <section className="status" aria-live="polite"><span>{message}</span>{busy && (exporting ? <><progress max="1" value={progress} /><button className="stop" onClick={async () => { if (await window.concertCompass.cancelRender()) setMessage("Stopping export…"); }}>Stop export</button></> : <progress aria-label="Preparing videos" />)}</section>
-    {!clips.length ? <section className="empty"><h2>Start with your recordings</h2><p>Choose videos from a synced iCloud Drive folder or this PC. Originals stay untouched.</p><button className="primary" disabled={busy} onClick={importVideos}>Choose videos</button></section> : <>
+  return <main className={clips.length ? "has-clips" : undefined}>
+    <header><div><p className="eyebrow">VIBE CAPSULE BY CONCERT COMPASS <span className="build-label">WINDOWS TEST BUILD</span></p><h1>Keep what the night felt like.</h1><p className="subhead">Turn your concert recordings into a video shaped around the moments you love.</p></div><div className="header-actions"><button disabled={busy} onClick={openProject}>Open project</button><button className="primary" disabled={busy} onClick={importVideos}>Import videos</button></div></header>
+    <nav className="workflow" aria-label="Video creation steps"><span className={clips.length ? "done" : "current"}>1 Import</span><span className={stage === "describe" && clips.length ? "current" : clips.length ? "done" : ""}>2 Describe</span><span className={stage === "review" ? "current" : stage === "cut" ? "done" : ""}>3 Review</span><span className={stage === "cut" ? "current" : ""}>4 Watch & adjust</span><span>5 Export</span></nav>
+    <section className="status" aria-live="polite"><span>{message}</span>{busy && ((exporting || previewing) ? <><progress max="1" value={progress} aria-label={exporting ? "Export progress" : "Preview progress"} /><button className="stop" onClick={async () => { if (await window.concertCompass.cancelRender()) setMessage(exporting ? "Stopping export…" : "Stopping preview…"); }}>{exporting ? "Stop export" : "Stop preview"}</button></> : importing ? <><progress max="1" value={progress} aria-label="Preparing video progress" /><button className="stop" onClick={stopImport}>Stop import</button></> : <progress aria-label="Preparing videos" />)}</section>
+    {!clips.length ? <section className="empty"><h2>Start with your recordings</h2><p>Choose videos from a synced iCloud Drive folder or this PC. Your original recordings stay untouched.</p><button className="primary" disabled={busy} onClick={importVideos}>Choose videos</button></section> : <>
       <section className="brief" aria-label="What are we making?">
-        <div className="section-heading"><div><p className="eyebrow">YOUR CREATIVE BRIEF</p><h2>What are we making?</h2><p>Describe it in your own words, or tap a few choices. Everything below uses the same clip selections and export settings.</p></div><button disabled={busy || !undoStack.length} onClick={undo}>Undo</button></div>
+        <div className="section-heading"><div><p className="eyebrow">YOUR VIDEO, YOUR FEELING</p><h2>What are we making?</h2><p>Tell us what you want. Your marked moments and video settings are already part of this plan.</p></div><button disabled={busy || !undoStack.length} onClick={undo}>Undo</button></div>
         {stage !== "review" ? <>
-          <label className="brief-description">Describe your video<textarea disabled={busy} value={briefInput.description} onChange={(event) => changeBrief({ description: event.target.value })} placeholder="A two-minute recap of the whole night. Energetic, several recordings, and keep the section I marked." rows={3} /></label>
-          <div className="choice-grid">
+          <label className="brief-description">Describe your video<textarea disabled={busy} value={briefInput.description} onChange={(event) => changeBrief({ description: event.target.value })} placeholder="Make an energetic recap of the night. Keep the section I marked, and choose the rest." rows={3} /></label>
+          <details className="fine-tune"><summary>Fine-tune the plan <span>optional</span></summary><div className="choice-grid">
             <fieldset><legend>Video type</legend><div className="choices">{videoTypes.map(({ value, label }) => <button type="button" key={value} aria-pressed={briefInput.videoType === value} disabled={busy} onClick={() => changeBrief({ videoType: briefInput.videoType === value ? undefined : value })}>{label}</button>)}</div></fieldset>
-            <fieldset><legend>Vibe</legend><div className="choices">{vibes.map(({ value, label }) => <button type="button" key={value} aria-pressed={briefInput.vibe === value} disabled={busy} onClick={() => changeBrief({ vibe: briefInput.vibe === value ? undefined : value })}>{label}</button>)}</div>{briefInput.vibe === "custom" && <input aria-label="Custom vibe" disabled={busy} placeholder="Describe your custom vibe" value={briefInput.customVibe ?? ""} onChange={(event) => changeBrief({ customVibe: event.target.value })} />}</fieldset>
+            <fieldset><legend>Vibe</legend><div className="choices">{vibes.map(({ value, label }) => <button type="button" key={value} aria-pressed={briefInput.vibe === value} disabled={busy} onClick={() => changeBrief({ vibe: briefInput.vibe === value ? undefined : value })}>{label}</button>)}</div>{briefInput.vibe === "custom" && <><input aria-label="Custom vibe" disabled={busy} placeholder="Describe your custom vibe" value={briefInput.customVibe ?? ""} onChange={(event) => changeBrief({ customVibe: event.target.value })} /><p className="helper">If we cannot match it with the current tools, the plan will tell you before editing.</p></>}</fieldset>
           </div>
-          <fieldset><legend>Which moments?</legend><div className="choices">{modes.map(({ value, label }) => <button type="button" key={value} aria-pressed={briefInput.selectionMode === value} disabled={busy} onClick={() => changeBrief({ selectionMode: briefInput.selectionMode === value ? undefined : value })}>{label}</button>)}</div></fieldset>
-          <div className="brief-bottom"><label>Target length <span>(optional; minutes or m:ss)</span><input disabled={busy} aria-label="Target length" value={lengthText} onChange={(event) => { setLengthText(event.target.value); setReviewBrief(null); }} placeholder={`Current edit ${clock(totalSeconds)}`} /></label><div className="brief-buttons"><button disabled={busy} onClick={() => document.getElementById("clip-editor")?.scrollIntoView({ behavior: "smooth" })}>Skip to editor</button><button className="primary" disabled={busy} onClick={reviewPlan}>Review my plan</button></div></div>
-        </> : reviewBrief && <div className="brief-review"><p className="eyebrow">HERE’S THE PLAN</p><h3>{reviewBrief.summary}</h3><p>{reviewBrief.selectionMode === "use-my-sections" ? "Only your marked sections will be used." : "We’ll use sound strength to suggest unprotected moments, then fit them to your length. You can change every suggestion."}</p><p>Visual look: {reviewBrief.options.finish ?? "natural"} · joins: {reviewBrief.options.transition === "fade" ? "short fades" : "straight cuts"}. Your original sound stays unless you turn on low-rumble reduction.</p>{reviewBrief.limitations.map((item) => <p className="limit" key={item}>{item}</p>)}
-          {reviewBrief.conflict && <div className="conflict" role="alert"><strong>{reviewBrief.conflict.message}</strong>{reviewBrief.conflict.kind === "one-song-multiple-sections" && <div className="choices">{clips.filter((clip) => clip.included && (clip.locked || clip.selectionSource === "manual")).map((clip) => <button disabled={busy} key={clip.asset.path} onClick={() => {
-            changeClips(clips.map((item) => item.asset.path === clip.asset.path ? item : item.included && (item.locked || item.selectionSource === "manual") ? { ...item, included: false, excludedByUser: true } : item));
-            setReviewBrief(null); setStage("describe"); setMessage(`Keeping ${clip.asset.name}. Review the plan again.`);
-          }}>Use {clip.asset.name}</button>)}</div>}{reviewBrief.conflict.kind === "insufficient-footage" && <button disabled={busy} onClick={() => { const seconds = reviewBrief.conflict?.availableSeconds; if (seconds) { setLengthText(clock(seconds)); changeBrief({ targetSeconds: seconds }); } }}>Use available length</button>}</div>}
-          <div className="brief-buttons"><button disabled={busy} onClick={() => setStage("describe")}>Adjust</button>{reviewBrief.conflict?.kind === "protected-over-target" ? <button className="primary" disabled={busy} onClick={() => firstCut(true)}>Keep all and extend</button> : <button className="primary" disabled={busy || !!reviewBrief.conflict} onClick={() => firstCut()}>Make my first cut</button>}</div>
+          <fieldset><legend>Which moments?</legend><div className="choices">{modes.map(({ value, label }) => <button type="button" key={value} aria-pressed={briefInput.selectionMode === value} disabled={busy} onClick={() => changeBrief({ selectionMode: briefInput.selectionMode === value ? undefined : value })}>{label}</button>)}</div><p className="helper">Want a section kept exactly? Use “Keep this section” on its recording below.</p></fieldset></details>
+          <div className="brief-bottom"><label>Length <span>(optional; minutes or m:ss)</span><input disabled={busy} aria-label="Target length" value={lengthText} onChange={(event) => { setLengthText(event.target.value); setReviewBrief(null); }} placeholder={`Current edit ${clock(totalSeconds)}`} /></label><div className="brief-buttons"><button disabled={busy} onClick={() => document.getElementById("clip-editor")?.scrollIntoView({ behavior: "smooth" })}>Edit sections myself</button><button className="primary" disabled={busy} onClick={reviewPlan}>Review my plan</button></div></div>
+        </> : reviewBrief && <div className="brief-review"><p className="eyebrow">HERE’S YOUR PLAN</p><h3>{reviewBrief.summary}</h3><p>{reviewBrief.selectionMode === "use-my-sections" ? "Only the sections you marked will be used." : reviewBrief.keepWholePerformance ? "We’ll keep the chosen performance continuous. Your timing remains yours to decide." : "We’ll suggest moments from unprotected recordings, then fit them to your length. You can change any suggestion."}</p><p>Look: {reviewBrief.options.finish ?? "natural"} · Between recordings: {reviewBrief.options.transition === "fade" ? "brief fades to black" : "straight cuts"}. Original sound stays, apart from optional low-rumble reduction and gentle fades.</p>{reviewBrief.limitations.map((item) => <p className="limit" key={item}>{item}</p>)}
+          {reviewBrief.conflict && <div className="conflict" role="alert"><strong>{reviewBrief.conflict.message}</strong>
+            {(reviewBrief.conflict.kind === "one-song-multiple-sections" || reviewBrief.conflict.kind === "one-song-choose-recording") && <div className="choices">{clips.filter((clip) => clip.included && !clip.excludedByUser).map((clip) => <button disabled={busy} key={clip.asset.path} onClick={() => chooseOneSong(clip.asset.path)}>Use {clip.label || clip.asset.name}</button>)}</div>}
+            {reviewBrief.conflict.kind === "intact-vs-marked" && <div className="choices"><button disabled={busy} onClick={() => firstCut("keep-marked")}>Keep my marked section</button><button disabled={busy} onClick={useWholePerformance}>Use whole recording</button></div>}
+            {reviewBrief.conflict.kind === "insufficient-footage" && <button disabled={busy} onClick={() => { const seconds = reviewBrief.conflict?.availableSeconds; if (seconds) { setLengthText(clock(seconds)); changeBrief({ targetSeconds: seconds }); } }}>Use available length</button>}
+          </div>}
+          <div className="brief-buttons"><button disabled={busy} onClick={() => setStage("describe")}>Adjust</button>{reviewBrief.conflict?.kind === "protected-over-target" ? <button className="primary" disabled={busy} onClick={() => firstCut("extend")}>Keep all and extend</button> : <button className="primary" disabled={busy || !!reviewBrief.conflict} onClick={() => firstCut()}>Make my first cut</button>}</div>
         </div>}
       </section>
-      <section className="toolbar"><div><b>{selected.length} selected</b><span>{clock(totalSeconds)} planned output · clips play from top to bottom</span></div><div className="toolbar-actions"><button disabled={busy} onClick={saveProject}>Save project</button><button className="primary" disabled={busy || !selected.length} onClick={exportReel}>Export MP4</button></div></section>
-      {stage === "cut" && <section className="refine"><div><p className="eyebrow">FIRST CUT READY</p><h2>Make it yours</h2><p>Try one change. Everything else stays where it is.</p></div><button disabled={busy} onClick={() => refine({ kind: "fewer-cuts" })}>Fewer cuts</button></section>}
-      <section className="options" aria-label="Export options"><div><b>Video shape</b><div className="clip-actions"><button disabled={busy} aria-pressed={aspect === "vertical"} onClick={() => setShape("vertical")}>Vertical 9:16</button><button disabled={busy} aria-pressed={aspect === "landscape"} onClick={() => setShape("landscape")}>Widescreen 16:9</button></div><p>The center of each recording fills the frame; edges may be cropped. The preview shows the original frame.</p></div><label><input disabled={busy} type="checkbox" checked={reduceRumble} onChange={(event) => { remember(); setReduceRumble(event.target.checked); invalidateReview(); }} /> Reduce low rumble <small>Gently lowers very low bass. It does not remove crowd voices.</small></label><div><b>Finishing look</b><div className="clip-actions">{(["natural", "vivid", "cinematic", "warm"] as const).map((look) => <button key={look} disabled={busy} aria-pressed={finish === look} onClick={() => { remember(); setFinish(look); invalidateReview(); }}>{look}</button>)}</div><p>Subtle color treatment; it does not detect scenes or moods.</p></div><div><b>Between recordings</b><div className="clip-actions"><button disabled={busy} aria-pressed={transition === "cut"} onClick={() => { remember(); setTransition("cut"); invalidateReview(); }}>Straight cut</button><button disabled={busy} aria-pressed={transition === "fade"} onClick={() => { remember(); setTransition("fade"); invalidateReview(); }}>Short fade</button></div><p>Protected sections keep their full length.</p></div></section>
+      {stage === "cut" && <section id="watch-first-cut" className="draft" aria-label="Watch first cut"><div className="draft-heading"><div><p className="eyebrow">FIRST CUT READY</p><h2>Watch your video</h2><p>See the selected sections together with the chosen framing, color, sound, and joins. This local draft is for review; Export MP4 saves the finished file.</p></div><button className="primary" disabled={busy || !selected.length} onClick={previewFirstCut}>{draftUrl && draftSignature !== cutSignature ? "Update preview" : draftUrl ? "Make preview again" : "Watch first cut"}</button></div>{previewing && <progress className="draft-progress" max="1" value={progress} aria-label="Preparing first-cut preview" />}{draftUrl && draftSignature === cutSignature && <video className="draft-player" src={draftUrl} controls preload="metadata" aria-label="Assembled first-cut preview" />}{draftUrl && draftSignature !== cutSignature && <p className="draft-stale">Your edit changed. Update the preview to see the latest version.</p>}</section>}
+      {stage === "cut" && <section className="refine"><div><h2>Make it yours</h2><p>Change one thing at a time. Everything else stays where it is.</p></div><button disabled={busy} onClick={() => refine({ kind: "fewer-cuts" })}>Fewer cuts</button></section>}
+      <section className="toolbar"><div><b>{selected.length} selected</b><span>{clock(totalSeconds)} planned output · recordings play from top to bottom</span></div><div className="toolbar-actions"><button disabled={busy} onClick={saveProject}>Save project</button><button className="primary" disabled={busy || !selected.length} onClick={exportReel}>Export MP4</button></div></section>
+      <section className="options" aria-label="Export options"><div><b>Video shape</b><div className="clip-actions"><button disabled={busy} aria-pressed={aspect === "vertical"} onClick={() => setShape("vertical")}>Vertical 9:16</button><button disabled={busy} aria-pressed={aspect === "landscape"} onClick={() => setShape("landscape")}>Widescreen 16:9</button></div><p>Automatic framing preserves the whole frame with a soft background when shapes differ a lot; otherwise it fills the screen. You can change each recording below.</p></div><label><input disabled={busy} type="checkbox" checked={reduceRumble} onChange={(event) => { remember(); setReduceRumble(event.target.checked); invalidateReview(); }} /> Reduce low rumble <small>Gently lowers very low bass. It does not remove crowd voices.</small></label><div><b>Finishing look</b><div className="clip-actions">{(["natural", "vivid", "cinematic", "warm"] as const).map((look) => <button key={look} disabled={busy} aria-pressed={finish === look} onClick={() => { remember(); setFinish(look); invalidateReview(); }}>{look}</button>)}</div><p>Subtle color treatment; it does not detect scenes or moods.</p></div><div><b>Between recordings</b><div className="clip-actions"><button disabled={busy} aria-pressed={transition === "cut"} onClick={() => { remember(); setTransition("cut"); invalidateReview(); }}>Straight cut</button><button disabled={busy} aria-pressed={transition === "fade"} onClick={() => { remember(); setTransition("fade"); invalidateReview(); }}>Brief fade to black</button></div><p>Protected sections keep their full length.</p></div></section>
       <section className="clips" id="clip-editor" aria-label="Clip editor">{clips.map((clip, index) => <article className={!clip.included || clip.excludedByUser ? "off" : ""} key={clip.asset.path}>
-        <div className="clip-title"><label><input type="checkbox" disabled={busy} checked={clip.included && !clip.excludedByUser} onChange={(event) => changeClip(index, { included: event.target.checked, excludedByUser: !event.target.checked }, event.target.checked)} /> Include</label><h2>{index + 1}. {clip.asset.name}</h2><p>{clock(clip.asset.duration)} · {clip.asset.hasAudio ? "Original audio" : "Silent video"}</p><label className="moment-label">Song or moment name <input disabled={busy} value={clip.label ?? ""} maxLength={100} placeholder="Optional, supplied by you" onChange={(event) => changeClip(index, { label: event.target.value })} /></label><div className="clip-actions"><button disabled={busy || index === 0} aria-label={`Move ${clip.asset.name} earlier`} onClick={() => move(index, -1)}>↑ Earlier</button><button disabled={busy || index === clips.length - 1} aria-label={`Move ${clip.asset.name} later`} onClick={() => move(index, 1)}>↓ Later</button></div></div>
-        <div className="preview"><video ref={(element) => { if (element) players.current.set(clip.asset.path, element); else players.current.delete(clip.asset.path); }} onTimeUpdate={(event) => { const time = event.currentTarget.currentTime; setPositions((old) => ({ ...old, [clip.asset.path]: time })); }} controls preload="auto" crossOrigin="anonymous" src={clip.previewUrl} aria-label={`Preview ${clip.asset.name}`} /><div className="seek"><button disabled={busy} aria-label={`Back five seconds in ${clip.asset.name}`} onClick={() => seek(clip, (positions[clip.asset.path] ?? 0) - 5)}>−5s</button><input disabled={busy} aria-label={`Move through ${clip.asset.name}`} type="range" min="0" max={clip.asset.duration} step="0.1" value={Math.min(clip.asset.duration, positions[clip.asset.path] ?? 0)} onChange={(event) => seek(clip, Number(event.target.value))} /><button disabled={busy} aria-label={`Forward five seconds in ${clip.asset.name}`} onClick={() => seek(clip, (positions[clip.asset.path] ?? 0) + 5)}>+5s</button></div><small>{clock(positions[clip.asset.path] ?? 0)} / {clock(clip.asset.duration)}</small></div>
-        <div className="trim"><div className="trim-heading"><div><b>{clip.locked ? "Kept by you" : clip.selectionSource === "manual" ? "Selected by you" : "Suggested section"}</b><p>Pause the preview where you want to start or end.</p></div><label><input type="checkbox" disabled={busy} checked={clip.locked} onChange={(event) => changeClip(index, { locked: event.target.checked, selectionSource: event.target.checked ? "manual" : "suggested" })} /> Keep this section</label></div><div className="clip-actions"><button disabled={busy} onClick={() => mark(index, "start")}>Set start here</button><button disabled={busy} onClick={() => mark(index, "end")}>Set end here</button><button disabled={busy} onClick={() => changeClip(index, { start: 0, end: clip.asset.duration }, true)}>Use whole clip</button><button disabled={busy || clip.locked} onClick={() => suggest(index)}>Suggest a moment</button></div><p>Suggestions use sound energy, not song or performer recognition.</p><label>Start (seconds) <input disabled={busy} aria-label={`${clip.asset.name} start`} type="number" min="0" max={clip.asset.duration} step="0.1" value={Math.round(clip.start * 100) / 100} onChange={(event) => changeClip(index, { start: Math.max(0, Math.min(Number(event.target.value), clip.end - 0.1)) }, true)} /></label><label>End (seconds) <input disabled={busy} aria-label={`${clip.asset.name} end`} type="number" min="0.1" max={clip.asset.duration} step="0.1" value={Math.round(clip.end * 100) / 100} onChange={(event) => changeClip(index, { end: Math.min(clip.asset.duration, Math.max(Number(event.target.value), clip.start + 0.1)) }, true)} /></label></div>
+        <div className="clip-title"><label><input type="checkbox" disabled={busy} checked={clip.included && !clip.excludedByUser} onChange={(event) => changeClip(index, { included: event.target.checked, excludedByUser: !event.target.checked }, event.target.checked)} /> Include</label><h2>{index + 1}. {clip.asset.name}</h2>{(!clip.included || clip.excludedByUser) && <span className="excluded-badge">Excluded from video</span>}<p>{clock(clip.asset.duration)} · {clip.asset.hasAudio ? "Original audio" : "Silent video"}</p><label className="moment-label">Song or moment name <input disabled={busy} value={clip.label ?? ""} maxLength={100} placeholder="Optional, supplied by you" onChange={(event) => changeClip(index, { label: event.target.value })} /></label><div className="clip-actions"><button disabled={busy || index === 0} aria-label={`Move ${clip.asset.name} earlier`} onClick={() => move(index, -1)}>↑ Earlier</button><button disabled={busy || index === clips.length - 1} aria-label={`Move ${clip.asset.name} later`} onClick={() => move(index, 1)}>↓ Later</button></div></div>
+        <div className="preview"><p className="preview-label">Original recording · selected part is {clock(clip.start)}–{clock(clip.end)}</p><video ref={(element) => { if (element) players.current.set(clip.asset.path, element); else players.current.delete(clip.asset.path); }} onTimeUpdate={(event) => { const time = event.currentTarget.currentTime; setPositions((old) => ({ ...old, [clip.asset.path]: time })); }} controls preload="auto" crossOrigin="anonymous" src={clip.previewUrl} aria-label={`Preview ${clip.asset.name}`} /><div className="seek"><button disabled={busy} aria-label={`Back five seconds in ${clip.asset.name}`} onClick={() => seek(clip, (positions[clip.asset.path] ?? 0) - 5)}>−5s</button><input disabled={busy} aria-label={`Move through ${clip.asset.name}`} type="range" min="0" max={clip.asset.duration} step="0.1" value={Math.min(clip.asset.duration, positions[clip.asset.path] ?? 0)} onChange={(event) => seek(clip, Number(event.target.value))} /><button disabled={busy} aria-label={`Forward five seconds in ${clip.asset.name}`} onClick={() => seek(clip, (positions[clip.asset.path] ?? 0) + 5)}>+5s</button></div><small>{clock(positions[clip.asset.path] ?? 0)} / {clock(clip.asset.duration)}</small></div>
+        <div className="trim"><div className="frame-choice"><strong>Framing in the finished video</strong><div className="choices"><button disabled={busy} aria-pressed={clip.framing === undefined} onClick={() => changeClip(index, { framing: undefined })}>Automatic</button><button disabled={busy} aria-pressed={clip.framing === "fit"} onClick={() => changeClip(index, { framing: "fit" })}>Show whole frame</button><button disabled={busy} aria-pressed={clip.framing === "fill"} onClick={() => changeClip(index, { framing: "fill" })}>Fill screen</button></div><p>Automatic uses a soft background to avoid a heavy crop when shapes differ. The original preview above is unchanged; watch the first cut to check framing.</p></div><div className="trim-heading"><div><b>{clip.locked ? "Kept by you" : clip.selectionSource === "manual" ? "Selected by you" : "Suggested section"}</b><p>Pause the preview where you want to start or end.</p></div><label><input type="checkbox" disabled={busy} checked={clip.locked} onChange={(event) => changeClip(index, { locked: event.target.checked, selectionSource: event.target.checked ? "manual" : "suggested" })} /> Keep this section</label></div><div className="clip-actions"><button disabled={busy} onClick={() => mark(index, "start")}>Set start here</button><button disabled={busy} onClick={() => mark(index, "end")}>Set end here</button><button disabled={busy} onClick={() => changeClip(index, { start: 0, end: clip.asset.duration }, true)}>Use whole clip</button><button disabled={busy || clip.locked} onClick={() => suggest(index)}>Suggest a moment</button></div><p>Suggestions use sound energy, not song or performer recognition.</p><label>Start (seconds) <input disabled={busy} aria-label={`${clip.asset.name} start`} type="number" min="0" max={clip.asset.duration} step="0.1" value={Math.round(clip.start * 100) / 100} onChange={(event) => changeClip(index, { start: Math.max(0, Math.min(Number(event.target.value), clip.end - 0.1)) }, true)} /></label><label>End (seconds) <input disabled={busy} aria-label={`${clip.asset.name} end`} type="number" min="0.1" max={clip.asset.duration} step="0.1" value={Math.round(clip.end * 100) / 100} onChange={(event) => changeClip(index, { end: Math.min(clip.asset.duration, Math.max(Number(event.target.value), clip.start + 0.1)) }, true)} /></label></div>
         {stage === "cut" && <div className="clip-actions refine-actions"><button disabled={busy || clip.excludedByUser || clip.locked} onClick={() => refine({ kind: "more-from-clip", path: clip.asset.path })}>More from this clip</button><button disabled={busy} onClick={() => refine({ kind: "keep-section", path: clip.asset.path })}>Keep that section</button><button disabled={busy || clip.excludedByUser || clip.locked} onClick={() => refine({ kind: "choose-another", path: clip.asset.path })}>Choose something else</button></div>}
         <p className="note">Selected range: {clock(clip.start)}–{clock(clip.end)} ({(clip.end - clip.start).toFixed(1)} seconds){clip.label ? ` · ${clip.label} (named by you)` : ""}</p>
       </article>)}</section>
     </>}
-    <footer><b>What this build can do:</b> local sound-based suggestions, your protected sections, pacing across recordings, subtle color looks, cuts or short fades, and MP4 export. It does not recognize songs, lyrics, scenes, or emotions; create captions or title overlays; or publish to social media.</footer>
+    <footer><b>Honest creative tools:</b> local sound-based suggestions, your protected sections, pacing across recordings, subtle color looks, cuts or brief fades to black, and MP4 export. It does not recognize songs, lyrics, scenes, or emotions; create captions or title overlays; or publish to social media.</footer>
   </main>;
 }

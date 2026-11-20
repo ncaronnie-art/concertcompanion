@@ -1,10 +1,12 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { Readable } from "node:stream";
+import path from "node:path";
 
 export async function previewResponse(file: string, request: Request): Promise<Response> {
   const { size } = await stat(file);
-  const headers = new Headers({ "Content-Type": "video/webm", "Accept-Ranges": "bytes", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" });
+  const mime = path.extname(file).toLowerCase() === ".mp4" ? "video/mp4" : "video/webm";
+  const headers = new Headers({ "Content-Type": mime, "Accept-Ranges": "bytes", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" });
   const range = request.headers.get("range");
   let start = 0, end = size - 1;
   if (range) {

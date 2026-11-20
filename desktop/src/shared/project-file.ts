@@ -37,12 +37,14 @@ function readClip(value: unknown): CreativeClip {
     typeof value.excludedByUser !== "boolean" ||
     !oneOf(value.selectionSource, ["suggested", "manual"] as const) ||
     (value.included && value.excludedByUser) ||
+    (value.framing !== undefined && !oneOf(value.framing, ["fill", "fit"] as const)) ||
     (value.label !== undefined && !isString(value.label, 100))) {
     throw new Error(`The project has an invalid section for ${asset.name}.`);
   }
   return { asset, start: value.start, end: value.end, included: value.included,
     locked: value.locked, excludedByUser: value.excludedByUser,
     selectionSource: value.selectionSource,
+    ...(value.framing === undefined ? {} : { framing: value.framing }),
     ...(value.label === undefined ? {} : { label: value.label }) };
 }
 

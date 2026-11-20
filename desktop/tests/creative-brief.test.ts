@@ -68,12 +68,71 @@ test("one-song stays in one recording, and unsupported requests are disclosed", 
   const brief = interpretCreativeBrief({ description: "Just this song, horizontal, with lyrics and slow motion", targetSeconds: 30 }, clips, options);
   assert.equal(brief.videoType, "one-song");
   assert.equal(brief.aspect, "landscape");
-  assert.equal(makeFirstCut(clips, brief).clips.filter((clip) => clip.included).length, 1);
+  assert.equal(brief.conflict?.kind, "one-song-choose-recording");
+  assert.throws(() => makeFirstCut(clips, brief), /Which recording/);
+  const chosen = [recording(1, { included: false }), recording(2)];
+  const chosenBrief = interpretCreativeBrief({ description: "Just this song, horizontal, with lyrics and slow motion", targetSeconds: 30 }, chosen, options);
+  assert.equal(chosenBrief.conflict, null);
+  const cut = makeFirstCut(chosen, chosenBrief);
+  assert.deepEqual(cut.clips.map((clip) => clip.included), [false, true]);
+  assert.equal(cut.plannedSeconds, 30);
   assert.match(brief.limitations.join(" "), /Text overlays and captions/);
   assert.match(brief.limitations.join(" "), /speed changes/);
   const named = interpretCreativeBrief({ description: "Several songs" }, [recording(1, { label: "Song A" }), recording(2, { label: "Song B" })], options);
   assert.match(named.summary, /your labeled songs/);
   assert.match(named.limitations.join(" "), /labels/);
+});
+
+test("one-song source choice preserves explicit exclusions and does not silently pick a source", () => {
+  const clips = [recording(1), recording(2), recording(3, { included: false, excludedByUser: true })];
+  const unresolved = interpretCreativeBrief({ description: "A single song" }, clips, options);
+  assert.equal(unresolved.conflict?.kind, "one-song-choose-recording");
+  const chosen = clips.map((clip, index) => index === 0 ? { ...clip, included: false } : clip);
+  const brief = interpretCreativeBrief({ description: "A single song" }, chosen, options);
+  assert.equal(brief.conflict, null);
+  const cut = makeFirstCut(chosen, brief);
+  assert.deepEqual(cut.clips.map((clip) => clip.included), [false, true, false]);
+  assert.equal(cut.clips[2].excludedByUser, true);
+});
+
+test("keep this performance intact selects the full original recording", () => {
+  const clips = [recording(1), recording(2, { included: false, excludedByUser: true })];
+  const brief = interpretCreativeBrief({ description: "Keep this performance intact. Clean presentation." }, clips, options);
+  assert.equal(brief.videoType, "one-song");
+  assert.equal(brief.keepWholePerformance, true);
+  assert.equal(brief.conflict, null);
+  assert.match(brief.summary, /^1:30/);
+  const cut = makeFirstCut(clips, brief);
+  assert.deepEqual([cut.clips[0].start, cut.clips[0].end], [0, 90]);
+  assert.equal(cut.clips[0].locked, true);
+  assert.equal(cut.clips[1].excludedByUser, true);
+  assert.equal(cut.plannedSeconds, 90);
+  assert.deepEqual([clips[0].start, clips[0].end], [39, 51]);
+});
+
+test("intact performance versus a partial marked section asks one question", () => {
+  const clips = [recording(1, { start: 15, end: 35, selectionSource: "manual", locked: true })];
+  const brief = interpretCreativeBrief({ description: "Keep this performance intact" }, clips, options);
+  assert.equal(brief.conflict?.kind, "intact-vs-marked");
+  assert.match(brief.conflict?.message ?? "", /Keep your marked section or use the whole recording/);
+  assert.throws(() => makeFirstCut(clips, brief), /marked/);
+  const marked = makeFirstCut(clips, brief, "keep-marked");
+  assert.deepEqual([marked.clips[0].start, marked.clips[0].end], [15, 35]);
+  const whole = [recording(1, { start: 0, end: 90, selectionSource: "manual", locked: true })];
+  const wholeBrief = interpretCreativeBrief({ description: "Keep this performance intact" }, whole, options);
+  assert.equal(wholeBrief.conflict, null);
+  assert.deepEqual([makeFirstCut(whole, wholeBrief).clips[0].start, makeFirstCut(whole, wholeBrief).clips[0].end], [0, 90]);
+});
+
+test("intact performance longer than requested target can be extended only by choice", () => {
+  const clips = [recording(1)];
+  const brief = interpretCreativeBrief({ description: "Keep the full performance", targetSeconds: 30 }, clips, options);
+  assert.equal(brief.conflict?.kind, "protected-over-target");
+  assert.match(brief.conflict?.message ?? "", /whole recording/);
+  assert.throws(() => makeFirstCut(clips, brief), /whole recording/);
+  const cut = makeFirstCut(clips, brief, "extend");
+  assert.equal(cut.plannedSeconds, 90);
+  assert.equal(cut.clips[0].locked, true);
 });
 
 test("one-song with a marked section keeps its existing length when no new target is supplied", () => {

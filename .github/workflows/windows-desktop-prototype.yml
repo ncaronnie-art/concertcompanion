@@ -30,6 +30,7 @@ jobs:
       - name: Package the Windows application
         run: npm run package:win -- "$env:RUNNER_TEMP\compass-package"
       - name: Open desktop window and check bridge
+        id: desktop_smoke
         shell: pwsh
         run: |
           $env:COMPASS_SMOKE_TEST = '1'
@@ -47,6 +48,10 @@ jobs:
           $process = Start-Process -FilePath "$env:RUNNER_TEMP\compass-package\Concert Compass-win32-x64\Concert Compass.exe" -PassThru -WindowStyle Hidden -RedirectStandardOutput "$env:RUNNER_TEMP\compass-stdout.log" -RedirectStandardError "$env:RUNNER_TEMP\compass-stderr.log"
           $finished = $process.WaitForExit(170000)
           $stages = @(Get-Content "$env:RUNNER_TEMP\compass-stages.log" -ErrorAction SilentlyContinue)
+          $failure = $stages | Where-Object { $_ -match '^desktop smoke test failed:' } | Select-Object -Last 1
+          $diagnosis = if ($failure) { $failure } elseif ($stages.Count) { $stages[-1] } else { 'no desktop stage recorded' }
+          $diagnosis = $diagnosis.Substring(0, [Math]::Min(170, $diagnosis.Length)) -replace '[\r\n|]', ' '
+          "diagnosis=$diagnosis" | Add-Content -Path $env:GITHUB_OUTPUT
           $stages | ForEach-Object { Write-Output $_ }
           "### Desktop test stages" | Add-Content -Path $env:GITHUB_STEP_SUMMARY
           if ($stages.Count -eq 0) { "- No stage was recorded." | Add-Content -Path $env:GITHUB_STEP_SUMMARY }
@@ -59,6 +64,10 @@ jobs:
             Get-Content "$env:RUNNER_TEMP\compass-stderr.log" -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "::error::$($_ -replace '%','%25')" }
             throw "Desktop app failed with exit code $($process.ExitCode)."
           }
+      - name: Desktop result ${{ steps.desktop_smoke.outputs.diagnosis }}
+        if: always()
+        shell: pwsh
+        run: Write-Output 'Desktop test result recorded.'
       - name: Check desktop page loaded
         if: always()
         shell: pwsh

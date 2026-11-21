@@ -140,9 +140,16 @@ function createWindow() {
           await waitFor(`(() => { const v=document.querySelector('.draft-player'); return !v.seeking && Math.abs(v.currentTime - ${time}) < 0.16 && v.readyState >= 2 })()`, `${area} in assembled draft`);
           return win.webContents.executeJavaScript(`(() => { const v=document.querySelector('.draft-player'), c=document.createElement('canvas'); c.width=v.videoWidth; c.height=v.videoHeight; const x=c.getContext('2d'); x.drawImage(v,0,0); const d=x.getImageData(0,0,c.width,c.height).data; let white=0; for(let y=Math.floor(c.height*${area === "title" ? 0.09 : 0.55}); y<Math.floor(c.height*${area === "title" ? 0.34 : 0.88}); y++) for(let px=Math.floor(c.width*0.03); px<Math.floor(c.width*0.95); px++) { const i=(y*c.width+px)*4; if(d[i]>210&&d[i+1]>210&&d[i+2]>210) white++; } return white; })()`);
         };
+        const labelTime = await win.webContents.executeJavaScript(`(() => {
+          const [first, second] = Array.from(document.querySelectorAll('.clips article')).filter((article) => article.querySelector('input[type="checkbox"]')?.checked);
+          if (!first || !second) throw new Error('Expected two selected recordings for the named-moment check');
+          const range = (article) => Number(article.querySelector('input[aria-label$=" end"]').value) - Number(article.querySelector('input[aria-label$=" start"]').value);
+          const firstLength = range(first), total = firstLength + range(second);
+          return Math.min(total - 0.25, Math.max(2.8, firstLength + 0.55));
+        })()`);
         const titlePixels = await countDraftWhite(0.8, "title");
-        const labelPixels = await countDraftWhite(3.0, "label");
-        if (titlePixels < 20 || labelPixels < 20) throw new Error(`Visual title or named moment was absent from assembled draft: ${JSON.stringify({ titlePixels, labelPixels })}`);
+        const labelPixels = await countDraftWhite(labelTime, "label");
+        if (titlePixels < 20 || labelPixels < 20) throw new Error(`Visual title or named moment was absent from assembled draft: ${JSON.stringify({ titlePixels, labelPixels, labelTime })}`);
         smokeStage("visual draft overlay ready");
         await win.webContents.executeJavaScript(`document.querySelector('.draft-player').currentTime = 0.4`);
         await waitFor(`(() => { const v=document.querySelector('.draft-player'); return !v.seeking && Math.abs(v.currentTime - 0.4) < 0.15 && v.readyState >= 2 })()`, "portrait draft frame after overlay check");
@@ -196,8 +203,8 @@ function createWindow() {
         if (process.env.COMPASS_SMOKE_CLEANUP_FAIL === "1") await waitFor(`document.body.innerText.includes('video is saved, but a temporary folder could not be removed')`, "cleanup warning");
         await access(process.env.COMPASS_SMOKE_OUTPUT!);
         const exportedTitlePixels = await brightOverlayPixels(process.env.COMPASS_SMOKE_OUTPUT!, 0.8, "crop=1000:200:60:60,format=gray");
-        const exportedLabelPixels = await brightOverlayPixels(process.env.COMPASS_SMOKE_OUTPUT!, 3.0, "crop=1100:170:60:490,format=gray");
-        if (exportedTitlePixels < 50 || exportedLabelPixels < 50) throw new Error(`Visual title or named moment was absent from exported video: ${JSON.stringify({ exportedTitlePixels, exportedLabelPixels })}`);
+        const exportedLabelPixels = await brightOverlayPixels(process.env.COMPASS_SMOKE_OUTPUT!, labelTime, "crop=1100:170:60:490,format=gray");
+        if (exportedTitlePixels < 50 || exportedLabelPixels < 50) throw new Error(`Visual title or named moment was absent from exported video: ${JSON.stringify({ exportedTitlePixels, exportedLabelPixels, labelTime })}`);
         smokeStage("visual exported overlay ready");
         const outputProbe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", process.env.COMPASS_SMOKE_OUTPUT!]));
         if (outputProbe.streams?.[0]?.width !== 1280 || outputProbe.streams?.[0]?.height !== 720) throw new Error("Widescreen output dimensions are incorrect");

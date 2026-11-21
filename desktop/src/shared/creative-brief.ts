@@ -3,6 +3,12 @@ import type { ExportOptions, RenderSelection } from "./render-plan.js";
 export type VideoType = "highlight" | "one-song" | "recap" | "compilation";
 export type Vibe = "energetic" | "cinematic" | "nostalgic" | "intimate" | "clean-live" | "custom";
 export type SelectionMode = "use-my-sections" | "choose-for-me" | "keep-and-choose";
+export type SoundtrackIntent = {
+  segmentCount: number;
+  buildEnding: boolean;
+  separatePicture: boolean;
+  cleanupRequested: boolean;
+};
 export type CreativeClip = RenderSelection & {
   included: boolean;
   selectionSource: "suggested" | "manual";
@@ -18,12 +24,15 @@ export type CreativeBriefInput = {
   selectionMode?: SelectionMode;
   targetSeconds?: number | null;
   aspect?: ExportOptions["aspect"];
+  reduceRumble?: boolean;
   customVibe?: string;
 };
 
 export type BriefConflict = {
   kind: "protected-over-target" | "one-song-multiple-sections" | "one-song-choose-recording" |
-    "intact-vs-marked" | "insufficient-footage" | "no-marked-sections";
+    "intact-vs-marked" | "insufficient-footage" | "no-marked-sections" |
+    "audio-story-no-sound" | "audio-story-picture-variety" | "audio-story-locked-count" |
+    "audio-story-silent-lock" | "audio-story-insufficient-audio" | "audio-story-short-target";
   message: string;
   requestedSeconds?: number;
   availableSeconds?: number;
@@ -35,6 +44,7 @@ export type CreativeBrief = {
   vibe: Vibe;
   selectionMode: SelectionMode;
   keepWholePerformance: boolean;
+  soundtrackIntent: SoundtrackIntent | null;
   targetSeconds: number | null;
   aspect: ExportOptions["aspect"];
   customVibe: string;
@@ -95,7 +105,31 @@ function parsedVibe(text: string): Vibe | undefined {
   if (/\bcinematic\b|\bfilm.like\b/i.test(text)) return "cinematic";
   if (/\bnostalgic\b|\bmemory\b/i.test(text)) return "nostalgic";
   if (/\bintimate\b|\bquiet\b/i.test(text)) return "intimate";
-  if (/\bclean\b|\blive\b|\bnatural\b/i.test(text)) return "clean-live";
+  // Cleaning sound is an audio request, not a request to change the picture's vibe.
+  const withoutAudio = text.replace(/\bclean(?:ed|ing)?\s+(?:up\s+)?(?:the\s+)?(?:audio|sound)\b/gi, "");
+  if (/\bclean\b|\blive\b|\bnatural\b/i.test(withoutAudio)) return "clean-live";
+}
+
+function requestsCleanup(text: string): boolean {
+  return /\b(?:clean|cleaning|cleaned|tidy|improve|fix|enhance|polish)(?:\s+up)?\s+(?:the\s+)?(?:audio|sound)\b|\b(?:audio|sound)\s+clean(?:ing|up)?\b|\breduce\s+(?:low\s+)?rumble\b|\bremove\s+(?:the\s+)?(?:crowd|voices|noise)\b/i.test(text);
+}
+
+function parsedSoundtrackIntent(text: string, cleanupRequested: boolean): SoundtrackIntent | null {
+  const number = "(\\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)";
+  const direct = text.match(new RegExp(`\\b${number}[\\s-]+(?:audio|sound|soundtrack)[\\s-]+(?:clips?|moments?|segments?|sections?)\\b`, "i"));
+  const reversed = text.match(new RegExp(`\\b${number}[\\s-]+(?:clips?|moments?|segments?|sections?)[\\s-]+of[\\s-]+(?:audio|sound)\\b`, "i"));
+  const spoken: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+  const countText = (direct ?? reversed)?.[1]?.toLowerCase();
+  const requestedCount = countText === undefined ? null : spoken[countText] ?? Number(countText);
+  if (requestedCount !== null && (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 12)) {
+    throw new Error("Choose between one and twelve sound moments.");
+  }
+  const buildEnding = /\bcrescendo\b|\bbuild(?:ing|s)?\s+(?:up\s+)?(?:to|toward|into)\s+(?:a\s+)?(?:strong|big|loud|energetic|climax)|\b(?:strongest|loudest|biggest)\s+(?:ending|finish)|\bend(?:ing)?\s+(?:on|with)\s+(?:the\s+)?(?:strongest|loudest|biggest|most energetic)/i.test(text);
+  const multiplePictures = /\b(?:video|footage|shots?|visuals?)\b.{0,90}\b(?:multiple|several|different)\s+(?:video\s+)?(?:clips?|recordings?|shots?)\b/i.test(text);
+  const separatePicture = (multiplePictures && (requestedCount !== null || /\b(?:on top|over|under|soundtrack|audio|sound)\b/i.test(text))) ||
+    /\b(?:b-roll|cutaways?)\b.{0,60}\b(?:over|on top|soundtrack|audio|sound)\b/i.test(text);
+  if (requestedCount === null && !buildEnding && !separatePicture) return null;
+  return { segmentCount: requestedCount ?? (buildEnding ? 3 : 1), buildEnding, separatePicture, cleanupRequested };
 }
 
 function parsedSelection(text: string): SelectionMode | undefined {
@@ -115,12 +149,15 @@ function styleFor(vibe: Vibe): Pick<ExportOptions, "finish" | "transition"> {
   }
 }
 
-function supportedLimits(text: string, type: VideoType, vibe: Vibe, customVibe: string, labeledSongs: number): string[] {
+function supportedLimits(text: string, type: VideoType, vibe: Vibe, customVibe: string, labeledSongs: number, cleanupRequested: boolean, rumbleEnabled: boolean, soundtrackIntent: SoundtrackIntent | null): string[] {
   const notes: string[] = [];
   if (type === "one-song" || /\b(several|multiple|different|many) songs?\b/i.test(text)) notes.push(labeledSongs > 1 ? "Song names come from your labels; the app has not detected or verified them." : "Songs are not identified automatically. The cut can use different recordings; mark or name song sections yourself if needed.");
   if (/\b(lyrics?|captions?|subtitles?|text overlay|title card|logo)\b/i.test(text)) notes.push("Text overlays and captions are not available yet. The closest supported choice is a clean video with a preset look.");
   if (/\b(beat.sync|slow.motion|speed ramp|stabiliz|camera tracking|face tracking|swipe transition)\b/i.test(text)) notes.push("Beat syncing, speed changes, stabilization, and tracking are not available yet. The cut uses real-time footage and cuts or short fades.");
-  if (/\b(clean (up )?(the )?(audio|sound)|remove (the )?(crowd|voices|noise))\b/i.test(text)) notes.push("Full sound cleanup is not available. The existing optional control only reduces very low rumble.");
+  if (cleanupRequested) notes.push(rumbleEnabled ?
+    "Sound cleanup here means reducing very low rumble. It cannot remove crowd voices, repair clipping, or fully denoise music." :
+    "Low-rumble reduction is off by your choice. Full sound cleaning is not available; crowd voices, clipping, and music noise are not removed.");
+  if (soundtrackIntent?.buildEnding) notes.push("The ending is ordered by measured sound energy, not musical crescendo or beat recognition. Listen before exporting.");
   if (/\b(filters?|visual effects?|special effects?|animation)\b/i.test(text)) notes.push("Custom effects are not available. The closest supported choices are natural, vivid, cinematic, and warm looks.");
   if (vibe === "custom") notes.push(`${customVibe.trim() ? "That custom vibe" : "A custom vibe"} cannot be translated reliably yet; this cut starts with natural color and straightforward cuts.`);
   return [...new Set(notes)];
@@ -129,8 +166,11 @@ function supportedLimits(text: string, type: VideoType, vibe: Vibe, customVibe: 
 export function interpretCreativeBrief(input: CreativeBriefInput, clips: CreativeClip[], current: ExportOptions): CreativeBrief {
   validateClips(clips);
   const description = (input.description || "").trim();
+  const cleanupRequested = requestsCleanup(description);
+  const soundtrackIntent = parsedSoundtrackIntent(description, cleanupRequested);
   const videoType = input.videoType ?? parsedType(description) ?? "highlight";
-  const vibe = input.vibe ?? parsedVibe(description) ?? "clean-live";
+  const requestedVibe = input.vibe ?? parsedVibe(description);
+  const vibe = requestedVibe ?? "clean-live";
   const selectionMode = input.selectionMode ?? parsedSelection(description) ??
     (clips.some((clip) => clip.included && (clip.locked || clip.selectionSource === "manual")) ? "keep-and-choose" : "choose-for-me");
   const keepWholePerformance = videoType === "one-song" && asksForWholePerformance(description);
@@ -144,7 +184,10 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   const aspect = input.aspect ?? (/\b(horizontal|widescreen|landscape|16:9)\b/i.test(description) ? "landscape" : /\b(vertical|portrait|9:16)\b/i.test(description) ? "vertical" : current.aspect);
   if (!["vertical", "landscape"].includes(aspect)) throw new Error("Choose a valid video shape.");
   const customVibe = input.customVibe?.trim() ?? "";
-  const options: ExportOptions = { ...current, aspect, ...styleFor(vibe) };
+  const style = cleanupRequested && !requestedVibe ?
+    { finish: current.finish ?? "natural", transition: current.transition ?? "cut" } : styleFor(vibe);
+  const options: ExportOptions = { ...current, aspect, ...style,
+    reduceRumble: input.reduceRumble ?? (cleanupRequested ? true : current.reduceRumble) };
   const protectedClips = clips.filter((clip) => clip.included && !clip.excludedByUser && (clip.locked || clip.selectionSource === "manual" || selectionMode === "use-my-sections"));
   const markedClips = clips.filter((clip) => clip.included && !clip.excludedByUser && (clip.locked || clip.selectionSource === "manual"));
   const eligible = clips.filter((clip) => !clip.excludedByUser);
@@ -167,7 +210,8 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   } else if (markedPartial) {
     conflict = { kind: "intact-vs-marked", message: `You marked ${time(total(markedClips))} of ${markedClips[0].asset.name}, but asked to keep the whole performance. Keep your marked section or use the whole recording?` };
   } else if (targetSeconds !== null && protectedSeconds > targetSeconds + 0.05) {
-    const message = keepWholePerformance ?
+    const message = soundtrackIntent ?
+      `Your marked picture and original sound total ${time(protectedSeconds)}, longer than ${time(targetSeconds)}. Choose a longer length with room for ${Math.max(0, soundtrackIntent.segmentCount - markedClips.length)} other sound moments, or adjust your marked sections.` : keepWholePerformance ?
       `The whole recording is ${time(protectedSeconds)}, longer than ${time(targetSeconds)}. Keep it intact and extend the video, or choose a shorter section?` :
       `Your marked sections total ${time(protectedSeconds)}, longer than ${time(targetSeconds)}. Keep them all and extend the video, or adjust the sections?`;
     conflict = { kind: "protected-over-target", message, requestedSeconds: targetSeconds, availableSeconds: protectedSeconds };
@@ -179,6 +223,26 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
       `There is ${time(availableSeconds)} available without changing marked sections or repeating footage, less than ${time(targetSeconds)}. Choose a shorter length or add recordings.`;
     conflict = { kind: "insufficient-footage", message, requestedSeconds: targetSeconds, availableSeconds };
   }
+  if (!conflict && soundtrackIntent) {
+    const audioClips = eligible.filter((clip) => clip.asset.hasAudio);
+    const locked = markedClips;
+    const requiredSeconds = targetSeconds ?? total(clips);
+    const audioSeconds = audioClips.reduce((sum, clip) => sum + clip.asset.duration, 0);
+    if (!audioClips.length) {
+      conflict = { kind: "audio-story-no-sound", message: "These recordings have no sound for a soundtrack. Add a recording with audio or use the standard edit." };
+    } else if (soundtrackIntent.separatePicture && (eligible.length < 2 || requiredSeconds < 0.2)) {
+      conflict = { kind: "audio-story-picture-variety", message: "To show footage from multiple recordings over the sound, import or include at least two videos and allow enough time for both." };
+    } else if (locked.some((clip) => !clip.asset.hasAudio)) {
+      conflict = { kind: "audio-story-silent-lock", message: "A protected section has no original sound. Unlock it or use the standard edit before making this soundtrack-led cut." };
+    } else if (locked.length > soundtrackIntent.segmentCount ||
+      (selectionMode === "use-my-sections" && locked.length !== soundtrackIntent.segmentCount)) {
+      conflict = { kind: "audio-story-locked-count", message: `You asked for ${soundtrackIntent.segmentCount} sound moments, but your protected sections require ${locked.length}. Keep the marked moments with a different count, or adjust your selections.` };
+    } else if (requiredSeconds + 0.05 < soundtrackIntent.segmentCount * 0.1) {
+      conflict = { kind: "audio-story-short-target", message: `There is not enough time for ${soundtrackIntent.segmentCount} separate sound moments. Choose a longer video or fewer sound moments.` };
+    } else if (audioSeconds + 0.05 < requiredSeconds) {
+      conflict = { kind: "audio-story-insufficient-audio", message: `There is only ${time(audioSeconds)} of nonrepeating sound for a ${time(requiredSeconds)} soundtrack. Add recordings or choose a shorter video.`, requestedSeconds: requiredSeconds, availableSeconds: audioSeconds };
+    }
+  }
   const typeLabel: Record<VideoType, string> = { highlight: "highlight", "one-song": "one-recording performance", recap: "recap", compilation: "compilation" };
   const preserved = markedClips.length ? "your marked sections stay" : keepWholePerformance ? "the whole performance stays" : "you can adjust every section";
   const labelPool = selectionMode === "use-my-sections" ? markedClips : eligible;
@@ -186,10 +250,12 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   const variety = /\b(several|multiple|different|many) songs?\b/i.test(description) ? labeledSongs > 1 ? " · your labeled songs" : " · several recordings" : "";
   const naturalSeconds = keepWholePerformance && oneSongChoice ? oneSongChoice.asset.duration :
     selectionMode === "use-my-sections" || videoType === "one-song" && markedClips.length ? protectedSeconds : total(clips);
-  const summary = `${time(targetSeconds ?? naturalSeconds)} ${typeLabel[videoType]}${variety} · ${vibe === "clean-live" ? "clean/live" : vibe} pacing · ${options.finish} look · ${options.transition === "fade" ? "soft joins" : "direct cuts"} · ${aspect === "landscape" ? "horizontal" : "vertical"} · ${preserved}.`;
-  const limitations = supportedLimits(description, videoType, vibe, customVibe, labeledSongs);
+  const soundSummary = soundtrackIntent ? ` · ${soundtrackIntent.segmentCount} audio moments${cleanupRequested ? options.reduceRumble ? " with low-rumble reduction" : " with low-rumble reduction off" : ""}${soundtrackIntent.buildEnding ? " · aiming for a sound-energy build toward the strongest measured ending" : ""}${soundtrackIntent.separatePicture ? " · picture from multiple recordings over the soundtrack" : ""}` : "";
+  const summary = `${time(targetSeconds ?? naturalSeconds)} ${typeLabel[videoType]}${variety} · ${vibe === "clean-live" ? "clean/live" : vibe} pacing · ${options.finish} look · ${options.transition === "fade" ? "soft joins" : "direct cuts"} · ${aspect === "landscape" ? "horizontal" : "vertical"} · ${preserved}${soundSummary}.`;
+  const limitations = supportedLimits(description, videoType, vibe, customVibe, labeledSongs, cleanupRequested, options.reduceRumble, soundtrackIntent);
+  if (soundtrackIntent?.buildEnding && markedClips.length) limitations.push("Your marked sections keep their place and original sound; they may limit how steadily the energy rises.");
   if (vibe === "energetic" && eligible.length < 2) limitations.push("Quicker cuts need multiple recordings; this cut keeps the available footage continuous.");
-  return { description, videoType, vibe, selectionMode, keepWholePerformance, targetSeconds, aspect, customVibe, summary, limitations, conflict, options };
+  return { description, videoType, vibe, selectionMode, keepWholePerformance, soundtrackIntent, targetSeconds, aspect, customVibe, summary, limitations, conflict, options };
 }
 
 function pace(vibe: Vibe): number {
@@ -214,6 +280,7 @@ function outcome<T extends CreativeClip>(clips: T[], options: ExportOptions, not
 }
 
 export function makeFirstCut<T extends CreativeClip>(clips: T[], brief: CreativeBrief, resolution?: "extend" | "keep-marked"): CutResult<T> {
+  if (brief.soundtrackIntent) throw new Error("This brief needs its separate soundtrack plan before rendering.");
   validateClips(clips);
   if (brief.conflict && !(brief.conflict.kind === "protected-over-target" && resolution === "extend") &&
     !(brief.conflict.kind === "intact-vs-marked" && resolution === "keep-marked")) throw new Error(brief.conflict.message);

@@ -1,7 +1,7 @@
 name: Concert Compass Windows prototype verification
 on:
   push:
-    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish']
+    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story']
 permissions:
   contents: read
 jobs:
@@ -93,3 +93,53 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'smoke passed' -Quiet -ErrorAction SilentlyContinue)) { throw 'Full creative workflow did not complete.' }
+      - name: Open sound-led desktop flow
+        id: sound_story
+        shell: pwsh
+        run: |
+          $env:COMPASS_SMOKE_TEST = '1'
+          $env:COMPASS_SMOKE_STORY = '1'
+          $env:COMPASS_SMOKE_INPUT = "$env:RUNNER_TEMP\story-red.mp4"
+          $env:COMPASS_SMOKE_SECOND = "$env:RUNNER_TEMP\story-blue.mp4"
+          $env:COMPASS_SMOKE_THIRD = "$env:RUNNER_TEMP\story-yellow.mp4"
+          $env:COMPASS_SMOKE_OUTPUT = "$env:RUNNER_TEMP\story-output.mp4"
+          $env:COMPASS_SMOKE_PROJECT = "$env:RUNNER_TEMP\story-project.json"
+          $env:COMPASS_SMOKE_STAGE_FILE = "$env:RUNNER_TEMP\story-stages.log"
+          & '.\node_modules\ffmpeg-static\ffmpeg.exe' -hide_banner -loglevel error -y -f lavfi -i 'color=c=red:size=320x240:rate=30:duration=8' -f lavfi -i 'sine=frequency=220:sample_rate=48000:duration=8' -af 'volume=0.4' -c:v libx264 -preset ultrafast -c:a aac $env:COMPASS_SMOKE_INPUT
+          if ($LASTEXITCODE -ne 0) { throw 'First sound-story fixture failed.' }
+          & '.\node_modules\ffmpeg-static\ffmpeg.exe' -hide_banner -loglevel error -y -f lavfi -i 'color=c=blue:size=320x240:rate=30:duration=8' -f lavfi -i 'sine=frequency=440:sample_rate=48000:duration=8' -af 'volume=0.8' -c:v libx264 -preset ultrafast -c:a aac $env:COMPASS_SMOKE_SECOND
+          if ($LASTEXITCODE -ne 0) { throw 'Second sound-story fixture failed.' }
+          & '.\node_modules\ffmpeg-static\ffmpeg.exe' -hide_banner -loglevel error -y -f lavfi -i 'color=c=yellow:size=320x240:rate=30:duration=8' -f lavfi -i 'sine=frequency=660:sample_rate=48000:duration=8' -af 'volume=1.6' -c:v libx264 -preset ultrafast -c:a aac $env:COMPASS_SMOKE_THIRD
+          if ($LASTEXITCODE -ne 0) { throw 'Third sound-story fixture failed.' }
+          $process = Start-Process -FilePath "$env:RUNNER_TEMP\compass-package\Concert Compass-win32-x64\Concert Compass.exe" -PassThru -WindowStyle Hidden -RedirectStandardOutput "$env:RUNNER_TEMP\story-stdout.log" -RedirectStandardError "$env:RUNNER_TEMP\story-stderr.log"
+          $finished = $process.WaitForExit(170000)
+          $stages = @(Get-Content "$env:RUNNER_TEMP\story-stages.log" -ErrorAction SilentlyContinue)
+          $stages | ForEach-Object { Write-Output $_ }
+          "### Three-part soundtrack desktop test" | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          if ($stages.Count -eq 0) { "- No stage was recorded." | Add-Content -Path $env:GITHUB_STEP_SUMMARY }
+          else { $stages | ForEach-Object { "- $_" | Add-Content -Path $env:GITHUB_STEP_SUMMARY } }
+          "- Process exit: $($process.ExitCode)" | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          Get-Content "$env:RUNNER_TEMP\story-stdout.log" -ErrorAction SilentlyContinue
+          Get-Content "$env:RUNNER_TEMP\story-stderr.log" -ErrorAction SilentlyContinue
+          if (-not $finished) { Stop-Process -Id $process.Id -Force; throw 'Sound-led desktop app timed out.' }
+          if ($process.ExitCode -ne 0) { throw "Sound-led desktop app failed with exit code $($process.ExitCode)." }
+      - name: Check sound-led brief
+        if: always() && steps.sound_story.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\story-stages.log" -Pattern 'story brief reviewed' -Quiet -ErrorAction SilentlyContinue)) { throw 'Soundtrack and picture plan was not confirmed.' }
+      - name: Check three sound moments and draft
+        if: always() && steps.sound_story.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\story-stages.log" -Pattern 'story draft picture ready' -Quiet -ErrorAction SilentlyContinue)) { throw 'Three sound moments or assembled draft did not complete.' }
+      - name: Check sound adjustment and project reopen
+        if: always() && steps.sound_story.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\story-stages.log" -Pattern 'story project reopened' -Quiet -ErrorAction SilentlyContinue)) { throw 'Sound adjustment or saved project reopen did not complete.' }
+      - name: Check sound-led MP4 export
+        if: always() && steps.sound_story.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\story-stages.log" -Pattern 'story smoke passed' -Quiet -ErrorAction SilentlyContinue)) { throw 'Sound-led export or full desktop flow did not complete.' }

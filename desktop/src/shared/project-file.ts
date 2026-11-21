@@ -1,11 +1,13 @@
 import type { CreativeBriefInput, CreativeClip } from "./creative-brief.js";
-import type { ExportOptions, MediaAsset } from "./render-plan.js";
+import type { AudioSelection, ExportOptions, MediaAsset } from "./render-plan.js";
 
 export type ProjectSnapshot = {
-  version: 1;
+  version: 2;
   clips: CreativeClip[];
   options: ExportOptions;
   briefInput: CreativeBriefInput;
+  audioSelections: AudioSelection[] | null;
+  briefDirty?: boolean;
 };
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -68,6 +70,7 @@ function readBrief(value: unknown): CreativeBriefInput {
     (value.targetSeconds !== undefined && value.targetSeconds !== null &&
       (!isNumber(value.targetSeconds) || value.targetSeconds < 0.1 || value.targetSeconds > 86400)) ||
     (value.aspect !== undefined && !oneOf(value.aspect, ["vertical", "landscape"] as const)) ||
+    (value.reduceRumble !== undefined && typeof value.reduceRumble !== "boolean") ||
     (value.customVibe !== undefined && !isString(value.customVibe, 500))) {
     throw new Error("The project contains an invalid creative brief.");
   }
@@ -77,12 +80,43 @@ function readBrief(value: unknown): CreativeBriefInput {
     ...(value.selectionMode === undefined ? {} : { selectionMode: value.selectionMode }),
     ...(value.targetSeconds === undefined ? {} : { targetSeconds: value.targetSeconds }),
     ...(value.aspect === undefined ? {} : { aspect: value.aspect }),
+    ...(value.reduceRumble === undefined ? {} : { reduceRumble: value.reduceRumble }),
     ...(value.customVibe === undefined ? {} : { customVibe: value.customVibe }) };
+}
+
+function readAudioSelections(value: unknown, clips: CreativeClip[]): AudioSelection[] | null {
+  if (value === null) return null;
+  if (!Array.isArray(value) || value.length < 1 || value.length > 500) {
+    throw new Error("The project contains an invalid soundtrack.");
+  }
+  const selections = value.map((item): AudioSelection => {
+    if (!isObject(item)) throw new Error("The project contains an invalid sound moment.");
+    const savedAsset = readAsset(item.asset);
+    const clip = clips.find((candidate) => candidate.asset.path.toLowerCase() === savedAsset.path.toLowerCase());
+    if (!clip || !clip.asset.hasAudio ||
+      !isNumber(item.start) || !isNumber(item.end) || item.start < 0 ||
+      item.end - item.start < 0.1 || item.end > clip.asset.duration + 0.05 ||
+      (item.locked !== undefined && typeof item.locked !== "boolean")) {
+      throw new Error("The project contains a sound moment that is missing, silent, or outside its recording.");
+    }
+    return { asset: clip.asset, start: item.start, end: item.end,
+      ...(item.locked === undefined ? {} : { locked: item.locked }) };
+  });
+  for (let index = 0; index < selections.length; index++) {
+    for (let earlier = 0; earlier < index; earlier++) {
+      if (selections[index].asset.path.toLowerCase() === selections[earlier].asset.path.toLowerCase() &&
+        selections[index].start < selections[earlier].end - 0.001 &&
+        selections[earlier].start < selections[index].end - 0.001) {
+        throw new Error("The project soundtrack repeats part of a recording.");
+      }
+    }
+  }
+  return selections;
 }
 
 // Keep project data as ranges and settings. Preview URLs and generated files are session-only.
 export function parseProjectSnapshot(value: unknown): ProjectSnapshot {
-  if (!isObject(value) || value.version !== 1 || !Array.isArray(value.clips) ||
+  if (!isObject(value) || (value.version !== 1 && value.version !== 2) || !Array.isArray(value.clips) ||
     value.clips.length < 1 || value.clips.length > 500) {
     throw new Error("This is not a supported Concert Compass project.");
   }
@@ -90,6 +124,14 @@ export function parseProjectSnapshot(value: unknown): ProjectSnapshot {
   if (new Set(clips.map((clip) => clip.asset.path.toLowerCase())).size !== clips.length) {
     throw new Error("The project lists the same recording more than once.");
   }
-  return { version: 1, clips, options: readOptions(value.options),
-    briefInput: readBrief(value.briefInput) };
+  if (value.version === 2 && value.audioSelections === undefined) {
+    throw new Error("The project contains an invalid soundtrack.");
+  }
+  if (value.briefDirty !== undefined && typeof value.briefDirty !== "boolean") {
+    throw new Error("The project contains an invalid edit status.");
+  }
+  return { version: 2, clips, options: readOptions(value.options),
+    briefInput: readBrief(value.briefInput),
+    audioSelections: value.version === 1 ? null : readAudioSelections(value.audioSelections, clips),
+    briefDirty: value.briefDirty ?? false };
 }

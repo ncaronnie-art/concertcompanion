@@ -181,3 +181,74 @@ test("refinements change only the requested section, keep locks, and use no rean
   assert.equal(fewer.clips.filter((clip) => clip.included).length, 2);
   assert.match(fewer.notes[0], /shorter/);
 });
+
+test("Ronnie's soundtrack-led request appears explicitly in review without claiming full cleaning", () => {
+  const clips = [recording(1), recording(2), recording(3)];
+  const brief = interpretCreativeBrief({ description:
+    "3 audio clips featuring the cleaning audio and ending with a crescendo. I want video footage from multiple clips on top of that." },
+  clips, { aspect: "vertical", reduceRumble: false, finish: "cinematic", transition: "fade" });
+  assert.deepEqual(brief.soundtrackIntent, {
+    segmentCount: 3, buildEnding: true, separatePicture: true, cleanupRequested: true,
+  });
+  assert.equal(brief.conflict, null);
+  assert.equal(brief.options.reduceRumble, true);
+  assert.equal(brief.options.finish, "cinematic", "an audio cleanup request does not reset the picture look");
+  assert.match(brief.summary, /3 audio moments/);
+  assert.match(brief.summary, /low-rumble reduction/);
+  assert.match(brief.summary, /sound-energy build/);
+  assert.match(brief.summary, /picture from multiple recordings over the soundtrack/);
+  assert.match(brief.limitations.join(" "), /cannot remove crowd voices/);
+  assert.match(brief.limitations.join(" "), /not musical crescendo or beat recognition/);
+  assert.throws(() => makeFirstCut(clips, brief), /separate soundtrack plan/);
+});
+
+test("natural sound and picture wording is recognized without changing legacy prompts", () => {
+  const clips = [recording(1), recording(2), recording(3)];
+  for (const wording of ["three sound clips", "3 audio segments", "three audio moments"]) {
+    const brief = interpretCreativeBrief({ description: `${wording}, video from different clips over the audio, build to a crescendo, clean up the sound` }, clips,
+      { aspect: "vertical", reduceRumble: false });
+    assert.equal(brief.soundtrackIntent?.segmentCount, 3, wording);
+    assert.equal(brief.soundtrackIntent?.separatePicture, true, wording);
+    assert.equal(brief.soundtrackIntent?.buildEnding, true, wording);
+    assert.equal(brief.options.reduceRumble, true, wording);
+  }
+  assert.equal(interpretCreativeBrief({ description: "Clean up the sound" }, clips,
+    { aspect: "vertical", reduceRumble: false }).soundtrackIntent, null,
+  "cleanup alone keeps the existing joined-picture-and-sound workflow");
+});
+
+test("an explicit sound checkbox choice overrides a cleanup phrase", () => {
+  const clips = [recording(1), recording(2), recording(3)];
+  const brief = interpretCreativeBrief({ description: "Three audio clips, clean up the sound", reduceRumble: false }, clips,
+    { aspect: "vertical", reduceRumble: true });
+  assert.equal(brief.options.reduceRumble, false);
+  assert.match(brief.summary, /low-rumble reduction off/);
+  assert.match(brief.limitations.join(" "), /off by your choice/);
+  const enabled = interpretCreativeBrief({ description: "Three audio clips, clean up the sound", reduceRumble: true }, clips,
+    { aspect: "vertical", reduceRumble: false });
+  assert.equal(enabled.options.reduceRumble, true);
+});
+
+test("sound-led review distinguishes silent picture B-roll from usable soundtrack", () => {
+  const audible = recording(1);
+  const silentPicture = recording(2, { asset: { ...recording(2).asset, hasAudio: false } });
+  const brief = interpretCreativeBrief({ description: "Three audio clips, footage from multiple clips over the audio" },
+    [audible, silentPicture], { aspect: "vertical", reduceRumble: false });
+  assert.equal(brief.conflict, null);
+  assert.equal(brief.soundtrackIntent?.separatePicture, true);
+  const noSound = interpretCreativeBrief({ description: "Three audio clips" }, [silentPicture],
+    { aspect: "vertical", reduceRumble: false });
+  assert.equal(noSound.conflict?.kind, "audio-story-no-sound");
+});
+
+test("sound-led review calls out count and marked-duration conflicts", () => {
+  const locked = [1, 2, 3, 4].map((number) => recording(number, { selectionSource: "manual", locked: true }));
+  const count = interpretCreativeBrief({ description: "Three audio clips" }, locked,
+    { aspect: "vertical", reduceRumble: false });
+  assert.equal(count.conflict?.kind, "audio-story-locked-count");
+  const longMarked = [recording(1, { start: 0, end: 30, selectionSource: "manual", locked: true }), recording(2)];
+  const length = interpretCreativeBrief({ description: "Three audio clips", targetSeconds: 20 }, longMarked,
+    { aspect: "vertical", reduceRumble: false });
+  assert.equal(length.conflict?.kind, "protected-over-target");
+  assert.match(length.conflict?.message ?? "", /room for 2 other sound moments/);
+});

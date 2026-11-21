@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import assert from "node:assert/strict";
 import ffmpeg from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
-import { buildRenderCommand, type MediaAsset } from "../src/shared/render-plan.js";
+import { buildAudioLedRenderCommand, buildRenderCommand, type MediaAsset } from "../src/shared/render-plan.js";
 
 function run(binary: string, args: string[]) {
   return new Promise<Buffer>((resolve, reject) => {
@@ -46,4 +46,18 @@ try {
   }
   await run(binary, ["-v", "error", "-i", output, "-f", "null", "-"]);
   console.log(`Five-minute synthetic export passed in ${Math.round((Date.now() - started) / 1000)} seconds, with complete decode and correct source order.`);
+
+  const separateOutput = path.join(root, "five-minute-audio-led.mp4");
+  const separate = buildAudioLedRenderCommand(selections,
+    [selections[2], selections[0], selections[1]], separateOutput);
+  const separateStarted = Date.now();
+  await run(binary, ["-loglevel", "error", ...separate.args]);
+  const separateMetadata = JSON.parse((await run(ffprobe.path, ["-v", "error", "-show_entries",
+    "format=duration:stream=codec_type,codec_name,duration", "-of", "json", separateOutput])).toString());
+  assert.ok(Math.abs(Number(separateMetadata.format.duration) - 300) < 0.3);
+  assert.ok(separateMetadata.streams.some((stream: { codec_type: string; codec_name: string; duration: string }) =>
+    stream.codec_type === "audio" && stream.codec_name === "aac" && Math.abs(Number(stream.duration) - 300) < 0.3),
+  "The separate soundtrack must cover the full five minutes.");
+  await run(binary, ["-v", "error", "-i", separateOutput, "-f", "null", "-"]);
+  console.log(`Five-minute synthetic sound-led export passed in ${Math.round((Date.now() - separateStarted) / 1000)} seconds, with three separate sound sections and complete decode.`);
 } finally { await rm(root, { recursive: true, force: true }); }

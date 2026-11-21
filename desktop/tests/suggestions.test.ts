@@ -30,3 +30,29 @@ test("streaming audio analysis finds a louder synthetic section", async () => {
     assert.ok(chooseAudioHighlight({ ...asset, path: file }, bins).start >= 11.5);
   } finally { await rm(root, { recursive: true, force: true }); }
 }, { timeout: 30000 });
+
+test("filtered analysis measures the same low-rumble reduction used for export", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "compass-filtered-analysis-"));
+  try {
+    const binary = ffmpegPath as string;
+    const create = (file: string, signal: string) => new Promise<void>((resolve, reject) => {
+      const child = spawn(binary, ["-v", "error", "-y", "-f", "lavfi", "-i",
+        `aevalsrc=${signal}:s=48000:d=2`, "-c:a", "pcm_s16le", file], { windowsHide: true });
+      let error = "";
+      child.stderr.on("data", (data) => error += data);
+      child.on("error", reject);
+      child.on("close", (code) => code === 0 ? resolve() : reject(new Error(error)));
+    });
+    const bass = path.join(root, "bass.wav"), treble = path.join(root, "treble.wav");
+    await create(bass, "0.6*sin(2*PI*40*t)+0.1*sin(2*PI*440*t)");
+    await create(treble, "0.2*sin(2*PI*440*t)");
+    const average = (bins: Awaited<ReturnType<typeof measureAudio>>) =>
+      bins.reduce((sum, bin) => sum + bin.rms, 0) / bins.length;
+    const bassRaw = average(await measureAudio(binary, bass));
+    const bassClean = average(await measureAudio(binary, bass, true));
+    const trebleRaw = average(await measureAudio(binary, treble));
+    const trebleClean = average(await measureAudio(binary, treble, true));
+    assert.ok(bassClean < bassRaw * 0.5, `40 Hz rumble persisted: ${bassRaw} -> ${bassClean}`);
+    assert.ok(trebleClean > trebleRaw * 0.8, `440 Hz sound was over-attenuated: ${trebleRaw} -> ${trebleClean}`);
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, { timeout: 30000 });

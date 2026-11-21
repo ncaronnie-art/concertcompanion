@@ -8,12 +8,13 @@ import { access, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/
 import { randomUUID } from "node:crypto";
 import ffmpegPath from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
-import { buildRenderCommand, type ExportOptions, type MediaAsset, type RenderSelection } from "../src/shared/render-plan.js";
+import { buildAudioLedRenderCommand, buildRenderCommand, type AudioSelection, type ExportOptions, type MediaAsset, type RenderSelection } from "../src/shared/render-plan.js";
 import { previewResponse } from "./preview-stream.js";
 import { measureAudio } from "./audio-analysis.js";
-import { chooseAudioHighlight } from "../src/shared/suggestions.js";
+import { chooseAudioHighlight, type AudioBin } from "../src/shared/suggestions.js";
 import { withTemporaryCleanup } from "./temporary-cleanup.js";
 import { commitOutput } from "./output-commit.js";
+import { validateRenderedOutput } from "./output-integrity.js";
 import { displayDimensions } from "./media-orientation.js";
 import { parseProjectSnapshot, type ProjectSnapshot } from "../src/shared/project-file.js";
 
@@ -25,11 +26,14 @@ const probedDurations = new Map<string, number>();
 const previews = new Map<string, string>();
 const drafts = new Map<string, string>();
 const draftKeys = new Map<string, string>();
+const audioBins = new Map<string, AudioBin[]>();
+const pendingAudio = new Map<string, Promise<AudioBin[]>>();
 let previewDirectory: string | undefined;
 let activeRender: ChildProcess | undefined;
 let cancelRender = false;
 let smokeCancelPending = true;
 const smoke = process.env.COMPASS_SMOKE_TEST === "1";
+const smokeStory = smoke && process.env.COMPASS_SMOKE_STORY === "1";
 function smokeStage(stage: string) {
   if (smoke && process.env.COMPASS_SMOKE_STAGE_FILE) appendFileSync(process.env.COMPASS_SMOKE_STAGE_FILE, `${new Date().toISOString()} ${stage}\n`);
 }
@@ -65,13 +69,19 @@ function createWindow() {
           }
           throw new Error(`Timed out waiting for ${label}`);
         };
-        await waitFor(`document.body.innerText.includes('2 selected')`, "import");
+        await waitFor(`document.body.innerText.includes('${smokeStory ? "3" : "2"} selected')`, "import");
         smokeStage("videos imported");
         await waitFor(`(() => { const v = document.querySelector('video'); return v && v.videoWidth > 0 && v.readyState >= 2 })()`, "video picture");
         smokeStage("source picture ready");
         const picture = await win.webContents.executeJavaScript(`(() => { try { const v=document.querySelector('video'), c=document.createElement('canvas'); c.width=8; c.height=8; c.getContext('2d').drawImage(v,0,0,8,8); return Array.from(c.getContext('2d').getImageData(0,0,8,8).data).some((n,i)=>i%4!==3 && n>20) } catch(e) { return String(e) } })()`);
         if (typeof picture === "string") throw new Error(`Picture inspection failed: ${picture}`);
         if (!picture) throw new Error("Preview has no visible picture");
+        if (smokeStory) {
+          await runSoundStorySmoke(win, waitFor);
+          smokeStage("story smoke passed");
+          console.log("Desktop three-part soundtrack, independent picture, adjustment, project reopen and export passed");
+          clearTimeout(timer); app.exit(0); return;
+        }
         await win.webContents.executeJavaScript(`document.querySelector('video').currentTime = 2`);
         await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && Math.abs(v.currentTime - 2) < 0.15 && v.readyState >= 2 })()`, "seeking forward");
         await win.webContents.executeJavaScript(`document.querySelector('video').currentTime = 0.5`);
@@ -154,6 +164,73 @@ function createWindow() {
   }
 }
 
+async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: string, label: string) => Promise<void>): Promise<void> {
+  const description = "Make a six-second recap with 3 audio clips. Clean the audio and end with a crescendo. Put video footage from multiple clips on top of that soundtrack.";
+  await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('.brief textarea'); const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(input, ${JSON.stringify(description)}); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Review my plan').click()`);
+  await waitFor(`(() => { const plan = document.querySelector('.brief-review .story-plan'); return plan && plan.innerText.includes('Low-rumble reduction will be on.') })()`, "sound-led brief");
+  const review = await win.webContents.executeJavaScript(`(() => ({ labels: Array.from(document.querySelectorAll('.brief-review .story-plan strong')).map(x => x.textContent), summary: document.querySelector('.brief-review h3').textContent, conflict: !!document.querySelector('.brief-review .conflict'), ready: !Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Make my first cut').disabled }))()`);
+  if (review.labels.join() !== "Soundtrack,Picture" || !review.summary.includes("3 audio moments") ||
+    !review.summary.includes("multiple recordings") || review.conflict || !review.ready) throw new Error(`Sound-led brief was wrong: ${JSON.stringify(review)}`);
+  smokeStage("story brief reviewed");
+
+  await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Make my first cut').click()`);
+  await waitFor(`document.body.innerText.includes('First cut ready:') && document.querySelectorAll('.soundtrack-list li').length === 3`, "three-part first cut");
+  const firstCut = await win.webContents.executeJavaScript(`(() => ({ toolbar: document.querySelector('.toolbar b').textContent, moments: Array.from(document.querySelectorAll('.soundtrack-list li small')).map(x => x.textContent), lowRumble: document.querySelector('.soundtrack-note').textContent }))()`);
+  const pictureCount = Number(/^([0-9]+) picture shots/.exec(firstCut.toolbar)?.[1]);
+  if (pictureCount < 2 || !firstCut.toolbar.includes("3 sound moments") ||
+    !firstCut.lowRumble.includes("Very low rumble will be reduced")) throw new Error(`Sound-led first cut was wrong: ${JSON.stringify(firstCut)}`);
+  smokeStage("story first cut planned");
+
+  await win.webContents.executeJavaScript(`document.querySelector('.draft-heading button').click()`);
+  await waitFor(`document.body.innerText.includes('Draft preview is ready')`, "sound-led draft render");
+  await waitFor(`(() => { const v=document.querySelector('.draft-player'); return v && v.videoWidth === 360 && v.videoHeight === 640 && v.readyState >= 1 })()`, "sound-led draft picture");
+  smokeStage("story draft picture ready");
+
+  await win.webContents.executeJavaScript(`document.querySelector('.soundtrack-list li .sound-actions button:nth-child(2)').click()`);
+  await waitFor(`document.body.innerText.includes('Chose another sound moment')`, "sound moment replacement");
+  const adjusted = await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.soundtrack-list li small')).map(x => x.textContent)`);
+  if (adjusted.length !== 3 || adjusted[0] === firstCut.moments[0] ||
+    adjusted[0].split('·').at(-1) !== firstCut.moments[0].split('·').at(-1) ||
+    adjusted[1] !== firstCut.moments[1] || adjusted[2] !== firstCut.moments[2]) {
+    throw new Error(`Sound refinement changed the wrong moments: ${JSON.stringify({ before: firstCut.moments, after: adjusted })}`);
+  }
+  smokeStage("story sound adjusted");
+  await win.webContents.executeJavaScript(`document.querySelector('.draft-heading button').click()`);
+  await waitFor(`document.body.innerText.includes('Draft preview is ready')`, "adjusted sound-led draft render");
+  await waitFor(`(() => { const v=document.querySelector('.draft-player'); return v && v.videoWidth === 360 && v.videoHeight === 640 && v.readyState >= 1 })()`, "adjusted sound-led draft picture");
+  smokeStage("story adjusted draft picture ready");
+
+  await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Save project').click()`);
+  await waitFor(`document.body.innerText.includes('Project saved:')`, "sound-led project save");
+  const saved = JSON.parse(await readFile(process.env.COMPASS_SMOKE_PROJECT!, "utf8"));
+  if (saved.version !== 2 || saved.audioSelections?.length !== 3 || saved.options?.reduceRumble !== true ||
+    !saved.briefInput?.description.includes("3 audio clips")) throw new Error("Saved project lost the sound-led brief or soundtrack.");
+  smokeStage("story project saved");
+  await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Open project').click()`);
+  await waitFor(`document.body.innerText.includes('Project opened') && document.querySelector('.toolbar b')?.textContent.includes('3 sound moments') && document.querySelectorAll('.soundtrack-list li').length === 3 && !!document.querySelector('.draft-heading button')`, "sound-led project reopen");
+  const restored = await win.webContents.executeJavaScript(`(() => ({ description: document.querySelector('.brief textarea').value, toolbar: document.querySelector('.toolbar b').textContent, soundMoments: document.querySelectorAll('.soundtrack-list li').length, previewAction: document.querySelector('.draft-heading button')?.textContent, staleDraft: !!document.querySelector('.draft-player'), exportReady: !document.querySelector('.toolbar-actions button.primary').disabled }))()`);
+  if (!restored.description.includes("3 audio clips") || !restored.toolbar.includes("3 sound moments") || restored.soundMoments !== 3 || restored.previewAction !== "Watch first cut" || restored.staleDraft || !restored.exportReady) {
+    throw new Error(`Reopened project lost its soundtrack: ${JSON.stringify(restored)}`);
+  }
+  smokeStage("story project reopened");
+
+  // The legacy smoke deliberately slows its first export to exercise cancellation.
+  smokeCancelPending = false;
+  await win.webContents.executeJavaScript(`document.querySelector('.toolbar-actions button.primary').click()`);
+  await waitFor(`document.body.innerText.includes('Finished MP4:')`, "sound-led MP4 export");
+  await access(process.env.COMPASS_SMOKE_OUTPUT!);
+  const probe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,width,height,duration", "-of", "json", process.env.COMPASS_SMOKE_OUTPUT!]));
+  const video = probe.streams?.find((stream: { codec_type: string }) => stream.codec_type === "video");
+  const audio = probe.streams?.find((stream: { codec_type: string }) => stream.codec_type === "audio");
+  if (video?.codec_name !== "h264" || video.width !== 720 || video.height !== 1280 || audio?.codec_name !== "aac" ||
+    Math.abs(Number(probe.format?.duration) - 6) > 0.25 || Number(audio.duration) < 5.85) {
+    throw new Error(`Sound-led MP4 did not have six seconds of picture and sound: ${JSON.stringify(probe)}`);
+  }
+  await run(ffmpegBinary, ["-v", "error", "-i", process.env.COMPASS_SMOKE_OUTPUT!, "-f", "null", "-"]);
+  smokeStage("story export completed");
+}
+
 function run(command: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { windowsHide: true });
@@ -200,7 +277,7 @@ function runPlannedRender(event: IpcMainInvokeEvent, args: string[], totalSecond
 }
 
 ipcMain.handle("media:pick", async () => {
-  const result = smoke ? { canceled: false, filePaths: [process.env.COMPASS_SMOKE_INPUT!, process.env.COMPASS_SMOKE_SECOND!] } : await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"], filters: [{ name: "Video", extensions: ["mov", "mp4", "m4v", "avi", "mkv"] }] });
+  const result = smoke ? { canceled: false, filePaths: [process.env.COMPASS_SMOKE_INPUT!, process.env.COMPASS_SMOKE_SECOND!, ...(smokeStory ? [process.env.COMPASS_SMOKE_THIRD!] : [])] } : await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"], filters: [{ name: "Video", extensions: ["mov", "mp4", "m4v", "avi", "mkv"] }] });
   if (result.canceled) return [];
   return result.filePaths.map((filePath) => {
     const id = randomUUID();
@@ -303,20 +380,41 @@ ipcMain.handle("media:probe", async (_event, filePath: string): Promise<MediaAss
   return asset;
 });
 
+function analyzeImportedAudio(asset: MediaAsset, reduceRumble = false): Promise<AudioBin[]> {
+  if (!asset?.path || ![...selectedFiles.values()].includes(asset.path)) throw new Error("Choose the video in the file picker first.");
+  if (typeof reduceRumble !== "boolean") throw new Error("Choose a valid sound setting.");
+  if (!asset.hasAudio) return Promise.resolve([]);
+  const key = JSON.stringify([asset.path, reduceRumble]);
+  const cached = audioBins.get(key);
+  if (cached) return Promise.resolve(cached);
+  const pending = pendingAudio.get(key);
+  if (pending) return pending;
+  const analysis = measureAudio(ffmpegBinary, asset.path, reduceRumble).then((bins) => {
+    audioBins.set(key, bins);
+    return bins;
+  }).finally(() => pendingAudio.delete(key));
+  pendingAudio.set(key, analysis);
+  return analysis;
+}
+
+ipcMain.handle("media:analyze-audio", (_event, asset: MediaAsset, reduceRumble?: boolean) => analyzeImportedAudio(asset, reduceRumble));
+
 ipcMain.handle("media:suggest", async (_event, asset: MediaAsset) => {
-  if (![...selectedFiles.values()].includes(asset.path)) throw new Error("Choose the video in the file picker first.");
-  if (!asset.hasAudio) return chooseAudioHighlight(asset, []);
-  const bins = await measureAudio(ffmpegBinary, asset.path);
+  const bins = await analyzeImportedAudio(asset, false);
   return chooseAudioHighlight(asset, bins);
 });
 
-ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[], options: ExportOptions) => {
+ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[], options: ExportOptions, audioSelections?: AudioSelection[]) => {
   if (activeRender) throw new Error("Another video is still being prepared.");
-  if (!Array.isArray(selections) || selections.some((selection) => ![...selectedFiles.values()].includes(selection.asset.path))) {
+  const imported = new Set(selectedFiles.values());
+  if (!Array.isArray(selections) || selections.some((selection) => !imported.has(selection?.asset?.path)) ||
+    (audioSelections !== undefined && (!Array.isArray(audioSelections) || audioSelections.some((selection) => !imported.has(selection?.asset?.path))))) {
     throw new Error("Choose the videos in the file picker first.");
   }
   const key = JSON.stringify({ sections: selections.map((selection) => ({ path: selection.asset.path, start: selection.start,
-    end: selection.end, framing: selection.framing, locked: selection.locked })), options });
+    end: selection.end, framing: selection.framing, locked: selection.locked })),
+    audio: audioSelections?.map((selection) => ({ path: selection.asset.path, start: selection.start, end: selection.end, locked: selection.locked })) ?? null,
+    options });
   const existing = draftKeys.get(key);
   if (existing && drafts.has(existing)) {
     try { await access(drafts.get(existing)!); return { url: `compass-media://draft/${existing}` }; }
@@ -326,14 +424,11 @@ ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[],
   const id = randomUUID();
   const output = path.join(previewDirectory, `draft-${id}.mp4`);
   try {
-    const { args, totalSeconds } = buildRenderCommand(selections, output, options, "draft");
+    const { args, totalSeconds } = audioSelections === undefined ? buildRenderCommand(selections, output, options, "draft") :
+      buildAudioLedRenderCommand(selections, audioSelections, output, options, "draft");
     await runPlannedRender(event, args, totalSeconds, "Preview stopped. Your edit is still here.");
-    const probe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name", "-of", "json", output]));
-    if (!probe.streams?.some((stream: {codec_type: string; codec_name: string}) => stream.codec_type === "video" && stream.codec_name === "h264") ||
-      !probe.streams?.some((stream: {codec_type: string; codec_name: string}) => stream.codec_type === "audio" && stream.codec_name === "aac") ||
-      Math.abs(Number(probe.format?.duration) - totalSeconds) > Math.max(0.25, totalSeconds * 0.01)) {
-      throw new Error("The preview did not pass its checks. Try again or export the video.");
-    }
+    const probe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,duration", "-of", "json", output]));
+    validateRenderedOutput(probe, totalSeconds, "preview");
     drafts.set(id, output); draftKeys.set(key, id);
     event.sender.send("media:progress", 1);
     return { url: `compass-media://draft/${id}` };
@@ -343,9 +438,13 @@ ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[],
   }
 });
 
-ipcMain.handle("media:render", async (event, selections: RenderSelection[], options: ExportOptions) => {
+ipcMain.handle("media:render", async (event, selections: RenderSelection[], options: ExportOptions, audioSelections?: AudioSelection[]) => {
   if (activeRender) throw new Error("A video is already being exported.");
-  if (!Array.isArray(selections) || selections.some((selection) => ![...selectedFiles.values()].includes(selection.asset.path))) throw new Error("Choose the videos in the file picker first.");
+  const imported = new Set(selectedFiles.values());
+  if (!Array.isArray(selections) || selections.some((selection) => !imported.has(selection?.asset?.path)) ||
+    (audioSelections !== undefined && (!Array.isArray(audioSelections) || audioSelections.some((selection) => !imported.has(selection?.asset?.path))))) {
+    throw new Error("Choose the videos in the file picker first.");
+  }
   const destination = smoke ? { canceled: false, filePath: process.env.COMPASS_SMOKE_OUTPUT! } : await dialog.showSaveDialog({ defaultPath: "Concert Compass Reel.mp4", filters: [{ name: "MP4 video", extensions: ["mp4"] }] });
   if (destination.canceled || !destination.filePath) return { cancelled: true };
   const output = path.resolve(destination.filePath);
@@ -353,11 +452,12 @@ ipcMain.handle("media:render", async (event, selections: RenderSelection[], opti
   const tempDir = await mkdtemp(path.join(tmpdir(), "concert-compass-export-"));
   const temporaryOutput = path.join(tempDir, `${randomUUID()}.mp4`);
   const { cleanupWarning } = await withTemporaryCleanup(tempDir, async () => {
-  const { args, totalSeconds } = buildRenderCommand(selections, temporaryOutput, options);
+  const { args, totalSeconds } = audioSelections === undefined ? buildRenderCommand(selections, temporaryOutput, options) :
+    buildAudioLedRenderCommand(selections, audioSelections, temporaryOutput, options);
   if (smoke && smokeCancelPending) { args.splice(2, 0, "-re"); smokeCancelPending = false; }
   await runPlannedRender(event, args, totalSeconds, "Export stopped. Your selections are still here.");
-  const probe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name", "-of", "json", temporaryOutput]));
-  if (!probe.streams?.some((stream: {codec_type: string; codec_name: string}) => stream.codec_type === "video" && stream.codec_name === "h264") || !probe.streams?.some((stream: {codec_type: string; codec_name: string}) => stream.codec_type === "audio" && stream.codec_name === "aac") || Math.abs(Number(probe.format?.duration) - totalSeconds) > Math.max(0.25, totalSeconds * 0.01)) throw new Error("The exported video did not pass its checks. Please try again.");
+  const probe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,duration", "-of", "json", temporaryOutput]));
+  validateRenderedOutput(probe, totalSeconds, "export");
   await commitOutput(temporaryOutput, output, () => assertOutputIsNotOriginal(output));
   event.sender.send("media:progress", 1);
   }, smoke && process.env.COMPASS_SMOKE_CLEANUP_FAIL === "1" ? async () => { throw new Error("Simulated temporary-folder permission error"); } : undefined);

@@ -1,6 +1,6 @@
 import { suggestedRange, type MediaAsset } from "./render-plan.js";
 
-export type AudioBin = { rms: number; clipping: number };
+export type AudioBin = { rms: number; clipping: number; endSeconds?: number };
 export type Suggestion = { start: number; end: number; reason: string };
 
 // Inspired by CompassCore's signal ranking: local audio energy and clipping are

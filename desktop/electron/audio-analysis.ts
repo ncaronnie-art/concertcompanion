@@ -1,9 +1,13 @@
 import { spawn } from "node:child_process";
 import type { AudioBin } from "../src/shared/suggestions.js";
 
-export function measureAudio(binary: string, source: string): Promise<AudioBin[]> {
+export function measureAudio(binary: string, source: string, reduceRumble = false): Promise<AudioBin[]> {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, ["-v", "error", "-nostdin", "-i", source, "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "8000", "-f", "f32le", "pipe:1"], { windowsHide: true });
+    const args = ["-v", "error", "-nostdin", "-i", source, "-map", "0:a:0", "-vn"];
+    // Match the export filter before calculating the bins used to rank the soundtrack.
+    if (reduceRumble) args.push("-af", "aresample=48000,aformat=channel_layouts=stereo,highpass=f=80");
+    args.push("-ac", "1", "-ar", "8000", "-f", "f32le", "pipe:1");
+    const child = spawn(binary, args, { windowsHide: true });
     const bins: AudioBin[] = []; let remainder = Buffer.alloc(0), sum = 0, count = 0, clipped = 0, stderr = "";
     child.stdout.on("data", (data: Buffer) => {
       const chunk = Buffer.concat([remainder, data]); const limit = chunk.length - chunk.length % 4;
@@ -18,7 +22,8 @@ export function measureAudio(binary: string, source: string): Promise<AudioBin[]
     child.on("error", reject);
     child.on("close", (code) => {
       if (code !== 0) return reject(new Error(stderr || "Audio analysis failed."));
-      if (count) bins.push({ rms: Math.sqrt(sum / count), clipping: clipped / count });
+      if (count) bins.push({ rms: Math.sqrt(sum / count), clipping: clipped / count,
+        endSeconds: bins.length * 0.5 + count / 8000 });
       resolve(bins);
     });
   });

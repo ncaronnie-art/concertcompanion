@@ -478,7 +478,7 @@ ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[],
     throw new Error("Choose the videos in the file picker first.");
   }
   const key = JSON.stringify({ sections: selections.map((selection) => ({ path: selection.asset.path, start: selection.start,
-    end: selection.end, framing: selection.framing, locked: selection.locked })),
+    end: selection.end, framing: selection.framing, focus: selection.focus, locked: selection.locked })),
     audio: audioSelections?.map((selection) => ({ path: selection.asset.path, start: selection.start, end: selection.end, locked: selection.locked })) ?? null,
     options });
   const existing = draftKeys.get(key);

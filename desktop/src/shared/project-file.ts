@@ -58,12 +58,16 @@ function readOptions(value: unknown): ExportOptions {
   if (!isObject(value) || !oneOf(value.aspect, ["portrait913", "vertical", "landscape"] as const) ||
     typeof value.reduceRumble !== "boolean" ||
     (value.finish !== undefined && !oneOf(value.finish, ["natural", "vivid", "cinematic", "warm"] as const)) ||
-    (value.transition !== undefined && !oneOf(value.transition, ["cut", "fade"] as const))) {
+    (value.transition !== undefined && !oneOf(value.transition, ["cut", "fade"] as const)) ||
+    (value.eventTitle !== undefined && (!isString(value.eventTitle, 80) || /[\r\n\x00-\x1f]/.test(value.eventTitle))) ||
+    (value.showClipLabels !== undefined && typeof value.showClipLabels !== "boolean")) {
     throw new Error("The project contains invalid video settings.");
   }
   return { aspect: value.aspect, reduceRumble: value.reduceRumble,
     ...(value.finish === undefined ? {} : { finish: value.finish }),
-    ...(value.transition === undefined ? {} : { transition: value.transition }) };
+    ...(value.transition === undefined ? {} : { transition: value.transition }),
+    ...(value.eventTitle === undefined ? {} : { eventTitle: value.eventTitle }),
+    ...(value.showClipLabels === undefined ? {} : { showClipLabels: value.showClipLabels }) };
 }
 
 function readBrief(value: unknown): CreativeBriefInput {
@@ -75,6 +79,8 @@ function readBrief(value: unknown): CreativeBriefInput {
       (!isNumber(value.targetSeconds) || value.targetSeconds < 0.1 || value.targetSeconds > 86400)) ||
     (value.aspect !== undefined && !oneOf(value.aspect, ["portrait913", "vertical", "landscape"] as const)) ||
     (value.reduceRumble !== undefined && typeof value.reduceRumble !== "boolean") ||
+    (value.eventTitle !== undefined && (!isString(value.eventTitle, 80) || /[\r\n\x00-\x1f]/.test(value.eventTitle))) ||
+    (value.showClipLabels !== undefined && typeof value.showClipLabels !== "boolean") ||
     (value.separatePicture !== undefined && typeof value.separatePicture !== "boolean") ||
     (value.soundMomentCount !== undefined && (!isNumber(value.soundMomentCount) ||
       !Number.isInteger(value.soundMomentCount) || value.soundMomentCount < 1 || value.soundMomentCount > 12)) ||
@@ -90,6 +96,8 @@ function readBrief(value: unknown): CreativeBriefInput {
     ...(value.targetSeconds === undefined ? {} : { targetSeconds: value.targetSeconds }),
     ...(value.aspect === undefined ? {} : { aspect: value.aspect }),
     ...(value.reduceRumble === undefined ? {} : { reduceRumble: value.reduceRumble }),
+    ...(value.eventTitle === undefined ? {} : { eventTitle: value.eventTitle }),
+    ...(value.showClipLabels === undefined ? {} : { showClipLabels: value.showClipLabels }),
     ...(value.separatePicture === undefined ? {} : { separatePicture: value.separatePicture }),
     ...(value.soundMomentCount === undefined ? {} : { soundMomentCount: value.soundMomentCount }),
     ...(value.pictureSourceCount === undefined ? {} : { pictureSourceCount: value.pictureSourceCount }),

@@ -62,6 +62,19 @@ test("9:13 projects retain focal position without changing older 9:16 projects",
   assert.equal(oldPortrait.options.aspect, "vertical");
 });
 
+test("projects keep optional visual titles and named-moment display choices", () => {
+  const saved = parseProjectSnapshot({ ...project,
+    options: { ...project.options, eventTitle: "Olivia's Night", showClipLabels: true },
+    briefInput: { ...project.briefInput, eventTitle: "Olivia's Night", showClipLabels: true },
+  });
+  assert.equal(saved.options.eventTitle, "Olivia's Night");
+  assert.equal(saved.options.showClipLabels, true);
+  assert.equal(saved.briefInput.eventTitle, "Olivia's Night");
+  assert.deepEqual(parseProjectSnapshot(JSON.parse(JSON.stringify(saved))), saved);
+  assert.throws(() => parseProjectSnapshot({ ...project,
+    options: { ...project.options, eventTitle: "x".repeat(81) } }), /invalid video settings/);
+});
+
 test("v2 saves independent sound moments and an unfinished edit without losing recoverable work", () => {
   const source = project.clips[0].asset;
   const normalized = parseProjectSnapshot({ ...project, version: 2, briefDirty: true,

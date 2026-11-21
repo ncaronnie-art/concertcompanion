@@ -26,9 +26,19 @@ test("a protected moment keeps its timing while the chosen look and fade apply",
   const protectedPair = [{ ...pair[0], locked: true }, pair[1]];
   const { args } = buildRenderCommand(protectedPair, "out.mp4", { aspect: "vertical", reduceRumble: false, finish: "vivid", transition: "fade" });
   const graph = args[args.indexOf("-filter_complex") + 1];
-  assert.match(graph.split("[v0]")[0], /eq=contrast=1\.06/);
+  assert.match(graph.split("[v0]")[0], /eq=contrast=1\.02:saturation=1\.08:brightness=0/);
   assert.match(graph, /,fade=t=out/);
   assert.match(graph, /,fade=t=in/);
+});
+
+test("optional overlay applies after joining picture without changing selected duration", () => {
+  const withTitle = buildRenderCommand(pair, "out.mp4", { aspect: "portrait913", reduceRumble: false,
+    eventTitle: "The Night", showClipLabels: true }, "draft", "C:\\Temp\\visual-overlays.ass");
+  const graph = withTitle.args[withTitle.args.indexOf("-filter_complex") + 1];
+  assert.equal(withTitle.totalSeconds, 2);
+  assert.match(graph, /concat=n=2:v=1:a=1\[vcat\]\[aout\]/);
+  assert.match(graph, /\[vcat\]ass=filename=/);
+  assert.match(graph, /\[vout\]/);
 });
 
 test("a very short adjoining clip does not leave a one-sided fade", () => {

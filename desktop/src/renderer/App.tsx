@@ -85,6 +85,8 @@ export function App() {
   const [reduceRumble, setReduceRumble] = useState(false);
   const [finish, setFinish] = useState<NonNullable<ExportOptions["finish"]>>("natural");
   const [transition, setTransition] = useState<NonNullable<ExportOptions["transition"]>>("cut");
+  const [eventTitle, setEventTitle] = useState("");
+  const [showClipLabels, setShowClipLabels] = useState(false);
   const [briefInput, setBriefInput] = useState<CreativeBriefInput>({ description: "", separatePicture: true });
   const [soundCountDraft, setSoundCountDraft] = useState<string | null>(null);
   const [pictureCountDraft, setPictureCountDraft] = useState<string | null>(null);
@@ -117,7 +119,7 @@ export function App() {
   const storyRebuildMessage = storyExcludedSound ? "A soundtrack recording is missing or was excluded. Review your plan to choose new sound." :
     storyProtectedMismatch ? "A kept picture or sound moment moved. Review your plan to keep them together." :
     "The picture and soundtrack lengths differ. Review your plan to align them again.";
-  const options: ExportOptions = { aspect, reduceRumble, finish, transition };
+  const options: ExportOptions = { aspect, reduceRumble, finish, transition, eventTitle, showClipLabels };
   const availableRecordings = clips.filter((clip) => !clip.excludedByUser).length;
   const suggestedPictureCount = Math.min(3, availableRecordings);
   const suggestedSoundCount = (() => {
@@ -125,7 +127,7 @@ export function App() {
     try { return interpretCreativeBrief({ ...briefInput, soundMomentCount: undefined }, clips, options).soundtrackIntent?.segmentCount ?? 3; }
     catch { return 3; }
   })();
-  const cutSignature = JSON.stringify({ clips: selected.map((clip) => ({ path: clip.asset.path, start: clip.start, end: clip.end, locked: clip.locked, framing: clip.framing ?? "auto", focus: clip.focus ?? 0.5 })), audioSelections, options });
+  const cutSignature = JSON.stringify({ clips: selected.map((clip) => ({ path: clip.asset.path, start: clip.start, end: clip.end, locked: clip.locked, framing: clip.framing ?? "auto", focus: clip.focus ?? 0.5, label: clip.label })), audioSelections, options });
   const guidedCutPending = briefInput.separatePicture === true && audioSelections === null;
 
   function remember() {
@@ -178,6 +180,7 @@ export function App() {
     setBriefDirty(previous.briefDirty);
     setAspect(previous.options.aspect); setReduceRumble(previous.options.reduceRumble);
     setFinish(previous.options.finish ?? "natural"); setTransition(previous.options.transition ?? "cut");
+    setEventTitle(previous.options.eventTitle ?? ""); setShowClipLabels(previous.options.showClipLabels ?? false);
     setMessage("Undid the last edit. Your earlier choices are back.");
   }
 
@@ -259,6 +262,7 @@ export function App() {
       setBriefDirty(savedBriefDirty);
       setAspect(result.snapshot.options.aspect); setReduceRumble(result.snapshot.options.reduceRumble);
       setFinish(result.snapshot.options.finish ?? "natural"); setTransition(result.snapshot.options.transition ?? "cut");
+      setEventTitle(result.snapshot.options.eventTitle ?? ""); setShowClipLabels(result.snapshot.options.showClipLabels ?? false);
       setBriefInput(result.snapshot.briefInput);
       setLengthText(result.snapshot.briefInput.targetSeconds ? clock(result.snapshot.briefInput.targetSeconds) : "");
       setReviewBrief(null); setStoryError(null); setStage(restoredAudio && !savedBriefDirty ? "cut" : "describe");
@@ -325,6 +329,7 @@ export function App() {
       remember(); setClips(result.clips); setAudioSelections(result.audioSelections ?? null); setStoryError(null); setBriefDirty(false);
       setAspect(result.options.aspect); setReduceRumble(result.options.reduceRumble);
       setFinish(result.options.finish ?? "natural"); setTransition(result.options.transition ?? "cut");
+      setEventTitle(result.options.eventTitle ?? ""); setShowClipLabels(result.options.showClipLabels ?? false);
       setStage("cut"); setMessage(`First cut ready: ${clock(result.plannedSeconds)}. ${result.notes.join(" ")} Watch the first cut, adjust anything, then export.`);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -466,6 +471,7 @@ export function App() {
         <div className="section-heading"><div><p className="eyebrow">YOUR VIDEO, YOUR FEELING</p><h2>What are we making?</h2><p>Tell us what you want. Your marked moments and video settings are already part of this plan.</p></div><button disabled={busy || !undoStack.length} onClick={undo}>Undo</button></div>
         {stage !== "review" ? <>
           <label className="brief-description">Describe your video<textarea disabled={busy} value={briefInput.description} onChange={(event) => changeBrief({ description: event.target.value })} placeholder="Use three sound moments, reduce low rumble, build to a strong ending, and show footage from several recordings." rows={3} /></label>
+          <label className="video-title-field">Video title <span>(optional; shown briefly at the start)</span><input disabled={busy} aria-label="Video title (optional)" maxLength={80} value={eventTitle} placeholder="For example, a concert or night to remember" onFocus={remember} onChange={(event) => { setEventTitle(event.target.value); setBriefInput((old) => ({ ...old, eventTitle: event.target.value })); }} /></label>
           <div className="brief-quick-choice">
             <label className="brief-picture-toggle"><input type="checkbox" disabled={busy} checked={briefInput.separatePicture === true} onChange={(event) => changeBrief(event.target.checked ? { separatePicture: true } : { separatePicture: undefined, soundMomentCount: undefined, pictureSourceCount: undefined })} /> Use separate soundtrack and picture</label>
             <p>Play sound moments over footage from your recordings. Kept sections retain their own picture and sound.</p>
@@ -517,7 +523,7 @@ export function App() {
       </section>}
       {stage === "cut" && <section className="refine"><div><h2>Make it yours</h2><p>{audioSelections ? "Try another sound moment above or choose a different picture section below. To change the total length, review your plan again." : "Change one thing at a time. Everything else stays where it is."}</p></div>{!audioSelections && <button disabled={busy} onClick={() => refine({ kind: "fewer-cuts" })}>Fewer cuts</button>}</section>}
       <section className="toolbar"><div><b>{audioSelections ? `${selected.length} videos to show · ${audioSelections.length} sound moments` : `${selected.length} selected`}</b><span>{clock(totalSeconds)} planned output · recordings play from top to bottom</span>{guidedCutPending && <span className="pending-badge">Make a first cut or choose manual editing before export</span>}{briefDirty && <span className="pending-badge">Make your new request before export</span>}{!briefDirty && storyNeedsRebuild && <span className="pending-badge">Rebuild the picture and soundtrack before export</span>}</div><div className="toolbar-actions"><button disabled={busy} onClick={saveProject}>Save project</button><button className="primary" disabled={busy || !selected.length || briefDirty || storyNeedsRebuild || guidedCutPending} onClick={exportReel}>Export MP4</button></div></section>
-      <section className="options" aria-label="Export options"><div><b>Video shape</b><div className="clip-actions"><button disabled={busy} aria-pressed={aspect === "portrait913"} onClick={() => setShape("portrait913")}>Portrait 9:13 · default</button><button disabled={busy} aria-pressed={aspect === "vertical"} onClick={() => setShape("vertical")}>Tall 9:16</button><button disabled={busy} aria-pressed={aspect === "landscape"} onClick={() => setShape("landscape")}>Widescreen 16:9</button></div><p>Portrait fills the frame and centers a narrow crop from wide recordings. You can aim the crop toward the stage, performer, or crowd in each recording below. “Show whole frame” keeps everything visible with a soft background.</p></div><label><input disabled={busy} type="checkbox" checked={reduceRumble} onChange={(event) => { remember(); setReduceRumble(event.target.checked); setBriefInput((old) => ({ ...old, reduceRumble: event.target.checked })); invalidateReview(); if (audioSelections) { setBriefDirty(true); setMessage("Low-rumble processing changes how sound moments are chosen. Review your plan and make a new first cut before exporting."); } }} /> Reduce low rumble <small>Gently lowers very low bass. It does not remove crowd voices.</small></label><div><b>Finishing look</b><div className="clip-actions">{(["natural", "vivid", "cinematic", "warm"] as const).map((look) => <button key={look} disabled={busy} aria-pressed={finish === look} onClick={() => { remember(); setFinish(look); invalidateReview(); }}>{look}</button>)}</div><p>Subtle color treatment; it does not detect scenes or moods.</p></div><div><b>Between recordings</b><div className="clip-actions"><button disabled={busy} aria-pressed={transition === "cut"} onClick={() => { remember(); setTransition("cut"); invalidateReview(); }}>Straight cut</button><button disabled={busy} aria-pressed={transition === "fade"} onClick={() => { remember(); setTransition("fade"); invalidateReview(); }}>Brief fade to black</button></div><p>Protected sections keep their full length.</p></div></section>
+      <section className="options" aria-label="Export options"><div><b>Video shape</b><div className="clip-actions"><button disabled={busy} aria-pressed={aspect === "portrait913"} onClick={() => setShape("portrait913")}>Portrait 9:13 · default</button><button disabled={busy} aria-pressed={aspect === "vertical"} onClick={() => setShape("vertical")}>Tall 9:16</button><button disabled={busy} aria-pressed={aspect === "landscape"} onClick={() => setShape("landscape")}>Widescreen 16:9</button></div><p>Portrait fills the frame and centers a narrow crop from wide recordings. You can aim the crop toward the stage, performer, or crowd in each recording below. “Show whole frame” keeps everything visible with a soft background.</p></div><label><input disabled={busy} type="checkbox" checked={reduceRumble} onChange={(event) => { remember(); setReduceRumble(event.target.checked); setBriefInput((old) => ({ ...old, reduceRumble: event.target.checked })); invalidateReview(); if (audioSelections) { setBriefDirty(true); setMessage("Low-rumble processing changes how sound moments are chosen. Review your plan and make a new first cut before exporting."); } }} /> Reduce low rumble <small>Gently lowers very low bass. It does not remove crowd voices.</small></label><div><b>Finishing look</b><div className="clip-actions">{(["natural", "vivid", "cinematic", "warm"] as const).map((look) => <button key={look} disabled={busy} aria-pressed={finish === look} onClick={() => { remember(); setFinish(look); invalidateReview(); }}>{look}</button>)}</div><p>Subtle color treatment; it does not detect scenes or moods.</p></div><div><b>On-screen details</b><label><input aria-label="Show my named moments on video" disabled={busy || !!audioSelections} type="checkbox" checked={showClipLabels && !audioSelections} onChange={(event) => { remember(); setShowClipLabels(event.target.checked); setBriefInput((old) => ({ ...old, showClipLabels: event.target.checked })); }} /> Show my named moments on video</label><p>Uses only names you enter below. With a separate soundtrack, this stays off so a picture label cannot imply the wrong song is playing.</p></div><div><b>Between recordings</b><div className="clip-actions"><button disabled={busy} aria-pressed={transition === "cut"} onClick={() => { remember(); setTransition("cut"); invalidateReview(); }}>Straight cut</button><button disabled={busy} aria-pressed={transition === "fade"} onClick={() => { remember(); setTransition("fade"); invalidateReview(); }}>Brief fade to black</button></div><p>Protected sections keep their full length.</p></div></section>
       <section className="clips" id="clip-editor" aria-label="Clip editor">{clips.map((clip, index) => <article className={!clip.included || clip.excludedByUser ? "off" : ""} key={clip.asset.path}>
         <div className="clip-title"><label><input type="checkbox" disabled={busy} checked={clip.included && !clip.excludedByUser} onChange={(event) => changeClip(index, { included: event.target.checked, excludedByUser: !event.target.checked }, event.target.checked)} /> Include</label><h2>{index + 1}. {clip.asset.name}</h2>{(!clip.included || clip.excludedByUser) && <span className="excluded-badge">Excluded from video</span>}<p>{clock(clip.asset.duration)} · {audioSelections ? "Picture source; finished sound follows the soundtrack" : clip.asset.hasAudio ? "Original audio" : "Silent video"}</p><label className="moment-label">Song or moment name <input disabled={busy} value={clip.label ?? ""} maxLength={100} placeholder="Optional, supplied by you" onChange={(event) => changeClip(index, { label: event.target.value })} /></label><div className="clip-actions"><button disabled={busy || index === 0} aria-label={`Move ${clip.asset.name} earlier`} onClick={() => move(index, -1)}>↑ Earlier</button><button disabled={busy || index === clips.length - 1} aria-label={`Move ${clip.asset.name} later`} onClick={() => move(index, 1)}>↓ Later</button></div></div>
         <div className="preview">

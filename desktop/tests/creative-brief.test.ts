@@ -75,6 +75,23 @@ test("vibes change selection density and supported finishing choices", () => {
   assert.equal(makeFirstCut(clips, clean).clips.filter((clip) => clip.included).length, 2);
   assert.deepEqual([cinematic.options.finish, cinematic.options.transition], ["cinematic", "fade"]);
   assert.deepEqual([clean.options.finish, clean.options.transition], ["natural", "cut"]);
+  assert.equal(energetic.options.showClipLabels, true);
+  assert.equal(cinematic.options.showClipLabels, true);
+  assert.equal(clean.options.showClipLabels, false);
+});
+
+test("video title and user named moments shape the brief without inventing song labels", () => {
+  const clips = [recording(1, { label: "First song" }), recording(2)];
+  const brief = interpretCreativeBrief({ description: "Cinematic recap", eventTitle: "The Night", vibe: "cinematic" }, clips, options);
+  assert.equal(brief.options.eventTitle, "The Night");
+  assert.equal(brief.options.showClipLabels, true);
+  assert.match(brief.summary, /opening title “The Night”/);
+  assert.match(brief.summary, /your named moments on video/);
+  const separateSound = interpretCreativeBrief({ description: "Cinematic recap", eventTitle: "The Night",
+    vibe: "cinematic", separatePicture: true, soundMomentCount: 3, pictureSourceCount: 2,
+    showClipLabels: true }, clips, options);
+  assert.equal(separateSound.options.showClipLabels, false, "picture labels must not imply the wrong song over separate audio");
+  assert.doesNotMatch(separateSound.summary, /named moments on video/);
 });
 
 test("one-song stays in one recording, and unsupported requests are disclosed", () => {
@@ -90,7 +107,7 @@ test("one-song stays in one recording, and unsupported requests are disclosed", 
   const cut = makeFirstCut(chosen, chosenBrief);
   assert.deepEqual(cut.clips.map((clip) => clip.included), [false, true]);
   assert.equal(cut.plannedSeconds, 30);
-  assert.match(brief.limitations.join(" "), /Text overlays and captions/);
+  assert.match(brief.limitations.join(" "), /Opening event titles and your named moments are supported/);
   assert.match(brief.limitations.join(" "), /speed changes/);
   const named = interpretCreativeBrief({ description: "Several songs" }, [recording(1, { label: "Song A" }), recording(2, { label: "Song B" })], options);
   assert.match(named.summary, /your labeled songs/);

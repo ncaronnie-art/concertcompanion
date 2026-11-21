@@ -8,7 +8,8 @@ import { access, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/
 import { randomUUID } from "node:crypto";
 import ffmpegPath from "ffmpeg-static";
 import ffprobe from "ffprobe-static";
-import { buildAudioLedRenderCommand, buildRenderCommand, type AudioSelection, type ExportOptions, type MediaAsset, type RenderSelection } from "../src/shared/render-plan.js";
+import { buildAudioLedRenderCommand, buildRenderCommand, renderDimensions, type AudioSelection, type ExportOptions, type MediaAsset, type RenderSelection } from "../src/shared/render-plan.js";
+import { buildOverlayAss } from "../src/shared/visual-design.js";
 import { previewResponse } from "./preview-stream.js";
 import { measureAudio } from "./audio-analysis.js";
 import { chooseAudioHighlight, type AudioBin } from "../src/shared/suggestions.js";
@@ -111,6 +112,12 @@ function createWindow() {
         await win.webContents.executeJavaScript(`document.querySelectorAll('button[aria-label^="Move "]')[2].click()`);
         const firstName = await win.webContents.executeJavaScript(`document.querySelector('.clips article h2').textContent`);
         if (!firstName.includes('compass-second')) throw new Error(`Reorder failed: ${firstName}`);
+        await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('input[aria-label="Video title (optional)"]'); if (!input) throw new Error('Video title control was missing'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(input, 'Live at the show'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await win.webContents.executeJavaScript(`(() => { const input = document.querySelectorAll('.clips article .moment-label input')[0]; if (!input) throw new Error('Moment label control was missing'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(input, 'Opening energy'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await win.webContents.executeJavaScript(`(() => { const input = document.querySelectorAll('.clips article .moment-label input')[1]; if (!input) throw new Error('Second moment label control was missing'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(input, 'Final roar'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('input[aria-label="Show my named moments on video"]'); if (!input) throw new Error('Named moment display control was missing'); if (!input.checked) input.click(); })()`);
+        await waitFor(`document.querySelector('input[aria-label="Video title (optional)"]')?.value === 'Live at the show' && document.querySelector('input[aria-label="Show my named moments on video"]')?.checked === true && document.querySelectorAll('.clips article .moment-label input')[1]?.value === 'Final roar'`, "visual finish options");
+        smokeStage("visual brief options ready");
         await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('.brief textarea'); const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(input, 'A four-second energetic recap. Keep my selected section and choose the rest.'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Review my plan').click()`);
         await waitFor(`(() => { const plan = document.querySelector('.brief-review h3'); return plan && plan.textContent.includes('recap') && plan.textContent.includes('energetic') && plan.textContent.includes('your marked sections stay') })()`, "interpreted creative brief");
@@ -128,6 +135,17 @@ function createWindow() {
         if (draftSize[0] !== 360 || draftSize[1] !== 520) throw new Error(`9:13 draft video shape was wrong: ${draftSize}`);
         await win.webContents.executeJavaScript(`document.querySelector('.draft-player').currentTime = 0.4`);
         await waitFor(`(() => { const v=document.querySelector('.draft-player'); return !v.seeking && Math.abs(v.currentTime - 0.4) < 0.15 && v.readyState >= 2 })()`, "portrait draft frame");
+        const countDraftWhite = async (time: number, area: "title" | "label") => {
+          await win.webContents.executeJavaScript(`document.querySelector('.draft-player').currentTime = ${time}`);
+          await waitFor(`(() => { const v=document.querySelector('.draft-player'); return !v.seeking && Math.abs(v.currentTime - ${time}) < 0.16 && v.readyState >= 2 })()`, `${area} in assembled draft`);
+          return win.webContents.executeJavaScript(`(() => { const v=document.querySelector('.draft-player'), c=document.createElement('canvas'); c.width=v.videoWidth; c.height=v.videoHeight; const x=c.getContext('2d'); x.drawImage(v,0,0); const d=x.getImageData(0,0,c.width,c.height).data; let white=0; for(let y=Math.floor(c.height*${area === "title" ? 0.09 : 0.55}); y<Math.floor(c.height*${area === "title" ? 0.34 : 0.88}); y++) for(let px=Math.floor(c.width*0.03); px<Math.floor(c.width*0.95); px++) { const i=(y*c.width+px)*4; if(d[i]>210&&d[i+1]>210&&d[i+2]>210) white++; } return white; })()`);
+        };
+        const titlePixels = await countDraftWhite(0.8, "title");
+        const labelPixels = await countDraftWhite(3.0, "label");
+        if (titlePixels < 20 || labelPixels < 20) throw new Error(`Visual title or named moment was absent from assembled draft: ${JSON.stringify({ titlePixels, labelPixels })}`);
+        smokeStage("visual draft overlay ready");
+        await win.webContents.executeJavaScript(`document.querySelector('.draft-player').currentTime = 0.4`);
+        await waitFor(`(() => { const v=document.querySelector('.draft-player'); return !v.seeking && Math.abs(v.currentTime - 0.4) < 0.15 && v.readyState >= 2 })()`, "portrait draft frame after overlay check");
         const centerCropEdge = await win.webContents.executeJavaScript(`(() => { const v=document.querySelector('.draft-player'), c=document.createElement('canvas'); c.width=v.videoWidth; c.height=v.videoHeight; const x=c.getContext('2d'); x.drawImage(v,0,0); return Array.from(x.getImageData(5,Math.floor(v.videoHeight/2),1,1).data).slice(0,3) })()`);
         if (centerCropEdge[0] < 60 || centerCropEdge[0] < centerCropEdge[2] * 1.5 || centerCropEdge[0] < centerCropEdge[1] * 1.5) throw new Error(`Default portrait framing did not fill from the center: ${centerCropEdge}`);
         smokeStage("landscape source filled portrait frame");
@@ -150,11 +168,17 @@ function createWindow() {
         await access(process.env.COMPASS_SMOKE_PROJECT!);
         const savedProject = JSON.parse(await readFile(process.env.COMPASS_SMOKE_PROJECT!, "utf8"));
         if (savedProject.clips?.find((clip: { asset: MediaAsset }) => clip.asset.name.includes("compass-second"))?.focus !== 0) throw new Error("Saved project lost portrait aim.");
+        if (savedProject.options?.eventTitle !== "Live at the show" || savedProject.options?.showClipLabels !== true ||
+          savedProject.clips?.find((clip: { asset: MediaAsset }) => clip.asset.name.includes("compass-second"))?.label !== "Opening energy" ||
+          savedProject.clips?.find((clip: { asset: MediaAsset }) => clip.asset.name.includes("compass-synthetic-input"))?.label !== "Final roar") {
+          throw new Error("Saved project lost its event title or named moments.");
+        }
         smokeStage("project saved");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Open project').click()`);
         await waitFor(`document.body.innerText.includes('Project opened. Your sections and protected moments are ready.')`, "project open");
-        const restored = await win.webContents.executeJavaScript(`(() => ({ description: document.querySelector('.brief textarea').value, locked: document.querySelectorAll('.clips article')[1].querySelector('.trim-heading input[type=checkbox]').checked, aspect: document.querySelector('.options button[aria-pressed="true"]').textContent, rumble: document.querySelector('.options input[type=checkbox]').checked }))()`);
-        if (!restored.description.includes('energetic recap') || !restored.locked || !restored.aspect.includes('Widescreen') || !restored.rumble) throw new Error(`Project restore failed: ${JSON.stringify(restored)}`);
+        const restored = await win.webContents.executeJavaScript(`(() => ({ description: document.querySelector('.brief textarea').value, locked: document.querySelectorAll('.clips article')[1].querySelector('.trim-heading input[type=checkbox]').checked, aspect: document.querySelector('.options button[aria-pressed="true"]').textContent, rumble: document.querySelector('.options input[type=checkbox]').checked, title: document.querySelector('input[aria-label="Video title (optional)"]')?.value, namedMoments: document.querySelector('input[aria-label="Show my named moments on video"]')?.checked, labels: Array.from(document.querySelectorAll('.clips article .moment-label input')).map(input => input.value) }))()`);
+        if (!restored.description.includes('energetic recap') || !restored.locked || !restored.aspect.includes('Widescreen') || !restored.rumble || restored.title !== 'Live at the show' || !restored.namedMoments || restored.labels.join() !== 'Opening energy,Final roar') throw new Error(`Project restore failed: ${JSON.stringify(restored)}`);
+        smokeStage("visual options survived project reopen");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.options button')).find(b => b.textContent.includes('9:13')).click()`);
         await waitFor(`document.querySelector('.clips article input[aria-label^="Aim portrait crop for "]')?.value === '0'`, "restored portrait aim");
         smokeStage("portrait aim survived project reopen");
@@ -171,6 +195,10 @@ function createWindow() {
         smokeStage("export completed");
         if (process.env.COMPASS_SMOKE_CLEANUP_FAIL === "1") await waitFor(`document.body.innerText.includes('video is saved, but a temporary folder could not be removed')`, "cleanup warning");
         await access(process.env.COMPASS_SMOKE_OUTPUT!);
+        const exportedTitlePixels = await brightOverlayPixels(process.env.COMPASS_SMOKE_OUTPUT!, 0.8, "crop=1000:200:60:60,format=gray");
+        const exportedLabelPixels = await brightOverlayPixels(process.env.COMPASS_SMOKE_OUTPUT!, 3.0, "crop=1100:170:60:490,format=gray");
+        if (exportedTitlePixels < 50 || exportedLabelPixels < 50) throw new Error(`Visual title or named moment was absent from exported video: ${JSON.stringify({ exportedTitlePixels, exportedLabelPixels })}`);
+        smokeStage("visual exported overlay ready");
         const outputProbe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", process.env.COMPASS_SMOKE_OUTPUT!]));
         if (outputProbe.streams?.[0]?.width !== 1280 || outputProbe.streams?.[0]?.height !== 720) throw new Error("Widescreen output dimensions are incorrect");
         const color = await new Promise<Buffer>((resolve, reject) => {
@@ -209,6 +237,8 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
     throw new Error(`Guided soundtrack defaults were wrong after importing three videos: ${JSON.stringify(defaults)}`);
   }
   smokeStage("story guided defaults ready");
+  await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('input[aria-label="Video title (optional)"]'); if (!input) throw new Error('Sound-led video title control was missing'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(input, 'Three-part night'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await waitFor(`document.querySelector('input[aria-label="Video title (optional)"]')?.value === 'Three-part night'`, "sound-led event title");
   const description = "Make a six-second recap with three sound moments. Reduce low rumble, aim for a stronger ending, and show footage from several videos over that soundtrack.";
   await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('.brief textarea'); const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(input, ${JSON.stringify(description)}); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Review my plan').click()`);
@@ -267,6 +297,7 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
   await waitFor(`document.body.innerText.includes('Project saved:')`, "sound-led project save");
   const saved = JSON.parse(await readFile(process.env.COMPASS_SMOKE_PROJECT!, "utf8"));
   if (saved.version !== 2 || saved.audioSelections?.length !== 3 || saved.options?.aspect !== "portrait913" || saved.options?.reduceRumble !== true ||
+    saved.options?.eventTitle !== "Three-part night" || saved.options?.showClipLabels !== false ||
     saved.briefInput?.separatePicture !== true || saved.briefInput?.soundMomentCount !== 3 ||
     saved.briefInput?.pictureSourceCount !== 2 || !saved.briefInput?.description.includes("three sound moments")) {
     throw new Error("Saved project lost the explicit soundtrack or picture counts, brief, or sound moments.");
@@ -274,9 +305,9 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
   smokeStage("story project saved");
   await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Open project').click()`);
   await waitFor(`document.body.innerText.includes('Project opened') && document.querySelector('.toolbar b')?.textContent.includes('3 sound moments') && document.querySelectorAll('.soundtrack-list li').length === 3 && !!document.querySelector('.draft-heading button')`, "sound-led project reopen");
-  const restored = await win.webContents.executeJavaScript(`(() => ({ description: document.querySelector('.brief textarea').value, soundCount: document.querySelector('input[aria-label="Number of sound moments"]')?.value, pictureCount: document.querySelector('input[aria-label="Number of videos to show"]')?.value, toolbar: document.querySelector('.toolbar b').textContent, soundMoments: document.querySelectorAll('.soundtrack-list li').length, previewAction: document.querySelector('.draft-heading button')?.textContent, staleDraft: !!document.querySelector('.draft-player'), exportReady: !document.querySelector('.toolbar-actions button.primary').disabled }))()`);
+  const restored = await win.webContents.executeJavaScript(`(() => ({ description: document.querySelector('.brief textarea').value, soundCount: document.querySelector('input[aria-label="Number of sound moments"]')?.value, pictureCount: document.querySelector('input[aria-label="Number of videos to show"]')?.value, toolbar: document.querySelector('.toolbar b').textContent, soundMoments: document.querySelectorAll('.soundtrack-list li').length, previewAction: document.querySelector('.draft-heading button')?.textContent, staleDraft: !!document.querySelector('.draft-player'), exportReady: !document.querySelector('.toolbar-actions button.primary').disabled, title: document.querySelector('input[aria-label="Video title (optional)"]')?.value, labelsEnabled: document.querySelector('input[aria-label="Show my named moments on video"]')?.checked }))()`);
   if (!restored.description.includes("three sound moments") || restored.soundCount !== "3" || restored.pictureCount !== "2" ||
-    !restored.toolbar.includes("3 sound moments") || restored.soundMoments !== 3 || restored.previewAction !== "Watch first cut" || restored.staleDraft || !restored.exportReady) {
+    !restored.toolbar.includes("3 sound moments") || restored.soundMoments !== 3 || restored.previewAction !== "Watch first cut" || restored.staleDraft || !restored.exportReady || restored.title !== "Three-part night" || restored.labelsEnabled) {
     throw new Error(`Reopened project lost its soundtrack: ${JSON.stringify(restored)}`);
   }
   smokeStage("story project reopened");
@@ -294,7 +325,26 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
     throw new Error(`Sound-led MP4 did not have six seconds of picture and sound: ${JSON.stringify(probe)}`);
   }
   await run(ffmpegBinary, ["-v", "error", "-i", process.env.COMPASS_SMOKE_OUTPUT!, "-f", "null", "-"]);
+  const titlePixels = await brightOverlayPixels(process.env.COMPASS_SMOKE_OUTPUT!, 0.8, "crop=640:230:40:90,format=gray");
+  if (titlePixels < 50) throw new Error(`Sound-led video title was absent from the exported picture: ${titlePixels}`);
+  smokeStage("story title exported");
   smokeStage("story export completed");
+}
+
+async function brightOverlayPixels(video: string, time: number, filter: string): Promise<number> {
+  const pixels = await new Promise<Buffer>((resolve, reject) => {
+    const child = spawn(ffmpegBinary, ["-v", "error", "-ss", String(time), "-i", video, "-frames:v", "1", "-vf", filter, "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"], { windowsHide: true });
+    const chunks: Buffer[] = [];
+    let error = "";
+    child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => { error = (error + chunk.toString()).slice(-1200); });
+    child.on("error", reject);
+    child.on("close", (code) => code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(error || "Could not inspect visual finish")));
+  });
+  if (!pixels.length) throw new Error("Visual finish frame was empty.");
+  let bright = 0;
+  for (const pixel of pixels) if (pixel > 220) bright++;
+  return bright;
 }
 
 function run(command: string, args: string[]): Promise<string> {
@@ -470,6 +520,25 @@ ipcMain.handle("media:suggest", async (_event, asset: MediaAsset) => {
   return chooseAudioHighlight(asset, bins);
 });
 
+async function writeVisualOverlay(directory: string, name: string, selections: RenderSelection[],
+  options: ExportOptions, profile: "draft" | "export", soundLed: boolean): Promise<string | undefined> {
+  const { width, height } = renderDimensions(options, profile);
+  let offset = 0;
+  const labels = selections.flatMap((selection) => {
+    const start = offset;
+    const duration = selection.end - selection.start;
+    offset += duration;
+    return !soundLed && options.showClipLabels && selection.label?.trim() ?
+      [{ text: selection.label, start, duration }] : [];
+  });
+  const script = buildOverlayAss({ eventTitle: options.eventTitle, labels, width, height,
+    style: options.finish ?? "natural" });
+  if (!script) return undefined;
+  const file = path.join(directory, name);
+  await writeFile(file, script, "utf8");
+  return file;
+}
+
 ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[], options: ExportOptions, audioSelections?: AudioSelection[]) => {
   if (activeRender) throw new Error("Another video is still being prepared.");
   const imported = new Set(selectedFiles.values());
@@ -478,7 +547,7 @@ ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[],
     throw new Error("Choose the videos in the file picker first.");
   }
   const key = JSON.stringify({ sections: selections.map((selection) => ({ path: selection.asset.path, start: selection.start,
-    end: selection.end, framing: selection.framing, focus: selection.focus, locked: selection.locked })),
+    end: selection.end, framing: selection.framing, focus: selection.focus, locked: selection.locked, label: selection.label })),
     audio: audioSelections?.map((selection) => ({ path: selection.asset.path, start: selection.start, end: selection.end, locked: selection.locked })) ?? null,
     options });
   const existing = draftKeys.get(key);
@@ -489,9 +558,11 @@ ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[],
   previewDirectory ??= await mkdtemp(path.join(tmpdir(), "concert-compass-preview-"));
   const id = randomUUID();
   const output = path.join(previewDirectory, `draft-${id}.mp4`);
+  let overlayFile: string | undefined;
   try {
-    const { args, totalSeconds } = audioSelections === undefined ? buildRenderCommand(selections, output, options, "draft") :
-      buildAudioLedRenderCommand(selections, audioSelections, output, options, "draft");
+    overlayFile = await writeVisualOverlay(previewDirectory, `draft-${id}.ass`, selections, options, "draft", audioSelections !== undefined);
+    const { args, totalSeconds } = audioSelections === undefined ? buildRenderCommand(selections, output, options, "draft", overlayFile) :
+      buildAudioLedRenderCommand(selections, audioSelections, output, options, "draft", overlayFile);
     await runPlannedRender(event, args, totalSeconds, "Preview stopped. Your edit is still here.");
     const probe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,duration", "-of", "json", output]));
     validateRenderedOutput(probe, totalSeconds, "preview");
@@ -501,6 +572,8 @@ ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[],
   } catch (error) {
     await rm(output, { force: true }).catch(() => {});
     throw error;
+  } finally {
+    if (overlayFile) await rm(overlayFile, { force: true }).catch(() => {});
   }
 });
 
@@ -518,8 +591,9 @@ ipcMain.handle("media:render", async (event, selections: RenderSelection[], opti
   const tempDir = await mkdtemp(path.join(tmpdir(), "concert-compass-export-"));
   const temporaryOutput = path.join(tempDir, `${randomUUID()}.mp4`);
   const { cleanupWarning } = await withTemporaryCleanup(tempDir, async () => {
-  const { args, totalSeconds } = audioSelections === undefined ? buildRenderCommand(selections, temporaryOutput, options) :
-    buildAudioLedRenderCommand(selections, audioSelections, temporaryOutput, options);
+  const overlayFile = await writeVisualOverlay(tempDir, "visual-overlays.ass", selections, options, "export", audioSelections !== undefined);
+  const { args, totalSeconds } = audioSelections === undefined ? buildRenderCommand(selections, temporaryOutput, options, "export", overlayFile) :
+    buildAudioLedRenderCommand(selections, audioSelections, temporaryOutput, options, "export", overlayFile);
   if (smoke && smokeCancelPending) { args.splice(2, 0, "-re"); smokeCancelPending = false; }
   await runPlannedRender(event, args, totalSeconds, "Export stopped. Your selections are still here.");
   const probe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,duration", "-of", "json", temporaryOutput]));

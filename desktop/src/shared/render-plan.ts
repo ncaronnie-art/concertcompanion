@@ -1,17 +1,21 @@
+import { assFilter } from "./visual-design.js";
+
 export type MediaAsset = { path: string; name: string; duration: number; width: number; height: number; hasAudio: boolean };
-export type RenderSelection = { asset: MediaAsset; start: number; end: number; locked?: boolean; framing?: "fill" | "fit"; focus?: number };
+export type RenderSelection = { asset: MediaAsset; start: number; end: number; locked?: boolean; framing?: "fill" | "fit"; focus?: number; label?: string };
 export type AudioSelection = { asset: MediaAsset; start: number; end: number; locked?: boolean };
 export type ExportOptions = {
   aspect: "portrait913" | "vertical" | "landscape";
   reduceRumble: boolean;
   finish?: "natural" | "vivid" | "cinematic" | "warm";
   transition?: "cut" | "fade";
+  eventTitle?: string;
+  showClipLabels?: boolean;
 };
 
 const fixed = (value: number) => value.toFixed(3);
 const looks: Record<NonNullable<ExportOptions["finish"]>, string> = {
   natural: "",
-  vivid: ",eq=contrast=1.06:saturation=1.10:brightness=0.006",
+  vivid: ",eq=contrast=1.02:saturation=1.08:brightness=0",
   cinematic: ",eq=contrast=1.07:saturation=0.90:gamma=0.98",
   warm: ",eq=contrast=1.03:saturation=0.97:gamma=1.01,colorchannelmixer=rr=1.025:gg=1.0:bb=0.975",
 };
@@ -43,13 +47,20 @@ function outputSettings(options: ExportOptions, profile: "export" | "draft") {
   if (!["export", "draft"].includes(profile)) throw new Error("Choose a valid render profile.");
   if (!options || !["portrait913", "vertical", "landscape"].includes(options.aspect) || typeof options.reduceRumble !== "boolean"
     || (options.finish !== undefined && !["natural", "vivid", "cinematic", "warm"].includes(options.finish))
-    || (options.transition !== undefined && !["cut", "fade"].includes(options.transition))) throw new Error("Choose valid export settings.");
+    || (options.transition !== undefined && !["cut", "fade"].includes(options.transition))
+    || (options.eventTitle !== undefined && (typeof options.eventTitle !== "string" || options.eventTitle.length > 80 || /[\r\n\x00-\x1f]/.test(options.eventTitle)))
+    || (options.showClipLabels !== undefined && typeof options.showClipLabels !== "boolean")) throw new Error("Choose valid export settings.");
   const [width, height] = options.aspect === "landscape" ?
     (profile === "draft" ? [640, 360] : [1280, 720]) :
     options.aspect === "portrait913" ?
       (profile === "draft" ? [360, 520] : [720, 1040]) :
       (profile === "draft" ? [360, 640] : [720, 1280]);
   return { width, height, look: looks[options.finish ?? "natural"] };
+}
+
+export function renderDimensions(options: ExportOptions, profile: "export" | "draft" = "export") {
+  const { width, height } = outputSettings(options, profile);
+  return { width, height };
 }
 
 function appendEncoding(args: string[], filters: string[], output: string, profile: "export" | "draft") {
@@ -62,7 +73,7 @@ export function suggestedRange(asset: MediaAsset, maxSeconds = 12): Pick<RenderS
   return { start: Math.max(0, (duration - length) / 2), end: Math.min(duration, (duration + length) / 2) };
 }
 
-export function buildRenderCommand(selections: RenderSelection[], output: string, options: ExportOptions = { aspect: "portrait913", reduceRumble: false }, profile: "export" | "draft" = "export") {
+export function buildRenderCommand(selections: RenderSelection[], output: string, options: ExportOptions = { aspect: "portrait913", reduceRumble: false }, profile: "export" | "draft" = "export", overlayAssPath?: string) {
   if (!selections.length) throw new Error("Choose at least one clip for the reel.");
   const { width, height, look } = outputSettings(options, profile);
   const args = ["-hide_banner", "-y"];
@@ -76,6 +87,7 @@ export function buildRenderCommand(selections: RenderSelection[], output: string
     if (!Number.isFinite(duration) || duration < 0.1 || selection.start < 0 || selection.end > selection.asset.duration + 0.05) throw new Error(`Invalid range for ${selection.asset.name}.`);
     if (selection.framing !== undefined && !["fill", "fit"].includes(selection.framing)) throw new Error(`Choose valid framing for ${selection.asset.name}.`);
     if (selection.focus !== undefined && (typeof selection.focus !== "number" || !Number.isFinite(selection.focus) || selection.focus < 0 || selection.focus > 1)) throw new Error(`Choose a valid focal position for ${selection.asset.name}.`);
+    if (selection.label !== undefined && (typeof selection.label !== "string" || selection.label.length > 100 || /[\r\n\x00-\x1f]/.test(selection.label))) throw new Error(`Choose a valid moment name for ${selection.asset.name}.`);
     args.push("-ss", fixed(selection.start), "-t", fixed(duration), "-i", selection.asset.path);
     const fileInput = inputIndex++;
     let audioInput = fileInput;
@@ -97,7 +109,8 @@ export function buildRenderCommand(selections: RenderSelection[], output: string
     joins.push(`[v${index}][a${index}]`);
     totalSeconds += duration;
   }
-  filters.push(`${joins.join("")}concat=n=${selections.length}:v=1:a=1[vout][aout]`);
+  filters.push(`${joins.join("")}concat=n=${selections.length}:v=1:a=1${overlayAssPath ? "[vcat][aout]" : "[vout][aout]"}`);
+  if (overlayAssPath) filters.push(`[vcat]${assFilter(overlayAssPath)}[vout]`);
   appendEncoding(args, filters, output, profile);
   return { args, totalSeconds };
 }
@@ -106,7 +119,7 @@ export function buildRenderCommand(selections: RenderSelection[], output: string
 // reel, but none of the picture sources' sound reaches the final soundtrack.
 export function buildAudioLedRenderCommand(videoSelections: RenderSelection[], audioSelections: AudioSelection[],
   output: string, options: ExportOptions = { aspect: "portrait913", reduceRumble: false },
-  profile: "export" | "draft" = "export") {
+  profile: "export" | "draft" = "export", overlayAssPath?: string) {
   if (!Array.isArray(videoSelections) || !videoSelections.length) throw new Error("Choose at least one video section.");
   if (!Array.isArray(audioSelections) || !audioSelections.length) throw new Error("Choose at least one sound section.");
   const { width, height, look } = outputSettings(options, profile);
@@ -129,6 +142,9 @@ export function buildAudioLedRenderCommand(videoSelections: RenderSelection[], a
     }
     if (selection.focus !== undefined && (typeof selection.focus !== "number" || !Number.isFinite(selection.focus) || selection.focus < 0 || selection.focus > 1)) {
       throw new Error(`Choose a valid focal position for ${selection.asset.name}.`);
+    }
+    if (selection.label !== undefined && (typeof selection.label !== "string" || selection.label.length > 100 || /[\r\n\x00-\x1f]/.test(selection.label))) {
+      throw new Error(`Choose a valid moment name for ${selection.asset.name}.`);
     }
     args.push("-ss", fixed(selection.start), "-t", fixed(duration), "-i", selection.asset.path);
     const previous = index > 0 ? videoSelections[index - 1].end - videoSelections[index - 1].start : 0;
@@ -168,7 +184,8 @@ export function buildAudioLedRenderCommand(videoSelections: RenderSelection[], a
   if (Math.abs(totalSeconds - audioSeconds) > 0.05) {
     throw new Error("The picture and soundtrack have different lengths. Adjust the sections before exporting.");
   }
-  filters.push(`${videoJoins.join("")}concat=n=${videoSelections.length}:v=1:a=0[vout]`);
+  filters.push(`${videoJoins.join("")}concat=n=${videoSelections.length}:v=1:a=0${overlayAssPath ? "[vcat]" : "[vout]"}`);
+  if (overlayAssPath) filters.push(`[vcat]${assFilter(overlayAssPath)}[vout]`);
   filters.push(`${audioJoins.join("")}concat=n=${audioSelections.length}:v=0:a=1[acat]`);
   // Trim packet-edge excess; never synthesize seconds of silence when a source's sound ends early.
   filters.push(`[acat]atrim=duration=${fixed(totalSeconds)}[aout]`);

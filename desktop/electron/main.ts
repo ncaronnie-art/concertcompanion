@@ -215,7 +215,7 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
   await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Make my first cut').click()`);
   await waitFor(`document.body.innerText.includes('First cut ready:') && document.querySelectorAll('.soundtrack-list li').length === 3`, "three-part first cut");
   const firstCut = await win.webContents.executeJavaScript(`(() => ({ toolbar: document.querySelector('.toolbar b').textContent, moments: Array.from(document.querySelectorAll('.soundtrack-list li small')).map(x => x.textContent), lowRumble: document.querySelector('.soundtrack-note').textContent }))()`);
-  const pictureCount = Number(/^([0-9]+) picture shots/.exec(firstCut.toolbar)?.[1]);
+  const pictureCount = Number(/^([0-9]+) videos to show/.exec(firstCut.toolbar)?.[1]);
   if (pictureCount !== 2 || !firstCut.toolbar.includes("3 sound moments") ||
     !firstCut.lowRumble.includes("Very low rumble will be reduced")) throw new Error(`Sound-led first cut was wrong: ${JSON.stringify(firstCut)}`);
   smokeStage("story first cut planned");
@@ -530,3 +530,4 @@ app.on("before-quit", (event) => {
   event.preventDefault(); cleaning = true;
   void rm(previewDirectory, { recursive: true, force: true }).catch(() => {}).finally(() => app.quit());
 });
+

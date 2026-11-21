@@ -190,6 +190,7 @@ function supportedLimits(text: string, type: VideoType, vibe: Vibe, customVibe: 
   if (type === "one-song" || /\b(several|multiple|different|many) songs?\b/i.test(text)) notes.push(labeledSongs > 1 ? "Song names come from your labels; the app has not detected or verified them." : "Songs are not identified automatically. The cut can use different recordings; mark or name song sections yourself if needed.");
   if (/\b(lyrics?|captions?|subtitles?|text overlay|title card|logo)\b/i.test(text)) notes.push("Text overlays and captions are not available yet. The closest supported choice is a clean video with a preset look.");
   if (/\b(beat.sync|slow.motion|speed ramp|stabiliz|camera tracking|face tracking|swipe transition)\b/i.test(text)) notes.push("Beat syncing, speed changes, stabilization, and tracking are not available yet. The cut uses real-time footage and cuts or short fades.");
+  if (/\b(?:auto(?:matic(?:ally)?)?|find|follow|track|center|focus|crop|frame)\b.{0,55}\b(?:performer|singer|stage|crowd|face)\b|\b(?:performer|singer|stage|crowd|face)\b.{0,55}\b(?:auto(?:matic(?:ally)?)?|follow|track|center|focus|crop|frame)\b/i.test(text)) notes.push("Portrait cropping starts centered; it cannot identify or follow a performer, stage, or crowd. Use Aim the crop on each recording to place the picture where you want it.");
   if (cleanupRequested) notes.push(rumbleEnabled ?
     "Sound cleanup here means reducing very low rumble. It cannot remove crowd voices, repair clipping, or fully denoise music." :
     "Low-rumble reduction is off by your choice. Full sound cleaning is not available; crowd voices, clipping, and music noise are not removed.");
@@ -224,8 +225,8 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   }
   let targetSeconds = input.targetSeconds === undefined ? parseSeconds(description) : input.targetSeconds;
   if (targetSeconds !== null && (!Number.isFinite(targetSeconds) || targetSeconds < 0.1 || targetSeconds > 86400)) throw new Error("Choose a length between one second and 24 hours.");
-  const aspect = input.aspect ?? (/\b(horizontal|widescreen|landscape|16:9)\b/i.test(description) ? "landscape" : /\b(vertical|portrait|9:16)\b/i.test(description) ? "vertical" : current.aspect);
-  if (!["vertical", "landscape"].includes(aspect)) throw new Error("Choose a valid video shape.");
+  const aspect = input.aspect ?? (/\b(horizontal|widescreen|landscape|16:9)\b/i.test(description) ? "landscape" : /\b9:16\b/i.test(description) ? "vertical" : /\b(vertical|portrait|9:13)\b/i.test(description) ? "portrait913" : current.aspect);
+  if (!["portrait913", "vertical", "landscape"].includes(aspect)) throw new Error("Choose a valid video shape.");
   const customVibe = input.customVibe?.trim() ?? "";
   const style = cleanupRequested && !requestedVibe ?
     { finish: current.finish ?? "natural", transition: current.transition ?? "cut" } : styleFor(vibe);
@@ -329,7 +330,8 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   const naturalSeconds = keepWholePerformance && oneSongChoice ? oneSongChoice.asset.duration :
     selectionMode === "use-my-sections" || videoType === "one-song" && markedClips.length ? protectedSeconds : total(clips);
   const soundSummary = soundtrackIntent ? ` · ${soundtrackIntent.segmentCount} audio moments${cleanupRequested ? options.reduceRumble ? " with low-rumble reduction" : " with low-rumble reduction off" : ""}${soundtrackIntent.buildEnding ? " · aiming for a sound-energy build toward the strongest measured ending" : ""}${soundtrackIntent.separatePicture ? ` · picture from ${pictureSourceCount} recording${pictureSourceCount === 1 ? "" : "s"} over the soundtrack` : ""}` : "";
-  const summary = `${time(targetSeconds ?? naturalSeconds)} ${typeLabel[videoType]}${variety} · ${vibe === "clean-live" ? "clean/live" : vibe} pacing · ${options.finish} look · ${options.transition === "fade" ? "soft joins" : "direct cuts"} · ${aspect === "landscape" ? "horizontal" : "vertical"} · ${preserved}${soundSummary}.`;
+  const shape = aspect === "landscape" ? "horizontal 16:9" : aspect === "vertical" ? "tall 9:16" : "portrait 9:13";
+  const summary = `${time(targetSeconds ?? naturalSeconds)} ${typeLabel[videoType]}${variety} · ${vibe === "clean-live" ? "clean/live" : vibe} pacing · ${options.finish} look · ${options.transition === "fade" ? "soft joins" : "direct cuts"} · ${shape} · ${preserved}${soundSummary}.`;
   const limitations = supportedLimits(description, videoType, vibe, customVibe, labeledSongs, cleanupRequested, options.reduceRumble, soundtrackIntent);
   if (soundtrackIntent?.buildEnding && markedClips.length) limitations.push("Your marked sections keep their place and original sound; they may limit how steadily the energy rises.");
   if (vibe === "energetic" && eligible.length < 2) limitations.push("Quicker cuts need multiple recordings; this cut keeps the available footage continuous.");

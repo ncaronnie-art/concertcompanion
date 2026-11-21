@@ -39,7 +39,7 @@ try {
   assert.ok(Math.abs(Number(metadata.format.duration) - 300) < 0.3, `Duration: ${metadata.format.duration}`);
   assert.ok(metadata.streams.some((s: { codec_type: string; codec_name: string }) => s.codec_type === "audio" && s.codec_name === "aac"));
   const video = metadata.streams.find((s: { codec_type: string }) => s.codec_type === "video");
-  assert.equal(video.codec_name, "h264"); assert.equal(video.width, 720); assert.equal(video.height, 1280);
+  assert.equal(video.codec_name, "h264"); assert.equal(video.width, 720); assert.equal(video.height, 1040);
   for (const [time, channel] of [[50, 0], [150, 1], [250, 2]] as const) {
     const rgb = await run(binary, ["-v", "error", "-ss", String(time), "-i", output, "-frames:v", "1", "-vf", "scale=1:1,format=rgb24", "-f", "rawvideo", "pipe:1"]);
     assert.equal(rgb.length, 3); assert.ok(rgb[channel] > rgb[(channel + 1) % 3] * 1.5 && rgb[channel] > rgb[(channel + 2) % 3] * 1.5, `Wrong source at ${time}s: ${rgb.toString("hex")}`);

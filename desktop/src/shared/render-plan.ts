@@ -1,8 +1,8 @@
 export type MediaAsset = { path: string; name: string; duration: number; width: number; height: number; hasAudio: boolean };
-export type RenderSelection = { asset: MediaAsset; start: number; end: number; locked?: boolean; framing?: "fill" | "fit" };
+export type RenderSelection = { asset: MediaAsset; start: number; end: number; locked?: boolean; framing?: "fill" | "fit"; focus?: number };
 export type AudioSelection = { asset: MediaAsset; start: number; end: number; locked?: boolean };
 export type ExportOptions = {
-  aspect: "vertical" | "landscape";
+  aspect: "portrait913" | "vertical" | "landscape";
   reduceRumble: boolean;
   finish?: "natural" | "vivid" | "cinematic" | "warm";
   transition?: "cut" | "fade";
@@ -17,12 +17,12 @@ const looks: Record<NonNullable<ExportOptions["finish"]>, string> = {
 };
 
 function appendVideoFilters(filters: string[], selection: RenderSelection, index: number, fileInput: number,
-  width: number, height: number, look: string, videoFades: string): void {
+  width: number, height: number, aspect: ExportOptions["aspect"], look: string, videoFades: string): void {
   const sourceRatio = selection.asset.width / selection.asset.height;
   const outputRatio = width / height;
   const strongMismatch = Number.isFinite(sourceRatio) && sourceRatio > 0 &&
     Math.max(sourceRatio / outputRatio, outputRatio / sourceRatio) >= 1.45;
-  const frameMode = selection.framing ?? (strongMismatch ? "fit" : "fill");
+  const frameMode = selection.framing ?? (aspect === "portrait913" ? "fill" : strongMismatch ? "fit" : "fill");
   if (frameMode === "fit") {
     // Blur at quarter resolution before enlarging; the source itself stays fully visible on top.
     const backgroundWidth = Math.round(width / 8) * 2;
@@ -32,18 +32,23 @@ function appendVideoFilters(filters: string[], selection: RenderSelection, index
     filters.push(`[fgsource${index}]scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1${look}[fg${index}]`);
     filters.push(`[bg${index}][fg${index}]overlay=(W-w)/2:(H-h)/2:shortest=1,fps=30,setsar=1,format=yuv420p${videoFades}[v${index}]`);
   } else {
-    filters.push(`[${fileInput}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},fps=30,setsar=1,format=yuv420p${look}${videoFades}[v${index}]`);
+    // A fixed focal position avoids distracting pans. FFmpeg and the source preview use the
+    // same percentage of the excess horizontal width; portrait sources still crop vertically.
+    const focus = fixed(selection.focus ?? 0.5);
+    filters.push(`[${fileInput}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}:(iw-ow)*${focus}:(ih-oh)/2,fps=30,setsar=1,format=yuv420p${look}${videoFades}[v${index}]`);
   }
 }
 
 function outputSettings(options: ExportOptions, profile: "export" | "draft") {
   if (!["export", "draft"].includes(profile)) throw new Error("Choose a valid render profile.");
-  if (!options || !["vertical", "landscape"].includes(options.aspect) || typeof options.reduceRumble !== "boolean"
+  if (!options || !["portrait913", "vertical", "landscape"].includes(options.aspect) || typeof options.reduceRumble !== "boolean"
     || (options.finish !== undefined && !["natural", "vivid", "cinematic", "warm"].includes(options.finish))
     || (options.transition !== undefined && !["cut", "fade"].includes(options.transition))) throw new Error("Choose valid export settings.");
   const [width, height] = options.aspect === "landscape" ?
     (profile === "draft" ? [640, 360] : [1280, 720]) :
-    (profile === "draft" ? [360, 640] : [720, 1280]);
+    options.aspect === "portrait913" ?
+      (profile === "draft" ? [360, 520] : [720, 1040]) :
+      (profile === "draft" ? [360, 640] : [720, 1280]);
   return { width, height, look: looks[options.finish ?? "natural"] };
 }
 
@@ -57,7 +62,7 @@ export function suggestedRange(asset: MediaAsset, maxSeconds = 12): Pick<RenderS
   return { start: Math.max(0, (duration - length) / 2), end: Math.min(duration, (duration + length) / 2) };
 }
 
-export function buildRenderCommand(selections: RenderSelection[], output: string, options: ExportOptions = { aspect: "vertical", reduceRumble: false }, profile: "export" | "draft" = "export") {
+export function buildRenderCommand(selections: RenderSelection[], output: string, options: ExportOptions = { aspect: "portrait913", reduceRumble: false }, profile: "export" | "draft" = "export") {
   if (!selections.length) throw new Error("Choose at least one clip for the reel.");
   const { width, height, look } = outputSettings(options, profile);
   const args = ["-hide_banner", "-y"];
@@ -70,6 +75,7 @@ export function buildRenderCommand(selections: RenderSelection[], output: string
     const duration = selection.end - selection.start;
     if (!Number.isFinite(duration) || duration < 0.1 || selection.start < 0 || selection.end > selection.asset.duration + 0.05) throw new Error(`Invalid range for ${selection.asset.name}.`);
     if (selection.framing !== undefined && !["fill", "fit"].includes(selection.framing)) throw new Error(`Choose valid framing for ${selection.asset.name}.`);
+    if (selection.focus !== undefined && (typeof selection.focus !== "number" || !Number.isFinite(selection.focus) || selection.focus < 0 || selection.focus > 1)) throw new Error(`Choose a valid focal position for ${selection.asset.name}.`);
     args.push("-ss", fixed(selection.start), "-t", fixed(duration), "-i", selection.asset.path);
     const fileInput = inputIndex++;
     let audioInput = fileInput;
@@ -86,7 +92,7 @@ export function buildRenderCommand(selections: RenderSelection[], output: string
     const audioInSeconds = fadeIn ? fadeSeconds : 0.008;
     const audioOutSeconds = fadeOut ? fadeSeconds : 0.008;
     const audioFades = `,afade=t=in:st=0:d=${fixed(audioInSeconds)},afade=t=out:st=${fixed(duration - audioOutSeconds)}:d=${fixed(audioOutSeconds)}`;
-    appendVideoFilters(filters, selection, index, fileInput, width, height, look, videoFades);
+    appendVideoFilters(filters, selection, index, fileInput, width, height, options.aspect, look, videoFades);
     filters.push(`[${audioInput}:a]aresample=48000,aformat=channel_layouts=stereo${options.reduceRumble ? ",highpass=f=80" : ""}${audioFades}[a${index}]`);
     joins.push(`[v${index}][a${index}]`);
     totalSeconds += duration;
@@ -99,7 +105,7 @@ export function buildRenderCommand(selections: RenderSelection[], output: string
 // An audio-led edit uses the same picture treatment and output codec as the standard
 // reel, but none of the picture sources' sound reaches the final soundtrack.
 export function buildAudioLedRenderCommand(videoSelections: RenderSelection[], audioSelections: AudioSelection[],
-  output: string, options: ExportOptions = { aspect: "vertical", reduceRumble: false },
+  output: string, options: ExportOptions = { aspect: "portrait913", reduceRumble: false },
   profile: "export" | "draft" = "export") {
   if (!Array.isArray(videoSelections) || !videoSelections.length) throw new Error("Choose at least one video section.");
   if (!Array.isArray(audioSelections) || !audioSelections.length) throw new Error("Choose at least one sound section.");
@@ -121,6 +127,9 @@ export function buildAudioLedRenderCommand(videoSelections: RenderSelection[], a
     if (selection.framing !== undefined && !["fill", "fit"].includes(selection.framing)) {
       throw new Error(`Choose valid framing for ${selection.asset.name}.`);
     }
+    if (selection.focus !== undefined && (typeof selection.focus !== "number" || !Number.isFinite(selection.focus) || selection.focus < 0 || selection.focus > 1)) {
+      throw new Error(`Choose a valid focal position for ${selection.asset.name}.`);
+    }
     args.push("-ss", fixed(selection.start), "-t", fixed(duration), "-i", selection.asset.path);
     const previous = index > 0 ? videoSelections[index - 1].end - videoSelections[index - 1].start : 0;
     const next = index < videoSelections.length - 1 ? videoSelections[index + 1].end - videoSelections[index + 1].start : 0;
@@ -128,7 +137,7 @@ export function buildAudioLedRenderCommand(videoSelections: RenderSelection[], a
     const fadeOut = options.transition === "fade" && index < videoSelections.length - 1 && duration >= 0.5 && next >= 0.5;
     const fadeSeconds = Math.min(0.12, duration / 5);
     const videoFades = `${fadeIn ? `,fade=t=in:st=0:d=${fixed(fadeSeconds)}` : ""}${fadeOut ? `,fade=t=out:st=${fixed(duration - fadeSeconds)}:d=${fixed(fadeSeconds)}` : ""}`;
-    appendVideoFilters(filters, selection, index, index, width, height, look, videoFades);
+    appendVideoFilters(filters, selection, index, index, width, height, options.aspect, look, videoFades);
     videoJoins.push(`[v${index}]`);
     totalSeconds += duration;
   }

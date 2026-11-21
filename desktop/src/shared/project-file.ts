@@ -41,6 +41,7 @@ function readClip(value: unknown): CreativeClip {
     !oneOf(value.selectionSource, ["suggested", "manual"] as const) ||
     (value.included && value.excludedByUser) ||
     (value.framing !== undefined && !oneOf(value.framing, ["fill", "fit"] as const)) ||
+    (value.focus !== undefined && (!isNumber(value.focus) || value.focus < 0 || value.focus > 1)) ||
     (value.label !== undefined && !isString(value.label, 100))) {
     throw new Error(`The project has an invalid section for ${asset.name}.`);
   }
@@ -49,11 +50,12 @@ function readClip(value: unknown): CreativeClip {
     selectionSource: value.selectionSource,
     ...(value.orderLocked === undefined ? {} : { orderLocked: value.orderLocked }),
     ...(value.framing === undefined ? {} : { framing: value.framing }),
+    ...(value.focus === undefined ? {} : { focus: value.focus }),
     ...(value.label === undefined ? {} : { label: value.label }) };
 }
 
 function readOptions(value: unknown): ExportOptions {
-  if (!isObject(value) || !oneOf(value.aspect, ["vertical", "landscape"] as const) ||
+  if (!isObject(value) || !oneOf(value.aspect, ["portrait913", "vertical", "landscape"] as const) ||
     typeof value.reduceRumble !== "boolean" ||
     (value.finish !== undefined && !oneOf(value.finish, ["natural", "vivid", "cinematic", "warm"] as const)) ||
     (value.transition !== undefined && !oneOf(value.transition, ["cut", "fade"] as const))) {
@@ -71,7 +73,7 @@ function readBrief(value: unknown): CreativeBriefInput {
     (value.selectionMode !== undefined && !oneOf(value.selectionMode, ["use-my-sections", "choose-for-me", "keep-and-choose"] as const)) ||
     (value.targetSeconds !== undefined && value.targetSeconds !== null &&
       (!isNumber(value.targetSeconds) || value.targetSeconds < 0.1 || value.targetSeconds > 86400)) ||
-    (value.aspect !== undefined && !oneOf(value.aspect, ["vertical", "landscape"] as const)) ||
+    (value.aspect !== undefined && !oneOf(value.aspect, ["portrait913", "vertical", "landscape"] as const)) ||
     (value.reduceRumble !== undefined && typeof value.reduceRumble !== "boolean") ||
     (value.separatePicture !== undefined && typeof value.separatePicture !== "boolean") ||
     (value.soundMomentCount !== undefined && (!isNumber(value.soundMomentCount) ||

@@ -30,6 +30,7 @@ test("project round trip retains selected ranges, locks, exclusions, brief and f
   assert.equal(normalized.clips[0].framing, "fit");
   assert.equal(normalized.clips[0].orderLocked, true);
   assert.equal(normalized.clips[1].framing, undefined, "older projects retain the default framing");
+  assert.equal(normalized.clips[0].focus, undefined, "older projects keep centered framing unless a focus was saved");
   assert.equal(normalized.version, 2, "older projects reopen in the current project format");
   assert.equal(normalized.audioSelections, null);
   assert.equal(normalized.briefDirty, false);
@@ -40,9 +41,25 @@ test("malformed projects cannot replace validated selection or export settings",
   assert.throws(() => parseProjectSnapshot({ ...project, clips: [{ ...project.clips[0], end: 80 }] }), /invalid section/);
   assert.throws(() => parseProjectSnapshot({ ...project, clips: [project.clips[0], project.clips[0]] }), /same recording/);
   assert.throws(() => parseProjectSnapshot({ ...project, clips: [{ ...project.clips[0], framing: "arbitrary" }] }), /invalid section/);
+  assert.throws(() => parseProjectSnapshot({ ...project, clips: [{ ...project.clips[0], focus: -0.1 }] }), /invalid section/);
+  assert.throws(() => parseProjectSnapshot({ ...project, clips: [{ ...project.clips[0], focus: Number.NaN }] }), /invalid section/);
   assert.throws(() => parseProjectSnapshot({ ...project, clips: [{ ...project.clips[0], orderLocked: "yes" }] }), /invalid section/);
   assert.throws(() => parseProjectSnapshot({ ...project, options: { ...project.options, finish: "shell" } }), /invalid video settings/);
   assert.throws(() => parseProjectSnapshot({ ...project, briefInput: { ...project.briefInput, targetSeconds: Number.POSITIVE_INFINITY } }), /invalid creative brief/);
+});
+
+test("9:13 projects retain focal position without changing older 9:16 projects", () => {
+  const portrait = parseProjectSnapshot({ ...project,
+    clips: [{ ...project.clips[0], framing: "fill", focus: 0.15 }, project.clips[1]],
+    options: { ...project.options, aspect: "portrait913" },
+    briefInput: { ...project.briefInput, aspect: "portrait913" },
+  });
+  assert.equal(portrait.options.aspect, "portrait913");
+  assert.equal(portrait.briefInput.aspect, "portrait913");
+  assert.equal(portrait.clips[0].focus, 0.15);
+  assert.deepEqual(parseProjectSnapshot(JSON.parse(JSON.stringify(portrait))), portrait);
+  const oldPortrait = parseProjectSnapshot({ ...project, options: { ...project.options, aspect: "vertical" } });
+  assert.equal(oldPortrait.options.aspect, "vertical");
 });
 
 test("v2 saves independent sound moments and an unfinished edit without losing recoverable work", () => {

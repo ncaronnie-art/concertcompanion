@@ -24,7 +24,7 @@ function samples(file: string) {
   });
 }
 
-test("bundled FFmpeg renders a decodable vertical H.264/AAC MP4 from synthetic sources", async () => {
+test("bundled FFmpeg renders a decodable 9:13 H.264/AAC MP4 from synthetic sources", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "concert-compass-"));
   try {
     const first = path.join(root, "first.mp4"), second = path.join(root, "second.mp4"), output = path.join(root, "reel.mp4");
@@ -37,7 +37,7 @@ test("bundled FFmpeg renders a decodable vertical H.264/AAC MP4 from synthetic s
     const metadata = JSON.parse(await execute(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,width,height", "-of", "json", output]));
     const video = metadata.streams.find((stream: { codec_type: string }) => stream.codec_type === "video");
     const audio = metadata.streams.find((stream: { codec_type: string }) => stream.codec_type === "audio");
-    assert.equal(video.codec_name, "h264"); assert.equal(video.width, 720); assert.equal(video.height, 1280);
+    assert.equal(video.codec_name, "h264"); assert.equal(video.width, 720); assert.equal(video.height, 1040);
     assert.equal(audio.codec_name, "aac"); assert.ok(Math.abs(Number(metadata.format.duration) - 4) < 0.2);
     await execute(ffmpegPath as unknown as string, ["-v", "error", "-i", output, "-f", "null", "-"]);
     const silent = path.join(root, "silent.mp4"), mixed = path.join(root, "mixed.mp4");

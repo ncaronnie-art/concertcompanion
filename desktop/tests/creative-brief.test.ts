@@ -8,6 +8,20 @@ const recording = (number: number, extra: Partial<CreativeClip> = {}): CreativeC
   start: 39, end: 51, included: true, selectionSource: "suggested", locked: false, excludedByUser: false, ...extra,
 });
 
+test("portrait 9:13 stays the default while explicit shapes remain available", () => {
+  const clips = [recording(1)];
+  const portrait = { aspect: "portrait913" as const, reduceRumble: false };
+  assert.equal(interpretCreativeBrief({ description: "A clean recap" }, clips, portrait).aspect, "portrait913");
+  assert.match(interpretCreativeBrief({ description: "A clean recap" }, clips, portrait).summary, /portrait 9:13/);
+  assert.equal(interpretCreativeBrief({ description: "Make it vertical" }, clips, options).aspect, "portrait913");
+  assert.equal(interpretCreativeBrief({ description: "Use 9:13" }, clips, options).aspect, "portrait913");
+  assert.equal(interpretCreativeBrief({ description: "Use 9:16" }, clips, portrait).aspect, "vertical");
+  assert.equal(interpretCreativeBrief({ description: "Use 16:9" }, clips, portrait).aspect, "landscape");
+  assert.equal(interpretCreativeBrief({ description: "Use 9:13", aspect: "landscape" }, clips, portrait).aspect, "landscape");
+  const subjectRequest = interpretCreativeBrief({ description: "Automatically center the crop on the singer" }, clips, portrait);
+  assert.match(subjectRequest.limitations.join(" "), /cannot identify or follow a performer/);
+});
+
 test("plain brief uses existing manual section, parses a length, and asks before shortening protected footage", () => {
   const clips = [recording(1, { start: 5, end: 185, asset: { ...recording(1).asset, duration: 240 }, selectionSource: "manual", locked: true }), recording(2)];
   const brief = interpretCreativeBrief({ description: "Give me a two-minute recap of the whole night. Make it energetic, include several songs, and keep the section I marked. Vertical." }, clips, options);

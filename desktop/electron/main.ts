@@ -76,6 +76,9 @@ function createWindow() {
         };
         await waitFor(`document.body.innerText.includes('${smokeStory ? "3" : "2"} selected')`, "import");
         smokeStage("videos imported");
+        const defaultShape = await win.webContents.executeJavaScript(`document.querySelector('.options button[aria-pressed="true"]')?.textContent`);
+        if (!defaultShape?.includes("9:13")) throw new Error(`New-project portrait default was wrong: ${defaultShape}`);
+        smokeStage("portrait 9:13 default ready");
         await waitFor(`(() => { const v = document.querySelector('video'); return v && v.videoWidth > 0 && v.readyState >= 2 })()`, "video picture");
         smokeStage("source picture ready");
         const picture = await win.webContents.executeJavaScript(`(() => { try { const v=document.querySelector('video'), c=document.createElement('canvas'); c.width=8; c.height=8; c.getContext('2d').drawImage(v,0,0,8,8); return Array.from(c.getContext('2d').getImageData(0,0,8,8).data).some((n,i)=>i%4!==3 && n>20) } catch(e) { return String(e) } })()`);
@@ -122,19 +125,40 @@ function createWindow() {
         await waitFor(`(() => { const v=document.querySelector('.draft-player'); return v && v.videoWidth > 0 && v.readyState >= 1 })()`, "assembled draft picture");
         smokeStage("draft picture ready");
         const draftSize = await win.webContents.executeJavaScript(`(() => { const v=document.querySelector('.draft-player'); return [v.videoWidth,v.videoHeight] })()`);
-        if (draftSize[0] !== 360 || draftSize[1] !== 640) throw new Error(`Draft video shape was wrong: ${draftSize}`);
+        if (draftSize[0] !== 360 || draftSize[1] !== 520) throw new Error(`9:13 draft video shape was wrong: ${draftSize}`);
+        await win.webContents.executeJavaScript(`document.querySelector('.draft-player').currentTime = 0.4`);
+        await waitFor(`(() => { const v=document.querySelector('.draft-player'); return !v.seeking && Math.abs(v.currentTime - 0.4) < 0.15 && v.readyState >= 2 })()`, "portrait draft frame");
+        const centerCropEdge = await win.webContents.executeJavaScript(`(() => { const v=document.querySelector('.draft-player'), c=document.createElement('canvas'); c.width=v.videoWidth; c.height=v.videoHeight; const x=c.getContext('2d'); x.drawImage(v,0,0); return Array.from(x.getImageData(5,Math.floor(v.videoHeight/2),1,1).data).slice(0,3) })()`);
+        if (centerCropEdge[0] < 60 || centerCropEdge[0] < centerCropEdge[2] * 1.5 || centerCropEdge[0] < centerCropEdge[1] * 1.5) throw new Error(`Default portrait framing did not fill from the center: ${centerCropEdge}`);
+        smokeStage("landscape source filled portrait frame");
         const protectedStart = await win.webContents.executeJavaScript(`(() => { const clip = document.querySelectorAll('.clips article')[1]; if (!clip.querySelector('.trim-heading input[type=checkbox]').checked) throw new Error('Marked section was unlocked'); return Number(clip.querySelector('input[aria-label$=" start"]').value) })()`);
         if (protectedStart < 0.8 || protectedStart > 1.2) throw new Error(`Marked section moved: ${protectedStart}`);
+        await win.webContents.executeJavaScript(`(() => { const input=document.querySelector('.clips article input[aria-label^="Aim portrait crop for "]'); if (!input) throw new Error('Portrait aim control was missing'); const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set; set.call(input,'0'); input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+        await waitFor(`document.querySelector('.clips article input[aria-label^="Aim portrait crop for "]')?.value === '0' && !!document.querySelector('.draft-stale')`, "portrait aim change");
+        await win.webContents.executeJavaScript(`document.querySelector('.draft-heading button').click()`);
+        await waitFor(`document.body.innerText.includes('Draft preview is ready') && !!document.querySelector('.draft-player') && !document.querySelector('.draft-stale')`, "aimed portrait draft");
+        await waitFor(`(() => { const v=document.querySelector('.draft-player'); return v.videoWidth === 360 && v.videoHeight === 520 && v.readyState >= 1 })()`, "aimed portrait picture");
+        await win.webContents.executeJavaScript(`document.querySelector('.draft-player').currentTime = 0.4`);
+        await waitFor(`(() => { const v=document.querySelector('.draft-player'); return !v.seeking && Math.abs(v.currentTime - 0.4) < 0.15 && v.readyState >= 2 })()`, "aimed portrait frame");
+        const leftCropEdge = await win.webContents.executeJavaScript(`(() => { const v=document.querySelector('.draft-player'), c=document.createElement('canvas'); c.width=v.videoWidth; c.height=v.videoHeight; const x=c.getContext('2d'); x.drawImage(v,0,0); return Array.from(x.getImageData(5,Math.floor(v.videoHeight/2),1,1).data).slice(0,3) })()`);
+        if (leftCropEdge[2] < 60 || leftCropEdge[2] < leftCropEdge[0] * 1.5 || leftCropEdge[2] < leftCropEdge[1] * 1.5) throw new Error(`Portrait aim did not shift the rendered crop left: ${leftCropEdge}`);
+        smokeStage("portrait aim changed rendered picture");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Widescreen')).click(); document.querySelector('.options input[type=checkbox]').click()`);
         await waitFor(`!!document.querySelector('.draft-stale')`, "draft invalidation after settings change");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Save project').click()`);
         await waitFor(`document.body.innerText.includes('Project saved:')`, "project save");
         await access(process.env.COMPASS_SMOKE_PROJECT!);
+        const savedProject = JSON.parse(await readFile(process.env.COMPASS_SMOKE_PROJECT!, "utf8"));
+        if (savedProject.clips?.find((clip: { asset: MediaAsset }) => clip.asset.name.includes("compass-second"))?.focus !== 0) throw new Error("Saved project lost portrait aim.");
         smokeStage("project saved");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Open project').click()`);
         await waitFor(`document.body.innerText.includes('Project opened. Your sections and protected moments are ready.')`, "project open");
         const restored = await win.webContents.executeJavaScript(`(() => ({ description: document.querySelector('.brief textarea').value, locked: document.querySelectorAll('.clips article')[1].querySelector('.trim-heading input[type=checkbox]').checked, aspect: document.querySelector('.options button[aria-pressed="true"]').textContent, rumble: document.querySelector('.options input[type=checkbox]').checked }))()`);
         if (!restored.description.includes('energetic recap') || !restored.locked || !restored.aspect.includes('Widescreen') || !restored.rumble) throw new Error(`Project restore failed: ${JSON.stringify(restored)}`);
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.options button')).find(b => b.textContent.includes('9:13')).click()`);
+        await waitFor(`document.querySelector('.clips article input[aria-label^="Aim portrait crop for "]')?.value === '0'`, "restored portrait aim");
+        smokeStage("portrait aim survived project reopen");
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.options button')).find(b => b.textContent.includes('Widescreen')).click()`);
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Export MP4')).click()`);
         await waitFor(`(() => { const p = document.querySelector('.status progress'); return p && p.value > 0 && p.value < 1 })()`, "export progress");
         await win.webContents.executeJavaScript(`document.querySelector('.stop').click()`);
@@ -222,7 +246,7 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
 
   await win.webContents.executeJavaScript(`document.querySelector('.draft-heading button').click()`);
   await waitFor(`document.body.innerText.includes('Draft preview is ready')`, "sound-led draft render");
-  await waitFor(`(() => { const v=document.querySelector('.draft-player'); return v && v.videoWidth === 360 && v.videoHeight === 640 && v.readyState >= 1 })()`, "sound-led draft picture");
+  await waitFor(`(() => { const v=document.querySelector('.draft-player'); return v && v.videoWidth === 360 && v.videoHeight === 520 && v.readyState >= 1 })()`, "sound-led 9:13 draft picture");
   smokeStage("story draft picture ready");
 
   await win.webContents.executeJavaScript(`document.querySelector('.soundtrack-list li .sound-actions button:nth-child(2)').click()`);
@@ -236,13 +260,13 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
   smokeStage("story sound adjusted");
   await win.webContents.executeJavaScript(`document.querySelector('.draft-heading button').click()`);
   await waitFor(`document.body.innerText.includes('Draft preview is ready')`, "adjusted sound-led draft render");
-  await waitFor(`(() => { const v=document.querySelector('.draft-player'); return v && v.videoWidth === 360 && v.videoHeight === 640 && v.readyState >= 1 })()`, "adjusted sound-led draft picture");
+  await waitFor(`(() => { const v=document.querySelector('.draft-player'); return v && v.videoWidth === 360 && v.videoHeight === 520 && v.readyState >= 1 })()`, "adjusted sound-led 9:13 draft picture");
   smokeStage("story adjusted draft picture ready");
 
   await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Save project').click()`);
   await waitFor(`document.body.innerText.includes('Project saved:')`, "sound-led project save");
   const saved = JSON.parse(await readFile(process.env.COMPASS_SMOKE_PROJECT!, "utf8"));
-  if (saved.version !== 2 || saved.audioSelections?.length !== 3 || saved.options?.reduceRumble !== true ||
+  if (saved.version !== 2 || saved.audioSelections?.length !== 3 || saved.options?.aspect !== "portrait913" || saved.options?.reduceRumble !== true ||
     saved.briefInput?.separatePicture !== true || saved.briefInput?.soundMomentCount !== 3 ||
     saved.briefInput?.pictureSourceCount !== 2 || !saved.briefInput?.description.includes("three sound moments")) {
     throw new Error("Saved project lost the explicit soundtrack or picture counts, brief, or sound moments.");
@@ -265,7 +289,7 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
   const probe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,width,height,duration", "-of", "json", process.env.COMPASS_SMOKE_OUTPUT!]));
   const video = probe.streams?.find((stream: { codec_type: string }) => stream.codec_type === "video");
   const audio = probe.streams?.find((stream: { codec_type: string }) => stream.codec_type === "audio");
-  if (video?.codec_name !== "h264" || video.width !== 720 || video.height !== 1280 || audio?.codec_name !== "aac" ||
+  if (video?.codec_name !== "h264" || video.width !== 720 || video.height !== 1040 || audio?.codec_name !== "aac" ||
     Math.abs(Number(probe.format?.duration) - 6) > 0.25 || Number(audio.duration) < 5.85) {
     throw new Error(`Sound-led MP4 did not have six seconds of picture and sound: ${JSON.stringify(probe)}`);
   }
@@ -530,4 +554,3 @@ app.on("before-quit", (event) => {
   event.preventDefault(); cleaning = true;
   void rm(previewDirectory, { recursive: true, force: true }).catch(() => {}).finally(() => app.quit());
 });
-

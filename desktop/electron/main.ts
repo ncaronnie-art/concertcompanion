@@ -67,7 +67,12 @@ function createWindow() {
             if (await win.webContents.executeJavaScript(expression)) return;
             await new Promise((resolve) => setTimeout(resolve, 200));
           }
-          throw new Error(`Timed out waiting for ${label}`);
+          const detail = await win.webContents.executeJavaScript(`({
+            status: document.querySelector('.status')?.innerText,
+            conflict: document.querySelector('.brief-review .conflict')?.innerText,
+            firstCutError: document.querySelector('.brief-review .story-error')?.innerText
+          })`).catch(() => null);
+          throw new Error(`Timed out waiting for ${label}: ${JSON.stringify(detail)}`);
         };
         await waitFor(`document.body.innerText.includes('${smokeStory ? "3" : "2"} selected')`, "import");
         smokeStage("videos imported");

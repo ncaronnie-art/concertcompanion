@@ -122,12 +122,24 @@ jobs:
           Get-Content "$env:RUNNER_TEMP\story-stdout.log" -ErrorAction SilentlyContinue
           Get-Content "$env:RUNNER_TEMP\story-stderr.log" -ErrorAction SilentlyContinue
           if (-not $finished) { Stop-Process -Id $process.Id -Force; throw 'Sound-led desktop app timed out.' }
-          if ($process.ExitCode -ne 0) { throw "Sound-led desktop app failed with exit code $($process.ExitCode)." }
+          if ($process.ExitCode -ne 0) {
+            $failure = $stages | Where-Object { $_ -match 'desktop smoke test failed:' } | Select-Object -Last 1
+            if ($failure) {
+              $escaped = $failure -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+              Write-Output "::error title=Sound-led desktop failure::$escaped"
+            }
+            throw "Sound-led desktop app failed with exit code $($process.ExitCode)."
+          }
       - name: Check sound-led brief
         if: always() && steps.sound_story.outcome != 'skipped'
         shell: pwsh
         run: |
           if (-not (Select-String -Path "$env:RUNNER_TEMP\story-stages.log" -Pattern 'story brief reviewed' -Quiet -ErrorAction SilentlyContinue)) { throw 'Soundtrack and picture plan was not confirmed.' }
+      - name: Check sound-led first cut
+        if: always() && steps.sound_story.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\story-stages.log" -Pattern 'story first cut planned' -Quiet -ErrorAction SilentlyContinue)) { throw 'Three sound moments and picture sources were not selected.' }
       - name: Check three sound moments and draft
         if: always() && steps.sound_story.outcome != 'skipped'
         shell: pwsh

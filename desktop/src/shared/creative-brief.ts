@@ -13,6 +13,7 @@ export type CreativeClip = RenderSelection & {
   included: boolean;
   selectionSource: "suggested" | "manual";
   locked: boolean;
+  orderLocked?: boolean;
   excludedByUser: boolean;
   label?: string;
 };
@@ -25,13 +26,17 @@ export type CreativeBriefInput = {
   targetSeconds?: number | null;
   aspect?: ExportOptions["aspect"];
   reduceRumble?: boolean;
+  separatePicture?: boolean;
+  soundMomentCount?: number;
+  pictureSourceCount?: number;
   customVibe?: string;
 };
 
 export type BriefConflict = {
   kind: "protected-over-target" | "one-song-multiple-sections" | "one-song-choose-recording" |
     "intact-vs-marked" | "insufficient-footage" | "no-marked-sections" |
-    "audio-story-no-sound" | "audio-story-picture-variety" | "audio-story-locked-count" |
+    "audio-story-no-sound" | "audio-story-picture-variety" | "audio-story-picture-count" |
+    "audio-story-all-picture-protected" | "audio-story-picture-mode" | "audio-story-locked-count" |
     "audio-story-silent-lock" | "audio-story-insufficient-audio" | "audio-story-short-target";
   message: string;
   requestedSeconds?: number;
@@ -45,6 +50,7 @@ export type CreativeBrief = {
   selectionMode: SelectionMode;
   keepWholePerformance: boolean;
   soundtrackIntent: SoundtrackIntent | null;
+  pictureSourceCount: number | null;
   targetSeconds: number | null;
   aspect: ExportOptions["aspect"];
   customVibe: string;
@@ -106,30 +112,60 @@ function parsedVibe(text: string): Vibe | undefined {
   if (/\bnostalgic\b|\bmemory\b/i.test(text)) return "nostalgic";
   if (/\bintimate\b|\bquiet\b/i.test(text)) return "intimate";
   // Cleaning sound is an audio request, not a request to change the picture's vibe.
-  const withoutAudio = text.replace(/\bclean(?:ed|ing)?\s+(?:up\s+)?(?:the\s+)?(?:audio|sound)\b/gi, "");
+  const withoutAudio = text.replace(/\bclean(?:ed|er|ing)?\s+(?:up\s+)?(?:the\s+)?(?:audio|sound)\b/gi, "")
+    .replace(/\b(?:audio|sound)\s+clean(?:ed|er|ing|up)?\b/gi, "");
   if (/\bclean\b|\blive\b|\bnatural\b/i.test(withoutAudio)) return "clean-live";
 }
 
 function requestsCleanup(text: string): boolean {
-  return /\b(?:clean|cleaning|cleaned|tidy|improve|fix|enhance|polish)(?:\s+up)?\s+(?:the\s+)?(?:audio|sound)\b|\b(?:audio|sound)\s+clean(?:ing|up)?\b|\breduce\s+(?:low\s+)?rumble\b|\bremove\s+(?:the\s+)?(?:crowd|voices|noise)\b/i.test(text);
+  return /\b(?:clean|cleaner|cleaning|cleaned|tidy|improve|fix|enhance|polish)(?:\s+up)?\s+(?:the\s+)?(?:audio|sound)\b|\b(?:audio|sound)\s+clean(?:ed|er|ing|up)?\b|\breduce\s+(?:low\s+)?rumble\b|\bremove\s+(?:the\s+)?(?:crowd|voices|noise)\b/i.test(text);
 }
 
-function parsedSoundtrackIntent(text: string, cleanupRequested: boolean): SoundtrackIntent | null {
+function parsedSoundtrackIntent(text: string, cleanupRequested: boolean,
+  separatePictureOverride?: boolean, soundMomentOverride?: number): SoundtrackIntent | null {
   const number = "(\\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)";
-  const direct = text.match(new RegExp(`\\b${number}[\\s-]+(?:audio|sound|soundtrack)[\\s-]+(?:clips?|moments?|segments?|sections?)\\b`, "i"));
-  const reversed = text.match(new RegExp(`\\b${number}[\\s-]+(?:clips?|moments?|segments?|sections?)[\\s-]+of[\\s-]+(?:audio|sound)\\b`, "i"));
+  const unit = "(?:clips?|moments?|segments?|sections?|pieces?|parts?|recordings?)";
+  const sound = "(?:audio|sound|soundtrack)";
+  const countPatterns = [
+    `\\b${number}[\\s-]+${sound}[\\s-]+${unit}\\b`,
+    `\\b${number}[\\s-]+${unit}[\\s-]+(?:of|for|from)[\\s-]+(?:the[\\s-]+)?${sound}\\b`,
+    `\\b${sound}[\\s-]+(?:from|across|using)[\\s-]+${number}[\\s-]+(?:clips?|recordings?|videos?|sources?)\\b`,
+    `\\b(?:use|feature|include|choose|select)[\\s-]+${number}[\\s-]+${unit}[\\s-]+(?:for|as)[\\s-]+(?:the[\\s-]+)?${sound}\\b`,
+  ];
   const spoken: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
-  const countText = (direct ?? reversed)?.[1]?.toLowerCase();
-  const requestedCount = countText === undefined ? null : spoken[countText] ?? Number(countText);
+  const countText = countPatterns.map((pattern) => text.match(new RegExp(pattern, "i"))?.[1])
+    .find((match) => match !== undefined)?.toLowerCase();
+  const requestedCount = soundMomentOverride ?? (countText === undefined ? null : spoken[countText] ?? Number(countText));
   if (requestedCount !== null && (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 12)) {
     throw new Error("Choose between one and twelve sound moments.");
   }
-  const buildEnding = /\bcrescendo\b|\bbuild(?:ing|s)?\s+(?:up\s+)?(?:to|toward|into)\s+(?:a\s+)?(?:strong|big|loud|energetic|climax)|\b(?:strongest|loudest|biggest)\s+(?:ending|finish)|\bend(?:ing)?\s+(?:on|with)\s+(?:the\s+)?(?:strongest|loudest|biggest|most energetic)/i.test(text);
-  const multiplePictures = /\b(?:video|footage|shots?|visuals?)\b.{0,90}\b(?:multiple|several|different)\s+(?:video\s+)?(?:clips?|recordings?|shots?)\b/i.test(text);
-  const separatePicture = (multiplePictures && (requestedCount !== null || /\b(?:on top|over|under|soundtrack|audio|sound)\b/i.test(text))) ||
-    /\b(?:b-roll|cutaways?)\b.{0,60}\b(?:over|on top|soundtrack|audio|sound)\b/i.test(text);
+  const buildEnding = /\bcrescendo\b|\bbuild(?:ing|s)?\s+(?:up\s+)?(?:to|toward|into)\s+(?:a\s+)?(?:strong|big|loud|energetic|climax)|\b(?:stronger|strongest|louder|loudest|bigger|biggest|more energetic)\s+(?:ending|finish|finale)|\bend(?:ing)?\s+(?:on|with)\s+(?:the\s+)?(?:strongest|loudest|biggest|most energetic|a build)|\bbuild(?:ing)?\s+(?:up\s+)?(?:at|in)\s+the\s+end/i.test(text);
+  const visualBeforeSources = /\b(?:video|footage|shots?|visuals?)\b.{0,90}\b(?:multiple|several|different|various)\s+(?:(?:video|visual)\s+)?(?:clips?|recordings?|videos?|shots?)\b/i.test(text);
+  const sourcesBeforeVisual = /\b(?:multiple|several|different|various)\s+(?:(?:video|visual)\s+)?(?:clips?|recordings?|videos?|shots?)\b.{0,60}\b(?:video|footage|visuals?|shots?)\b/i.test(text);
+  const videoClips = /\b(?:multiple|several|different|various)\s+(?:video|visual)\s+(?:clips?|recordings?|shots?)\b/i.test(text);
+  const showingSources = /\b(?:show|use|mix|overlay|cut between|pull from)\b.{0,50}\b(?:multiple|several|different|various)\s+(?:video\s+)?(?:clips?|recordings?|videos?|shots?)\b/i.test(text);
+  const multiplePictures = visualBeforeSources || sourcesBeforeVisual || videoClips || showingSources ||
+    /\b(?:video|footage|picture|visuals?)\b.{0,45}\b(?:from|across|using)\s+(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:different\s+)?(?:videos?|clips?|recordings?|sources?)\b/i.test(text) ||
+    /\b(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:different\s+)?(?:video\s+clips?|videos?|recordings?)\b.{0,45}\b(?:picture|footage|video|visuals?)\b/i.test(text);
+  const layeredWithSound = /\b(?:over|under|beneath|on top of)\s+(?:the\s+)?(?:audio|sound|soundtrack|music)\b|\b(?:audio|sound|soundtrack|music)\s+(?:under|beneath)\s+(?:the\s+)?(?:video|footage|visuals?)\b|\bwhile\s+(?:the\s+)?(?:audio|sound|soundtrack|music)\s+plays\b/i.test(text);
+  const bRollWithSound = /\b(?:b-roll|cutaways?)\b.{0,60}\b(?:over|on top|soundtrack|audio|sound)\b/i.test(text);
+  const separatePicture = separatePictureOverride ??
+    ((multiplePictures && (requestedCount !== null || layeredWithSound)) || bRollWithSound);
   if (requestedCount === null && !buildEnding && !separatePicture) return null;
-  return { segmentCount: requestedCount ?? (buildEnding ? 3 : 1), buildEnding, separatePicture, cleanupRequested };
+  return { segmentCount: requestedCount ?? (buildEnding || separatePicture ? 3 : 1),
+    buildEnding, separatePicture, cleanupRequested };
+}
+
+function parsedPictureSourceCount(text: string): number | null {
+  const number = "(\\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten)";
+  const patterns = [
+    `\\b(?:video|footage|picture|visuals?)\\b.{0,45}\\b(?:from|across|using)\\s+${number}\\s+(?:different\\s+)?(?:videos?|clips?|recordings?|sources?)\\b`,
+    `\\b${number}\\s+(?:different\\s+)?(?:video\\s+clips?|videos?|recordings?|picture\\s+sources?)\\b`,
+  ];
+  const found = patterns.map((pattern) => text.match(new RegExp(pattern, "i"))?.[1]).find(Boolean);
+  if (!found) return null;
+  const spoken: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+  return spoken[found.toLowerCase()] ?? Number(found);
 }
 
 function parsedSelection(text: string): SelectionMode | undefined {
@@ -165,9 +201,16 @@ function supportedLimits(text: string, type: VideoType, vibe: Vibe, customVibe: 
 
 export function interpretCreativeBrief(input: CreativeBriefInput, clips: CreativeClip[], current: ExportOptions): CreativeBrief {
   validateClips(clips);
+  if (input.separatePicture !== undefined && typeof input.separatePicture !== "boolean") {
+    throw new Error("Choose a valid separate soundtrack and picture setting.");
+  }
+  if (input.soundMomentCount !== undefined && (!Number.isInteger(input.soundMomentCount) ||
+    input.soundMomentCount < 1 || input.soundMomentCount > 12)) throw new Error("Choose between one and twelve sound moments.");
+  if (input.pictureSourceCount !== undefined && (!Number.isInteger(input.pictureSourceCount) ||
+    input.pictureSourceCount < 1)) throw new Error("Choose a whole number of picture recordings.");
   const description = (input.description || "").trim();
   const cleanupRequested = requestsCleanup(description);
-  const soundtrackIntent = parsedSoundtrackIntent(description, cleanupRequested);
+  const soundtrackIntent = parsedSoundtrackIntent(description, cleanupRequested, input.separatePicture, input.soundMomentCount);
   const videoType = input.videoType ?? parsedType(description) ?? "highlight";
   const requestedVibe = input.vibe ?? parsedVibe(description);
   const vibe = requestedVibe ?? "clean-live";
@@ -179,7 +222,7 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
     !["use-my-sections", "choose-for-me", "keep-and-choose"].includes(selectionMode)) {
     throw new Error("Choose supported video, vibe, and section options.");
   }
-  const targetSeconds = input.targetSeconds === undefined ? parseSeconds(description) : input.targetSeconds;
+  let targetSeconds = input.targetSeconds === undefined ? parseSeconds(description) : input.targetSeconds;
   if (targetSeconds !== null && (!Number.isFinite(targetSeconds) || targetSeconds < 0.1 || targetSeconds > 86400)) throw new Error("Choose a length between one second and 24 hours.");
   const aspect = input.aspect ?? (/\b(horizontal|widescreen|landscape|16:9)\b/i.test(description) ? "landscape" : /\b(vertical|portrait|9:16)\b/i.test(description) ? "vertical" : current.aspect);
   if (!["vertical", "landscape"].includes(aspect)) throw new Error("Choose a valid video shape.");
@@ -192,11 +235,24 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   const markedClips = clips.filter((clip) => clip.included && !clip.excludedByUser && (clip.locked || clip.selectionSource === "manual"));
   const eligible = clips.filter((clip) => !clip.excludedByUser);
   const active = eligible.filter((clip) => clip.included);
+  const pictureSourceCount = soundtrackIntent?.separatePicture ?
+    input.pictureSourceCount ?? parsedPictureSourceCount(description) ?? Math.min(3, eligible.length) : null;
+  const naturalMultiplePictures = /\b(?:multiple|several|different|various)\s+(?:(?:video|visual)\s+)?(?:clips?|recordings?|videos?|shots?)\b/i.test(description) &&
+    /\b(?:video|footage|picture|visuals?|shots?)\b/i.test(description);
   const oneSongChoice = markedClips[0] ?? active[0] ?? eligible[0];
   const markedPartial = keepWholePerformance && markedClips.length === 1 &&
     (markedClips[0].start > 0.05 || markedClips[0].end < markedClips[0].asset.duration - 0.05);
   const protectedSeconds = selectionMode === "use-my-sections" ? total(markedClips) :
     keepWholePerformance && oneSongChoice ? oneSongChoice.asset.duration : total(protectedClips);
+  if (targetSeconds === null && soundtrackIntent?.separatePicture && pictureSourceCount !== null) {
+    const unmarkedCount = Math.max(0, pictureSourceCount - markedClips.length);
+    const pictureCapacity = protectedSeconds + eligible.filter((clip) => !markedClips.includes(clip))
+      .map((clip) => clip.asset.duration).sort((a, b) => b - a).slice(0, unmarkedCount)
+      .reduce((sum, seconds) => sum + seconds, 0);
+    const suggestedTarget = selectionMode === "use-my-sections" ? protectedSeconds :
+      Math.max(protectedSeconds, Math.min(total(clips), pictureCapacity));
+    if (suggestedTarget >= 0.1) targetSeconds = suggestedTarget;
+  }
   const availableSeconds = selectionMode === "use-my-sections" ? total(markedClips) : videoType === "one-song" ?
     (keepWholePerformance ? oneSongChoice?.asset.duration ?? 0 : markedClips.length ? protectedSeconds : oneSongChoice?.asset.duration ?? 0) :
     protectedSeconds + eligible.filter((clip) => !protectedClips.includes(clip)).reduce((sum, clip) => sum + clip.asset.duration, 0);
@@ -223,6 +279,9 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
       `There is ${time(availableSeconds)} available without changing marked sections or repeating footage, less than ${time(targetSeconds)}. Choose a shorter length or add recordings.`;
     conflict = { kind: "insufficient-footage", message, requestedSeconds: targetSeconds, availableSeconds };
   }
+  if (!conflict && input.pictureSourceCount !== undefined && !soundtrackIntent?.separatePicture) {
+    conflict = { kind: "audio-story-picture-mode", message: "A picture recording count needs a separate picture-over-sound edit. Turn that on, or clear the picture count." };
+  }
   if (!conflict && soundtrackIntent) {
     const audioClips = eligible.filter((clip) => clip.asset.hasAudio);
     const locked = markedClips;
@@ -230,8 +289,27 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
     const audioSeconds = audioClips.reduce((sum, clip) => sum + clip.asset.duration, 0);
     if (!audioClips.length) {
       conflict = { kind: "audio-story-no-sound", message: "These recordings have no sound for a soundtrack. Add a recording with audio or use the standard edit." };
-    } else if (soundtrackIntent.separatePicture && (eligible.length < 2 || requiredSeconds < 0.2)) {
-      conflict = { kind: "audio-story-picture-variety", message: "To show footage from multiple recordings over the sound, import or include at least two videos and allow enough time for both." };
+    } else if (soundtrackIntent.separatePicture && pictureSourceCount !== null &&
+      (pictureSourceCount > eligible.length || pictureSourceCount < locked.length)) {
+      conflict = { kind: "audio-story-picture-count", message: pictureSourceCount > eligible.length ?
+        `You asked for ${pictureSourceCount} picture recordings, but only ${eligible.length} are available. Import more videos, lower the count, or include an excluded recording.` :
+        `${locked.length} recordings have protected picture and original sound, more than the ${pictureSourceCount} picture recordings requested. Raise the picture count or unlock a marked section.` };
+    } else if (soundtrackIntent.separatePicture && active.length > 0 &&
+      active.every((clip) => clip.locked || clip.selectionSource === "manual") &&
+      requiredSeconds <= total(active) + 0.05) {
+      conflict = { kind: "audio-story-all-picture-protected", message:
+        "Every picture section in this cut is protected with its original sound, leaving no room for different footage over the soundtrack. Unlock a section, or import an unmarked video and extend the length, then review the plan." };
+    } else if (soundtrackIntent.separatePicture && input.pictureSourceCount === undefined &&
+      naturalMultiplePictures && eligible.length < 2) {
+      conflict = { kind: "audio-story-picture-variety", message: "To show footage from multiple recordings over the sound, import or include at least two videos." };
+    } else if (soundtrackIntent.separatePicture && pictureSourceCount !== null &&
+      requiredSeconds + 0.05 < protectedSeconds + Math.max(0, pictureSourceCount - locked.length) * 0.1) {
+      conflict = { kind: "audio-story-picture-count", message: `There is not enough time for ${pictureSourceCount} picture recordings while keeping your marked sections. Choose a longer video or fewer picture recordings.` };
+    } else if (soundtrackIntent.separatePicture && pictureSourceCount !== null &&
+      requiredSeconds > protectedSeconds + eligible.filter((clip) => !locked.includes(clip))
+        .map((clip) => clip.asset.duration).sort((a, b) => b - a)
+        .slice(0, Math.max(0, pictureSourceCount - locked.length)).reduce((sum, seconds) => sum + seconds, 0) + 0.05) {
+      conflict = { kind: "audio-story-picture-count", message: `The chosen ${pictureSourceCount} picture recordings cannot fill ${time(requiredSeconds)} without repeating footage. Use more picture recordings or choose a shorter video.` };
     } else if (locked.some((clip) => !clip.asset.hasAudio)) {
       conflict = { kind: "audio-story-silent-lock", message: "A protected section has no original sound. Unlock it or use the standard edit before making this soundtrack-led cut." };
     } else if (locked.length > soundtrackIntent.segmentCount ||
@@ -250,12 +328,12 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   const variety = /\b(several|multiple|different|many) songs?\b/i.test(description) ? labeledSongs > 1 ? " · your labeled songs" : " · several recordings" : "";
   const naturalSeconds = keepWholePerformance && oneSongChoice ? oneSongChoice.asset.duration :
     selectionMode === "use-my-sections" || videoType === "one-song" && markedClips.length ? protectedSeconds : total(clips);
-  const soundSummary = soundtrackIntent ? ` · ${soundtrackIntent.segmentCount} audio moments${cleanupRequested ? options.reduceRumble ? " with low-rumble reduction" : " with low-rumble reduction off" : ""}${soundtrackIntent.buildEnding ? " · aiming for a sound-energy build toward the strongest measured ending" : ""}${soundtrackIntent.separatePicture ? " · picture from multiple recordings over the soundtrack" : ""}` : "";
+  const soundSummary = soundtrackIntent ? ` · ${soundtrackIntent.segmentCount} audio moments${cleanupRequested ? options.reduceRumble ? " with low-rumble reduction" : " with low-rumble reduction off" : ""}${soundtrackIntent.buildEnding ? " · aiming for a sound-energy build toward the strongest measured ending" : ""}${soundtrackIntent.separatePicture ? ` · picture from ${pictureSourceCount} recording${pictureSourceCount === 1 ? "" : "s"} over the soundtrack` : ""}` : "";
   const summary = `${time(targetSeconds ?? naturalSeconds)} ${typeLabel[videoType]}${variety} · ${vibe === "clean-live" ? "clean/live" : vibe} pacing · ${options.finish} look · ${options.transition === "fade" ? "soft joins" : "direct cuts"} · ${aspect === "landscape" ? "horizontal" : "vertical"} · ${preserved}${soundSummary}.`;
   const limitations = supportedLimits(description, videoType, vibe, customVibe, labeledSongs, cleanupRequested, options.reduceRumble, soundtrackIntent);
   if (soundtrackIntent?.buildEnding && markedClips.length) limitations.push("Your marked sections keep their place and original sound; they may limit how steadily the energy rises.");
   if (vibe === "energetic" && eligible.length < 2) limitations.push("Quicker cuts need multiple recordings; this cut keeps the available footage continuous.");
-  return { description, videoType, vibe, selectionMode, keepWholePerformance, soundtrackIntent, targetSeconds, aspect, customVibe, summary, limitations, conflict, options };
+  return { description, videoType, vibe, selectionMode, keepWholePerformance, soundtrackIntent, pictureSourceCount, targetSeconds, aspect, customVibe, summary, limitations, conflict, options };
 }
 
 function pace(vibe: Vibe): number {

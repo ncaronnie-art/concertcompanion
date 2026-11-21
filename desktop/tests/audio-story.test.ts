@@ -16,6 +16,67 @@ const total = (items: Array<{start:number;end:number}>) =>
   items.reduce((value, item) => value + item.end - item.start, 0);
 const prompt = "3 audio clips featuring the cleaning audio and ending with a crescendo. I want video footage from multiple clips on top of that.";
 
+const shortRecording = (number: number, extra: Partial<CreativeClip> = {}): CreativeClip =>
+  recording(number, { asset: { ...recording(number).asset, duration: 2 }, start: 0, end: 2, ...extra });
+const separatePrompt = "Three audio moments and video footage from multiple clips over the soundtrack.";
+
+test("separate picture does not silently reproduce the joined edit with three fully used recordings", () => {
+  const clips = [shortRecording(1), shortRecording(2), shortRecording(3),
+    shortRecording(4, { included: false, excludedByUser: true })];
+  const brief = interpretCreativeBrief({ description: separatePrompt }, clips,
+    { aspect: "vertical", reduceRumble: false });
+  const byPath = Object.fromEntries(clips.map((clip) => [clip.asset.path, bins(0.2, 4)]));
+  const result = planAudioStory(clips, brief, byPath);
+  const shots = result.clips.filter((clip) => clip.included);
+  assert.equal(result.audioSelections.length, 3);
+  assert.equal(result.clips[3].excludedByUser, true);
+  assert.equal(result.clips[3].included, false);
+  assert.ok(shots.every((clip, index) => clip.asset.path !== result.audioSelections[index].asset.path),
+    "picture should not repeat its original source sound at the same output positions");
+  assert.deepEqual(clips.slice(0, 3).map((clip) => clip.asset.name), ["clip-1.mov", "clip-2.mov", "clip-3.mov"],
+    "source selections are unchanged");
+});
+
+test("protected picture and sound stay aligned while other suggested shots separate", () => {
+  const clips = [shortRecording(1), shortRecording(2, { locked: true, selectionSource: "manual" }), shortRecording(3)];
+  const brief = interpretCreativeBrief({ description: separatePrompt }, clips,
+    { aspect: "vertical", reduceRumble: false });
+  const byPath = Object.fromEntries(clips.map((clip) => [clip.asset.path, bins(0.2, 4)]));
+  const result = planAudioStory(clips, brief, byPath);
+  assert.equal(result.clips[1].asset.path, clips[1].asset.path);
+  assert.deepEqual([result.clips[1].start, result.clips[1].end, result.clips[1].locked], [0, 2, true]);
+  assert.deepEqual([result.audioSelections[1].asset.path, result.audioSelections[1].start,
+    result.audioSelections[1].end, result.audioSelections[1].locked], [clips[1].asset.path, 0, 2, true]);
+  assert.notEqual(result.clips[0].asset.path, result.audioSelections[0].asset.path);
+  assert.notEqual(result.clips[2].asset.path, result.audioSelections[2].asset.path);
+});
+
+test("manual clip order is never changed to fake a separate picture edit", () => {
+  const clips = [shortRecording(1, { orderLocked: true }), shortRecording(2, { locked: true,
+    selectionSource: "manual" }), shortRecording(3, { orderLocked: true })];
+  const brief = interpretCreativeBrief({ description: separatePrompt }, clips,
+    { aspect: "vertical", reduceRumble: false });
+  const byPath = Object.fromEntries(clips.map((clip) => [clip.asset.path, bins(0.2, 4)]));
+  assert.throws(() => planAudioStory(clips, brief, byPath), /picture sections would still match their original sound/);
+  assert.deepEqual(clips.map((clip) => clip.asset.name), ["clip-1.mov", "clip-2.mov", "clip-3.mov"]);
+});
+
+test("ordered suggested shots use different source windows when their recordings have room", () => {
+  const clips = [1, 2].map((number) => recording(number, {
+    asset: { ...recording(number).asset, duration: 4 }, start: 0, end: 2,
+    orderLocked: true,
+  }));
+  const brief = interpretCreativeBrief({ description:
+    "Two audio moments and video footage from multiple clips over the soundtrack." }, clips,
+  { aspect: "vertical", reduceRumble: false });
+  const byPath = Object.fromEntries(clips.map((clip) => [clip.asset.path, bins(0.2, 8)]));
+  const result = planAudioStory(clips, brief, byPath);
+  assert.deepEqual(result.clips.map((clip) => clip.asset.path), clips.map((clip) => clip.asset.path),
+    "manual order remains intact");
+  assert.ok(result.clips.some((clip, index) => Math.abs(clip.start - result.audioSelections[index].start) >= 0.5),
+    "at least one picture window differs from the original sound window");
+});
+
 test("three measured sound moments build under a separate multi-recording picture edit", () => {
   const clips = [recording(1), recording(2), recording(3)];
   const brief = interpretCreativeBrief({ description: prompt }, clips,
@@ -27,7 +88,7 @@ test("three measured sound moments build under a separate multi-recording pictur
   assert.equal(new Set(result.audioSelections.map((selection) => selection.asset.path)).size, 3);
   assert.deepEqual(result.audioSelections.map((selection) =>
     byPath[selection.asset.path][0].rms), [0.08, 0.24, 0.48]);
-  assert.equal(result.clips.filter((clip) => clip.included).length, 2);
+  assert.equal(result.clips.filter((clip) => clip.included).length, 3);
   assert.ok(Math.abs(total(result.audioSelections) - total(result.clips.filter((clip) => clip.included))) < 0.05);
   assert.equal(result.options.reduceRumble, true);
   assert.match(result.notes.join(" "), /strongest measured sound moment last/);
@@ -43,7 +104,7 @@ test("silent video can supply picture while one audible source supplies disjoint
   const result = planAudioStory(clips, brief, { [clips[0].asset.path]: bins(0.2) });
   assert.equal(result.audioSelections.length, 3);
   assert.ok(result.audioSelections.every((selection) => selection.asset.path === clips[0].asset.path));
-  assert.equal(new Set(result.clips.filter((clip) => clip.included).map((clip) => clip.asset.path)).size, 2);
+  assert.equal(new Set(result.clips.filter((clip) => clip.included).map((clip) => clip.asset.path)).size, 3);
   const ranges = [...result.audioSelections].sort((a, b) => a.start - b.start);
   assert.ok(ranges.every((selection, index) => index === 0 || ranges[index - 1].end <= selection.start + 0.001));
 });
@@ -55,8 +116,11 @@ test("marked picture and original sound remain aligned in the existing order", (
   const byPath = Object.fromEntries(clips.map((clip, index) =>
     [clip.asset.path, bins([0.1, 0.2, 0.4][index])])) as Record<string, AudioBin[]>;
   const result = planAudioStory(clips, brief, byPath);
-  assert.deepEqual(result.clips.filter((clip) => clip.included).map((clip) => clip.asset.path),
-    clips.map((clip) => clip.asset.path));
+  assert.deepEqual(new Set(result.clips.filter((clip) => clip.included).map((clip) => clip.asset.path)),
+    new Set(clips.map((clip) => clip.asset.path)));
+  assert.equal(result.clips[1].asset.path, clips[1].asset.path,
+    "the marked section remains between the other two shots");
+  assert.deepEqual([result.clips[1].start, result.clips[1].end], [5, 17]);
   const marked = result.audioSelections.find((selection) => selection.locked);
   assert.ok(marked);
   assert.deepEqual([marked.asset.path, marked.start, marked.end], [clips[1].asset.path, 5, 17]);
@@ -67,10 +131,50 @@ test("marked picture and original sound remain aligned in the existing order", (
   assert.ok(Math.abs(total(result.audioSelections) - total(result.clips.filter((clip) => clip.included))) < 0.05);
 });
 
+test("explicit picture count uses exactly that many distinct recordings", () => {
+  const clips = [recording(1), recording(2), recording(3), recording(4)];
+  const brief = interpretCreativeBrief({ description: prompt, soundMomentCount: 3,
+    pictureSourceCount: 2, targetSeconds: 24 }, clips, { aspect: "vertical", reduceRumble: false });
+  const byPath = Object.fromEntries(clips.map((clip) => [clip.asset.path, bins(0.2)]));
+  const result = planAudioStory(clips, brief, byPath);
+  assert.equal(result.audioSelections.length, 3);
+  assert.equal(result.clips.filter((clip) => clip.included).length, 2);
+  assert.equal(new Set(result.clips.filter((clip) => clip.included).map((clip) => clip.asset.path)).size, 2);
+  assert.equal(result.plannedSeconds, 24);
+});
+
+test("one picture recording can carry separate sound and picks a source long enough", () => {
+  const clips = [recording(1, { asset: { ...recording(1).asset, duration: 8 }, start: 0, end: 4 }),
+    recording(2, { asset: { ...recording(2).asset, duration: 40 }, start: 10, end: 18, included: false })];
+  const brief = interpretCreativeBrief({ description: "Three sound moments", separatePicture: true,
+    pictureSourceCount: 1, targetSeconds: 20 }, clips, { aspect: "vertical", reduceRumble: false });
+  assert.equal(brief.conflict, null);
+  const byPath = Object.fromEntries(clips.map((clip) => [clip.asset.path, bins(0.2, clip.asset.duration * 2)]));
+  const result = planAudioStory(clips, brief, byPath);
+  const pictures = result.clips.filter((clip) => clip.included);
+  assert.equal(pictures.length, 1);
+  assert.equal(pictures[0].asset.path, clips[1].asset.path);
+  assert.equal(result.audioSelections.length, 3);
+  assert.equal(result.plannedSeconds, 20);
+});
+
+test("a blank length plans a feasible one-recording picture cut", () => {
+  const clips = [1, 2, 3].map((number) => recording(number, {
+    asset: { ...recording(number).asset, duration: 12 }, start: 0, end: 12,
+  }));
+  const brief = interpretCreativeBrief({ description: "Three sound moments", separatePicture: true,
+    pictureSourceCount: 1 }, clips, { aspect: "vertical", reduceRumble: false });
+  const byPath = Object.fromEntries(clips.map((clip) => [clip.asset.path, bins(0.2, 24)]));
+  const result = planAudioStory(clips, brief, byPath);
+  assert.equal(result.plannedSeconds, 12);
+  assert.equal(result.clips.filter((clip) => clip.included).length, 1);
+  assert.equal(result.audioSelections.length, 3);
+});
+
 test("impossible lock alignment is rejected before render", () => {
   const clips = [recording(1, { locked: true, selectionSource: "manual" }), recording(2),
     recording(3, { locked: true, selectionSource: "manual" }), recording(4)];
-  const brief = interpretCreativeBrief({ description: `Energetic ${prompt}` }, clips,
+  const brief = interpretCreativeBrief({ description: `Energetic ${prompt}`, pictureSourceCount: 4 }, clips,
     { aspect: "vertical", reduceRumble: false });
   const byPath = Object.fromEntries(clips.map((clip) => [clip.asset.path, bins(0.2)]));
   assert.throws(() => planAudioStory(clips, brief, byPath), /at least 4 sound moments/);

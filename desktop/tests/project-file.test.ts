@@ -6,7 +6,7 @@ const project = {
   version: 1,
   clips: [{
     asset: { path: "C:\\concert\\first.mov", name: "first.mov", duration: 60, width: 1920, height: 1080, hasAudio: true },
-    start: 10, end: 24, included: true, selectionSource: "manual", locked: true,
+    start: 10, end: 24, included: true, selectionSource: "manual", locked: true, orderLocked: true,
     excludedByUser: false, label: "Opening song", framing: "fit", previewUrl: "compass-media://preview/session-only",
   }, {
     asset: { path: "C:\\concert\\second.mov", name: "second.mov", duration: 90, width: 1920, height: 1080, hasAudio: true },
@@ -28,6 +28,7 @@ test("project round trip retains selected ranges, locks, exclusions, brief and f
   assert.equal(normalized.options.finish, "cinematic");
   assert.equal(normalized.clips[0].label, "Opening song");
   assert.equal(normalized.clips[0].framing, "fit");
+  assert.equal(normalized.clips[0].orderLocked, true);
   assert.equal(normalized.clips[1].framing, undefined, "older projects retain the default framing");
   assert.equal(normalized.version, 2, "older projects reopen in the current project format");
   assert.equal(normalized.audioSelections, null);
@@ -39,6 +40,7 @@ test("malformed projects cannot replace validated selection or export settings",
   assert.throws(() => parseProjectSnapshot({ ...project, clips: [{ ...project.clips[0], end: 80 }] }), /invalid section/);
   assert.throws(() => parseProjectSnapshot({ ...project, clips: [project.clips[0], project.clips[0]] }), /same recording/);
   assert.throws(() => parseProjectSnapshot({ ...project, clips: [{ ...project.clips[0], framing: "arbitrary" }] }), /invalid section/);
+  assert.throws(() => parseProjectSnapshot({ ...project, clips: [{ ...project.clips[0], orderLocked: "yes" }] }), /invalid section/);
   assert.throws(() => parseProjectSnapshot({ ...project, options: { ...project.options, finish: "shell" } }), /invalid video settings/);
   assert.throws(() => parseProjectSnapshot({ ...project, briefInput: { ...project.briefInput, targetSeconds: Number.POSITIVE_INFINITY } }), /invalid creative brief/);
 });
@@ -46,7 +48,8 @@ test("malformed projects cannot replace validated selection or export settings",
 test("v2 saves independent sound moments and an unfinished edit without losing recoverable work", () => {
   const source = project.clips[0].asset;
   const normalized = parseProjectSnapshot({ ...project, version: 2, briefDirty: true,
-    briefInput: { ...project.briefInput, reduceRumble: false },
+    briefInput: { ...project.briefInput, reduceRumble: false, separatePicture: true,
+      soundMomentCount: 3, pictureSourceCount: 2 },
     clips: [{ ...project.clips[0], end: 26 }, project.clips[1]],
     audioSelections: [
       { asset: { ...source, previewUrl: "session-only" }, start: 10, end: 24, locked: true },
@@ -55,6 +58,9 @@ test("v2 saves independent sound moments and an unfinished edit without losing r
   });
   assert.equal(normalized.briefDirty, true);
   assert.equal(normalized.briefInput.reduceRumble, false);
+  assert.equal(normalized.briefInput.separatePicture, true);
+  assert.equal(normalized.briefInput.soundMomentCount, 3);
+  assert.equal(normalized.briefInput.pictureSourceCount, 2);
   assert.equal(normalized.audioSelections?.length, 2);
   assert.equal(normalized.audioSelections?.[0].locked, true);
   assert.equal("previewUrl" in normalized.audioSelections![0].asset, false);
@@ -84,4 +90,10 @@ test("v2 rejects missing, silent, overlapping, or out-of-bounds sound ranges", (
   assert.throws(() => parseProjectSnapshot({ ...base, briefDirty: "yes" }), /invalid edit status/);
   assert.throws(() => parseProjectSnapshot({ ...base,
     briefInput: { ...project.briefInput, reduceRumble: "off" } }), /invalid creative brief/);
+  assert.throws(() => parseProjectSnapshot({ ...base,
+    briefInput: { ...project.briefInput, separatePicture: "yes" } }), /invalid creative brief/);
+  assert.throws(() => parseProjectSnapshot({ ...base,
+    briefInput: { ...project.briefInput, soundMomentCount: 0 } }), /invalid creative brief/);
+  assert.throws(() => parseProjectSnapshot({ ...base,
+    briefInput: { ...project.briefInput, pictureSourceCount: 2.5 } }), /invalid creative brief/);
 });

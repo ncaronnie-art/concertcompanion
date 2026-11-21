@@ -53,7 +53,7 @@ test("Ronnie's three-part sound brief becomes a separate picture-and-audio MP4",
     assert.equal(brief.soundtrackIntent?.separatePicture, true);
     assert.equal(brief.options.reduceRumble, true);
     assert.match(brief.summary, /3 audio moments/);
-    assert.match(brief.summary, /picture from multiple recordings/);
+    assert.match(brief.summary, /picture from 3 recordings/);
     assert.ok(brief.limitations.some((item) => /cannot remove crowd voices/i.test(item)));
 
     const bins: Record<string, AudioBin[]> = {};

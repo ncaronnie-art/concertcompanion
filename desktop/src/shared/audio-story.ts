@@ -84,16 +84,34 @@ function planPicture<T extends CreativeClip>(clips: T[], brief: CreativeBrief): 
   const candidates = eligible.filter((index) => !markedSet.has(index));
   candidates.sort((a, b) => Number(clips[b].included) - Number(clips[a].included) ||
     (brief.vibe === "energetic" ? a - b : clips[b].asset.duration - clips[a].asset.duration || a - b));
-  const minimumSources = intent.separatePicture ? 2 : 1;
-  const needed = Math.max(0, minimumSources - marked.length);
-  if (remaining < needed * MIN - EPS) throw new Error("There is not enough time to show footage from multiple recordings while keeping your marked sections.");
-  const desired = remaining < MIN ? 0 : Math.min(candidates.length, Math.floor((remaining + 0.0001) / MIN),
-    Math.max(needed, Math.ceil(remaining / picturePace(brief.vibe))));
-  const picked = candidates.slice(0, desired);
-  while (sum(picked.map((index) => clips[index].asset.duration)) + EPS < remaining && picked.length < candidates.length) {
-    picked.push(candidates[picked.length]);
+  const requestedSources = intent.separatePicture ? brief.pictureSourceCount : null;
+  const needed = requestedSources === null ? 0 : requestedSources - marked.length;
+  if (needed < 0 || needed > candidates.length) {
+    throw new Error("The picture recording count conflicts with protected sections or available videos. Review the count.");
   }
-  if (picked.length < needed) throw new Error("Include at least two different videos for footage over the soundtrack.");
+  if (remaining < needed * MIN - EPS) throw new Error("There is not enough time for the requested picture recordings while keeping your marked sections.");
+  const desired = requestedSources === null ? remaining < MIN ? 0 : Math.min(candidates.length,
+    Math.floor((remaining + 0.0001) / MIN), Math.ceil(remaining / picturePace(brief.vibe))) : needed;
+  const picked = candidates.slice(0, desired);
+  if (requestedSources === null) {
+    while (sum(picked.map((index) => clips[index].asset.duration)) + EPS < remaining && picked.length < candidates.length) {
+      picked.push(candidates[picked.length]);
+    }
+  } else {
+    // Keep already included suggestions when possible, but replace a short one
+    // if another imported recording is needed to fill the chosen duration.
+    while (sum(picked.map((index) => clips[index].asset.duration)) + EPS < remaining) {
+      const replacement = candidates.filter((index) => !picked.includes(index))
+        .sort((a, b) => clips[b].asset.duration - clips[a].asset.duration)[0];
+      const shortest = [...picked].sort((a, b) => clips[a].asset.duration - clips[b].asset.duration)[0];
+      if (replacement === undefined || shortest === undefined ||
+        clips[replacement].asset.duration <= clips[shortest].asset.duration) break;
+      picked[picked.indexOf(shortest)] = replacement;
+    }
+    if (picked.length !== needed || sum(picked.map((index) => clips[index].asset.duration)) + EPS < remaining) {
+      throw new Error("The requested number of picture recordings cannot fill this length without repeats. Choose more recordings or a shorter video.");
+    }
+  }
   const amounts = allocate(remaining, picked.map((index) => clips[index].asset.duration));
   const allocations = new Map(picked.map((index, position) => [index, amounts[position]]));
   const next = clips.map((clip, index) => {
@@ -105,8 +123,8 @@ function planPicture<T extends CreativeClip>(clips: T[], brief: CreativeBrief): 
   });
   const actual = sum(next.filter(included).map(length));
   if (Math.abs(actual - target) > EPS) throw new Error("The picture sections do not match the requested length.");
-  if (intent.separatePicture && new Set(next.filter(included).map((clip) => clip.asset.path)).size < 2) {
-    throw new Error("Include at least two different videos for footage over the soundtrack.");
+  if (requestedSources !== null && new Set(next.filter(included).map((clip) => clip.asset.path)).size !== requestedSources) {
+    throw new Error("The picture edit does not match the requested recording count. Review the plan.");
   }
   return { clips: next as T[], seconds: actual };
 }
@@ -223,6 +241,107 @@ function soundtrackParts<T extends CreativeClip>(picture: T[], count: number): A
   return parts;
 }
 
+// A separate soundtrack can still look like the original joined edit if the
+// picture planner and sound planner independently choose the same source ranges.
+// Compare the source time shown and heard at each position in the output.
+function pictureSoundCoupling(picture: CreativeClip[], sound: AudioSelection[]) {
+  const shots = picture.filter(included);
+  let shotIndex = 0, soundIndex = 0, shotOffset = 0, soundOffset = 0;
+  let joinedSeconds = 0, sameSourceSeconds = 0;
+  while (shotIndex < shots.length && soundIndex < sound.length) {
+    const shot = shots[shotIndex], audio = sound[soundIndex];
+    const shotEnd = shotOffset + length(shot), soundEnd = soundOffset + length(audio);
+    const shared = Math.max(0, Math.min(shotEnd, soundEnd) - Math.max(shotOffset, soundOffset));
+    if (shot.asset.path === audio.asset.path) {
+      sameSourceSeconds += shared;
+      const sourceTimeDifference = Math.abs((shot.start - shotOffset) - (audio.start - soundOffset));
+      if (sourceTimeDifference < 0.5) joinedSeconds += shared;
+    }
+    if (shotEnd <= soundEnd + 0.000001) { shotIndex++; shotOffset = shotEnd; }
+    if (soundEnd <= shotEnd + 0.000001) { soundIndex++; soundOffset = soundEnd; }
+  }
+  return { joinedSeconds, sameSourceSeconds,
+    cost: joinedSeconds * 1000 + sameSourceSeconds };
+}
+
+function canMovePicture(clip: CreativeClip) {
+  return included(clip) && !protectedClip(clip) && clip.orderLocked !== true;
+}
+
+function separatePicture<T extends CreativeClip>(picture: T[], sound: AudioSelection[], totalSeconds: number):
+  { clips: T[]; independentSeconds: number } {
+  let next = [...picture];
+  const groups: number[][] = [];
+  let group: number[] = [];
+  for (let index = 0; index < picture.length; index++) {
+    const clip = picture[index];
+    if (!included(clip)) continue;
+    if (canMovePicture(clip)) group.push(index);
+    else { if (group.length > 1) groups.push(group); group = []; }
+  }
+  if (group.length > 1) groups.push(group);
+
+  // Rotating suggested shots within a gap keeps every protected section at the
+  // same output position, even if the suggested shots have different lengths.
+  for (const indices of groups) {
+    const original = indices.map((index) => next[index]);
+    let best = next, bestCost = pictureSoundCoupling(next, sound).cost;
+    for (let shift = 1; shift < indices.length; shift++) {
+      const trial = [...next];
+      indices.forEach((index, position) => { trial[index] = original[(position + shift) % indices.length]; });
+      const cost = pictureSoundCoupling(trial, sound).cost;
+      if (cost + 0.000001 < bestCost) { best = trial; bestCost = cost; }
+    }
+    next = best;
+  }
+
+  // Two equal-length suggested shots can also trade places across a protected
+  // anchor without changing that anchor's picture or sound placement.
+  const movable = next.flatMap((clip, index) => canMovePicture(clip) ? [index] : []);
+  for (let pass = 0; pass < 2; pass++) {
+    let best = next, bestCost = pictureSoundCoupling(next, sound).cost;
+    let checked = 0;
+    for (let first = 0; first < movable.length; first++) {
+      for (let second = first + 1; second < movable.length && checked < 2000; second++, checked++) {
+        const a = movable[first], b = movable[second];
+        if (Math.abs(length(next[a]) - length(next[b])) > 0.001) continue;
+        const trial = [...next]; [trial[a], trial[b]] = [trial[b], trial[a]];
+        const cost = pictureSoundCoupling(trial, sound).cost;
+        if (cost + 0.000001 < bestCost) { best = trial; bestCost = cost; }
+      }
+      if (checked >= 2000) break;
+    }
+    if (best === next) break;
+    next = best;
+  }
+
+  // If a suggested picture shot still exactly matches its sound, use another
+  // part of that recording where one exists. Its length and output position stay.
+  for (let index = 0; index < next.length; index++) {
+    const clip = next[index];
+    if (!included(clip) || protectedClip(clip)) continue;
+    const seconds = length(clip), lastStart = clip.asset.duration - seconds;
+    if (lastStart < 0.5) continue;
+    const soundFromSource = sound.filter((selection) => selection.asset.path === clip.asset.path);
+    const starts = [clip.start, 0, lastStart, clip.start - seconds, clip.start + seconds,
+      ...soundFromSource.flatMap((selection) => [selection.end + 0.25, selection.start - seconds - 0.25])];
+    let bestStart = clip.start, bestCost = pictureSoundCoupling(next, sound).cost;
+    for (const start of starts) {
+      if (start < 0 || start > lastStart) continue;
+      const trial = [...next]; trial[index] = { ...clip, start, end: start + seconds };
+      const cost = pictureSoundCoupling(trial, sound).cost;
+      if (cost + 0.000001 < bestCost) { bestStart = start; bestCost = cost; }
+    }
+    if (bestStart !== clip.start) next[index] = { ...clip, start: bestStart, end: bestStart + seconds };
+  }
+
+  const independentSeconds = totalSeconds - pictureSoundCoupling(next, sound).joinedSeconds;
+  if (independentSeconds / totalSeconds < 0.25 - 0.0001) {
+    throw new Error("These picture sections would still match their original sound for most of the video. Add more footage, shorten the video, or unlock a kept section to make a separate picture edit.");
+  }
+  return { clips: next, independentSeconds };
+}
+
 export function planAudioStory<T extends CreativeClip>(clips: T[], brief: CreativeBrief,
   binsByPath: Readonly<Record<string, AudioBin[]>>): AudioStoryResult<T> {
   const intent = brief.soundtrackIntent;
@@ -281,8 +400,11 @@ export function planAudioStory<T extends CreativeClip>(clips: T[], brief: Creati
       }
     }
   }
-  const pictureCount = picture.clips.filter(included).length;
+  const separated = intent.separatePicture ? separatePicture(picture.clips, audioSelections, picture.seconds) :
+    { clips: picture.clips, independentSeconds: 0 };
+  const pictureCount = separated.clips.filter(included).length;
   const notes = [`Used ${audioSelections.length} nonrepeating sound moments beneath picture from ${pictureCount} recording${pictureCount === 1 ? "" : "s"}.`];
+  if (intent.separatePicture) notes.push("The suggested picture differs from its original sound for a meaningful part of the video; watch the assembled preview to judge the match.");
   if (anchors.length) notes.push("Kept your marked picture and original sound together at their original source ranges and output positions.");
   if (intent.buildEnding) {
     const scored = audioSelections.map((selection) => scoreWindow(binsByPath[selection.asset.path], selection.start, length(selection)));
@@ -292,7 +414,7 @@ export function planAudioStory<T extends CreativeClip>(clips: T[], brief: Creati
       "Placed the strongest measured sound moment last. Listen to confirm the ending feels like a build." :
       "Protected placement, distortion, or similar sound levels limit a smooth energy rise. Listen to the ending and adjust if needed.");
   }
-  return { clips: picture.clips, audioSelections, options: brief.options, plannedSeconds: picture.seconds, notes };
+  return { clips: separated.clips, audioSelections, options: brief.options, plannedSeconds: picture.seconds, notes };
 }
 
 export function refineAudioStory(audioSelections: AudioSelection[], index: number,

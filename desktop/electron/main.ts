@@ -82,6 +82,9 @@ function createWindow() {
           console.log("Desktop three-part soundtrack, independent picture, adjustment, project reopen and export passed");
           clearTimeout(timer); app.exit(0); return;
         }
+        // Keep the established manual-edit smoke on its original picture-and-sound path.
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Edit sections myself (original sound)').click()`);
+        await waitFor(`document.querySelector('.brief-quick-choice input[type=checkbox]')?.checked === false && !document.querySelector('.toolbar-actions button.primary')?.disabled`, "manual editor choice");
         await win.webContents.executeJavaScript(`document.querySelector('video').currentTime = 2`);
         await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && Math.abs(v.currentTime - 2) < 0.15 && v.readyState >= 2 })()`, "seeking forward");
         await win.webContents.executeJavaScript(`document.querySelector('video').currentTime = 0.5`);
@@ -165,20 +168,50 @@ function createWindow() {
 }
 
 async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: string, label: string) => Promise<void>): Promise<void> {
-  const description = "Make a six-second recap with 3 audio clips. Clean the audio and end with a crescendo. Put video footage from multiple clips on top of that soundtrack.";
+  const defaults = await win.webContents.executeJavaScript(`(() => ({
+    separatePicture: document.querySelector('.brief-quick-choice input[type=checkbox]')?.checked,
+    sound: document.querySelector('input[aria-label="Number of sound moments"]')?.value,
+    picture: document.querySelector('input[aria-label="Number of videos to show"]')?.value,
+    exportReady: !document.querySelector('.toolbar-actions button.primary')?.disabled,
+    guidedMessage: document.querySelector('.toolbar .pending-badge')?.textContent
+  }))()`);
+  if (defaults.separatePicture !== true || defaults.sound !== "3" || defaults.picture !== "3" ||
+    defaults.exportReady || !defaults.guidedMessage?.includes("Make a first cut")) {
+    throw new Error(`Guided soundtrack defaults were wrong after importing three videos: ${JSON.stringify(defaults)}`);
+  }
+  smokeStage("story guided defaults ready");
+  const description = "Make a six-second recap with three sound moments. Reduce low rumble, aim for a stronger ending, and show footage from several videos over that soundtrack.";
   await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('.brief textarea'); const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(input, ${JSON.stringify(description)}); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Review my plan').click()`);
   await waitFor(`(() => { const plan = document.querySelector('.brief-review .story-plan'); return plan && plan.innerText.includes('Low-rumble reduction will be on.') })()`, "sound-led brief");
   const review = await win.webContents.executeJavaScript(`(() => ({ labels: Array.from(document.querySelectorAll('.brief-review .story-plan strong')).map(x => x.textContent), summary: document.querySelector('.brief-review h3').textContent, conflict: !!document.querySelector('.brief-review .conflict'), ready: !Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Make my first cut').disabled }))()`);
   if (review.labels.join() !== "Soundtrack,Picture" || !review.summary.includes("3 audio moments") ||
-    !review.summary.includes("multiple recordings") || review.conflict || !review.ready) throw new Error(`Sound-led brief was wrong: ${JSON.stringify(review)}`);
+    !review.summary.includes("strongest measured ending") || !review.summary.includes("picture from 3 recordings") ||
+    review.conflict || !review.ready) throw new Error(`Plain-language sound-led brief was wrong: ${JSON.stringify(review)}`);
+  smokeStage("story plain-language brief reviewed");
+
+  await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.brief-review button')).find(b => b.textContent === 'Adjust').click()`);
+  await waitFor(`document.querySelector('.brief-quick-choice input[type=checkbox]')?.checked === true`, "separate soundtrack quick choice");
+  await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('input[aria-label="Number of sound moments"]'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(input, '2'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await waitFor(`document.querySelector('input[aria-label="Number of sound moments"]')?.value === '2'`, "temporary sound moment count");
+  await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('input[aria-label="Number of sound moments"]'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(input, '3'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await waitFor(`document.querySelector('input[aria-label="Number of sound moments"]')?.value === '3'`, "explicit sound moment count");
+  await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('input[aria-label="Number of videos to show"]'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(input, '2'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await waitFor(`document.querySelector('input[aria-label="Number of videos to show"]')?.value === '2'`, "explicit picture video count");
+  await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Review my plan').click()`);
+  await waitFor(`(() => { const plan = document.querySelector('.brief-review .story-plan'); return plan && plan.innerText.includes('Low-rumble reduction will be on.') })()`, "explicit sound-led brief");
+  const overrideReview = await win.webContents.executeJavaScript(`(() => ({ labels: Array.from(document.querySelectorAll('.brief-review .story-plan strong')).map(x => x.textContent), summary: document.querySelector('.brief-review h3').textContent, ready: !Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Make my first cut').disabled }))()`);
+  if (overrideReview.labels.join() !== "Soundtrack,Picture" || !overrideReview.summary.includes("3 audio moments") ||
+    !overrideReview.summary.includes("strongest measured ending") || !overrideReview.summary.includes("picture from 2 recordings") || !overrideReview.ready) {
+    throw new Error(`Explicit soundtrack and picture counts were not applied: ${JSON.stringify(overrideReview)}`);
+  }
   smokeStage("story brief reviewed");
 
   await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Make my first cut').click()`);
   await waitFor(`document.body.innerText.includes('First cut ready:') && document.querySelectorAll('.soundtrack-list li').length === 3`, "three-part first cut");
   const firstCut = await win.webContents.executeJavaScript(`(() => ({ toolbar: document.querySelector('.toolbar b').textContent, moments: Array.from(document.querySelectorAll('.soundtrack-list li small')).map(x => x.textContent), lowRumble: document.querySelector('.soundtrack-note').textContent }))()`);
   const pictureCount = Number(/^([0-9]+) picture shots/.exec(firstCut.toolbar)?.[1]);
-  if (pictureCount < 2 || !firstCut.toolbar.includes("3 sound moments") ||
+  if (pictureCount !== 2 || !firstCut.toolbar.includes("3 sound moments") ||
     !firstCut.lowRumble.includes("Very low rumble will be reduced")) throw new Error(`Sound-led first cut was wrong: ${JSON.stringify(firstCut)}`);
   smokeStage("story first cut planned");
 
@@ -205,12 +238,16 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
   await waitFor(`document.body.innerText.includes('Project saved:')`, "sound-led project save");
   const saved = JSON.parse(await readFile(process.env.COMPASS_SMOKE_PROJECT!, "utf8"));
   if (saved.version !== 2 || saved.audioSelections?.length !== 3 || saved.options?.reduceRumble !== true ||
-    !saved.briefInput?.description.includes("3 audio clips")) throw new Error("Saved project lost the sound-led brief or soundtrack.");
+    saved.briefInput?.separatePicture !== true || saved.briefInput?.soundMomentCount !== 3 ||
+    saved.briefInput?.pictureSourceCount !== 2 || !saved.briefInput?.description.includes("three sound moments")) {
+    throw new Error("Saved project lost the explicit soundtrack or picture counts, brief, or sound moments.");
+  }
   smokeStage("story project saved");
   await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Open project').click()`);
   await waitFor(`document.body.innerText.includes('Project opened') && document.querySelector('.toolbar b')?.textContent.includes('3 sound moments') && document.querySelectorAll('.soundtrack-list li').length === 3 && !!document.querySelector('.draft-heading button')`, "sound-led project reopen");
-  const restored = await win.webContents.executeJavaScript(`(() => ({ description: document.querySelector('.brief textarea').value, toolbar: document.querySelector('.toolbar b').textContent, soundMoments: document.querySelectorAll('.soundtrack-list li').length, previewAction: document.querySelector('.draft-heading button')?.textContent, staleDraft: !!document.querySelector('.draft-player'), exportReady: !document.querySelector('.toolbar-actions button.primary').disabled }))()`);
-  if (!restored.description.includes("3 audio clips") || !restored.toolbar.includes("3 sound moments") || restored.soundMoments !== 3 || restored.previewAction !== "Watch first cut" || restored.staleDraft || !restored.exportReady) {
+  const restored = await win.webContents.executeJavaScript(`(() => ({ description: document.querySelector('.brief textarea').value, soundCount: document.querySelector('input[aria-label="Number of sound moments"]')?.value, pictureCount: document.querySelector('input[aria-label="Number of videos to show"]')?.value, toolbar: document.querySelector('.toolbar b').textContent, soundMoments: document.querySelectorAll('.soundtrack-list li').length, previewAction: document.querySelector('.draft-heading button')?.textContent, staleDraft: !!document.querySelector('.draft-player'), exportReady: !document.querySelector('.toolbar-actions button.primary').disabled }))()`);
+  if (!restored.description.includes("three sound moments") || restored.soundCount !== "3" || restored.pictureCount !== "2" ||
+    !restored.toolbar.includes("3 sound moments") || restored.soundMoments !== 3 || restored.previewAction !== "Watch first cut" || restored.staleDraft || !restored.exportReady) {
     throw new Error(`Reopened project lost its soundtrack: ${JSON.stringify(restored)}`);
   }
   smokeStage("story project reopened");

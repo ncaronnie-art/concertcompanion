@@ -196,7 +196,7 @@ test("Ronnie's soundtrack-led request appears explicitly in review without claim
   assert.match(brief.summary, /3 audio moments/);
   assert.match(brief.summary, /low-rumble reduction/);
   assert.match(brief.summary, /sound-energy build/);
-  assert.match(brief.summary, /picture from multiple recordings over the soundtrack/);
+  assert.match(brief.summary, /picture from 3 recordings over the soundtrack/);
   assert.match(brief.limitations.join(" "), /cannot remove crowd voices/);
   assert.match(brief.limitations.join(" "), /not musical crescendo or beat recognition/);
   assert.throws(() => makeFirstCut(clips, brief), /separate soundtrack plan/);
@@ -251,4 +251,125 @@ test("sound-led review calls out count and marked-duration conflicts", () => {
     { aspect: "vertical", reduceRumble: false });
   assert.equal(length.conflict?.kind, "protected-over-target");
   assert.match(length.conflict?.message ?? "", /room for 2 other sound moments/);
+});
+
+test("natural soundtrack and picture phrasings reach one separate-track plan", () => {
+  const clips = [recording(1), recording(2), recording(3)];
+  const descriptions = [
+    "Use three sound moments, reduce low rumble, build to a strong ending, and show footage from several recordings.",
+    "Make a six-second recap with three sound moments. Reduce low rumble, aim for a stronger ending, and show footage from several videos over that soundtrack.",
+    "Make a recap with three audio moments. Reduce low rumble, aim for a stronger ending, and put footage from several videos over the sound.",
+    "Use audio from 3 clips. Clean up the sound, end with a build, and show multiple clips of video footage on top.",
+    "Choose three clips for the audio. Clean the audio and build toward a crescendo. Use different video clips over the audio.",
+    "Three sound clips with clean audio and a crescendo ending. Put footage from several videos on top of that.",
+    "3 audio segments, cleaner audio, stronger finish, with video from different recordings over the soundtrack.",
+  ];
+  for (const description of descriptions) {
+    const brief = interpretCreativeBrief({ description }, clips,
+      { aspect: "vertical", reduceRumble: false });
+    assert.equal(brief.soundtrackIntent?.segmentCount, 3, description);
+    assert.equal(brief.soundtrackIntent?.separatePicture, true, description);
+    assert.equal(brief.soundtrackIntent?.buildEnding, true, description);
+    assert.equal(brief.soundtrackIntent?.cleanupRequested, true, description);
+    assert.equal(brief.options.reduceRumble, true, description);
+    assert.match(brief.summary, /picture from 3 recordings over the soundtrack/, description);
+  }
+});
+
+test("picture-source wording alone keeps the existing joined edit", () => {
+  const clips = [recording(1), recording(2), recording(3)];
+  for (const description of [
+    "Make a montage from several videos.",
+    "Use multiple clips of video footage and clean up the sound.",
+    "Give me three video clips with their original audio.",
+  ]) {
+    assert.equal(interpretCreativeBrief({ description }, clips,
+      { aspect: "vertical", reduceRumble: false }).soundtrackIntent, null, description);
+  }
+});
+
+test("explicit picture-over-sound choice wins without discarding count or ending", () => {
+  const clips = [recording(1), recording(2), recording(3)];
+  const forced = interpretCreativeBrief({ description: "Make a recap", separatePicture: true }, clips,
+    { aspect: "vertical", reduceRumble: false });
+  assert.deepEqual(forced.soundtrackIntent, {
+    segmentCount: 3, buildEnding: false, separatePicture: true, cleanupRequested: false,
+  });
+  const described = interpretCreativeBrief({ description: "Three audio clips with cleaned sound and a crescendo", separatePicture: true }, clips,
+    { aspect: "vertical", reduceRumble: false });
+  assert.deepEqual(described.soundtrackIntent, {
+    segmentCount: 3, buildEnding: true, separatePicture: true, cleanupRequested: true,
+  });
+  const declined = interpretCreativeBrief({ description: "Three audio clips, footage from several videos over the audio", separatePicture: false }, clips,
+    { aspect: "vertical", reduceRumble: false });
+  assert.equal(declined.soundtrackIntent?.segmentCount, 3);
+  assert.equal(declined.soundtrackIntent?.separatePicture, false);
+  assert.throws(() => interpretCreativeBrief({ description: "Three audio clips",
+    separatePicture: "yes" } as unknown as Parameters<typeof interpretCreativeBrief>[0], clips,
+    { aspect: "vertical", reduceRumble: false }), /valid separate soundtrack/);
+});
+
+test("review catches an all-protected picture before sound analysis without changing selections", () => {
+  const clips = [1, 2, 3].map((number) => recording(number, { selectionSource: "manual", locked: true }));
+  const before = structuredClone(clips);
+  const brief = interpretCreativeBrief({ description: "Three sound moments over footage from several videos" }, clips, options);
+  assert.equal(brief.soundtrackIntent?.separatePicture, true);
+  assert.equal(brief.conflict?.kind, "audio-story-all-picture-protected");
+  assert.match(brief.conflict?.message ?? "", /Unlock a section, or import an unmarked video and extend the length/);
+  assert.deepEqual(clips, before);
+  const withRoom = interpretCreativeBrief({ description: "Three sound moments over footage from several videos",
+    targetSeconds: 48 }, [...clips, recording(4, { included: false })], options);
+  assert.notEqual(withRoom.conflict?.kind, "audio-story-all-picture-protected",
+    "extra time and an unmarked imported recording are left to the planner");
+});
+
+test("structured counts win over text and Review reports impossible picture counts", () => {
+  const clips = [recording(1), recording(2), recording(3), recording(4)];
+  const brief = interpretCreativeBrief({ description: "Two audio moments over footage from two videos",
+    separatePicture: true, soundMomentCount: 3, pictureSourceCount: 4 }, clips, options);
+  assert.equal(brief.soundtrackIntent?.segmentCount, 3);
+  assert.equal(brief.pictureSourceCount, 4);
+  assert.match(brief.summary, /3 audio moments/);
+  assert.match(brief.summary, /picture from 4 recordings/);
+  assert.equal(brief.conflict, null);
+  const natural = interpretCreativeBrief({ description: "Three audio moments over footage from two videos" }, clips, options);
+  assert.equal(natural.pictureSourceCount, 2);
+  assert.equal(natural.conflict, null);
+  const tooMany = interpretCreativeBrief({ description: "Three audio moments", separatePicture: true,
+    pictureSourceCount: 5 }, clips, options);
+  assert.equal(tooMany.conflict?.kind, "audio-story-picture-count");
+  assert.match(tooMany.conflict?.message ?? "", /only 4 are available/);
+  const locked = [recording(1, { locked: true }), recording(2, { selectionSource: "manual" }), recording(3)];
+  const tooFew = interpretCreativeBrief({ description: "Three audio moments", separatePicture: true,
+    pictureSourceCount: 1 }, locked, options);
+  assert.equal(tooFew.conflict?.kind, "audio-story-picture-count");
+  assert.match(tooFew.conflict?.message ?? "", /2 recordings have protected picture/);
+});
+
+test("a requested picture count is not silently used in the joined edit", () => {
+  const clips = [recording(1), recording(2)];
+  const brief = interpretCreativeBrief({ description: "Three sound moments", separatePicture: false,
+    pictureSourceCount: 1 }, clips, options);
+  assert.equal(brief.conflict?.kind, "audio-story-picture-mode");
+  assert.equal(brief.pictureSourceCount, null);
+  assert.equal(interpretCreativeBrief({ description: "A recap", pictureSourceCount: 1 }, clips, options)
+    .conflict?.kind, "audio-story-picture-mode");
+  assert.throws(() => interpretCreativeBrief({ description: "", soundMomentCount: 13 }, clips, options), /twelve sound moments/);
+  assert.throws(() => interpretCreativeBrief({ description: "", pictureSourceCount: 0 }, clips, options), /whole number/);
+});
+
+test("an unset length fits the requested picture recording count without shortening an explicit length", () => {
+  const clips = [1, 2, 3].map((number) => recording(number, {
+    asset: { ...recording(number).asset, duration: 12 }, start: 0, end: 12,
+  }));
+  const automatic = interpretCreativeBrief({ description: "Three audio moments", separatePicture: true,
+    pictureSourceCount: 1 }, clips, options);
+  assert.equal(automatic.targetSeconds, 12);
+  assert.match(automatic.summary, /^0:12/);
+  assert.equal(automatic.conflict, null);
+  const explicit = interpretCreativeBrief({ description: "Three audio moments", separatePicture: true,
+    pictureSourceCount: 1, targetSeconds: 36 }, clips, options);
+  assert.equal(explicit.targetSeconds, 36);
+  assert.equal(explicit.conflict?.kind, "audio-story-picture-count");
+  assert.match(explicit.conflict?.message ?? "", /cannot fill/);
 });

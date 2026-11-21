@@ -37,6 +37,7 @@ function readClip(value: unknown): CreativeClip {
     value.end - value.start < 0.1 || value.end > asset.duration + 0.05 ||
     typeof value.included !== "boolean" || typeof value.locked !== "boolean" ||
     typeof value.excludedByUser !== "boolean" ||
+    (value.orderLocked !== undefined && typeof value.orderLocked !== "boolean") ||
     !oneOf(value.selectionSource, ["suggested", "manual"] as const) ||
     (value.included && value.excludedByUser) ||
     (value.framing !== undefined && !oneOf(value.framing, ["fill", "fit"] as const)) ||
@@ -46,6 +47,7 @@ function readClip(value: unknown): CreativeClip {
   return { asset, start: value.start, end: value.end, included: value.included,
     locked: value.locked, excludedByUser: value.excludedByUser,
     selectionSource: value.selectionSource,
+    ...(value.orderLocked === undefined ? {} : { orderLocked: value.orderLocked }),
     ...(value.framing === undefined ? {} : { framing: value.framing }),
     ...(value.label === undefined ? {} : { label: value.label }) };
 }
@@ -71,6 +73,11 @@ function readBrief(value: unknown): CreativeBriefInput {
       (!isNumber(value.targetSeconds) || value.targetSeconds < 0.1 || value.targetSeconds > 86400)) ||
     (value.aspect !== undefined && !oneOf(value.aspect, ["vertical", "landscape"] as const)) ||
     (value.reduceRumble !== undefined && typeof value.reduceRumble !== "boolean") ||
+    (value.separatePicture !== undefined && typeof value.separatePicture !== "boolean") ||
+    (value.soundMomentCount !== undefined && (!isNumber(value.soundMomentCount) ||
+      !Number.isInteger(value.soundMomentCount) || value.soundMomentCount < 1 || value.soundMomentCount > 12)) ||
+    (value.pictureSourceCount !== undefined && (!isNumber(value.pictureSourceCount) ||
+      !Number.isInteger(value.pictureSourceCount) || value.pictureSourceCount < 1 || value.pictureSourceCount > 500)) ||
     (value.customVibe !== undefined && !isString(value.customVibe, 500))) {
     throw new Error("The project contains an invalid creative brief.");
   }
@@ -81,6 +88,9 @@ function readBrief(value: unknown): CreativeBriefInput {
     ...(value.targetSeconds === undefined ? {} : { targetSeconds: value.targetSeconds }),
     ...(value.aspect === undefined ? {} : { aspect: value.aspect }),
     ...(value.reduceRumble === undefined ? {} : { reduceRumble: value.reduceRumble }),
+    ...(value.separatePicture === undefined ? {} : { separatePicture: value.separatePicture }),
+    ...(value.soundMomentCount === undefined ? {} : { soundMomentCount: value.soundMomentCount }),
+    ...(value.pictureSourceCount === undefined ? {} : { pictureSourceCount: value.pictureSourceCount }),
     ...(value.customVibe === undefined ? {} : { customVibe: value.customVibe }) };
 }
 

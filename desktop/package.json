@@ -4,14 +4,20 @@
   "version": "0.1.0",
   "type": "module",
   "main": "dist-electron/electron/main.js",
+  "trustedDependencies": ["ffmpeg-static"],
   "scripts": {
     "dev": "bun run build && concurrently -k \"vite --host 127.0.0.1 --strictPort\" \"wait-on http://127.0.0.1:5173 && cross-env COMPASS_DEV=1 electron .\"",
     "build": "vite build && tsc -p tsconfig.electron.json && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/electron/preload.cjs",
     "start": "electron .",
     "package:win": "node tools/package.mjs",
+    "build:phone": "vite build && tsc -p tsconfig.mobile.json --noEmit",
+    "build:hosted": "vite build && tsc -p tsconfig.netlify.json --noEmit && node tools/prepare-netlify.mjs",
+    "package:phone": "node tools/package-phone.mjs",
     "test": "tsx --test tests/**/*.test.ts"
   },
   "dependencies": {
+    "@netlify/blobs": "^11.1.9",
+    "@netlify/server": "^0.1.6",
     "ffmpeg-static": "^5.2.0",
     "ffprobe-static": "^3.1.0",
     "react": "^19.2.0",

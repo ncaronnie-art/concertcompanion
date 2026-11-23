@@ -1,0 +1,25 @@
+[build]
+  base = "desktop"
+  command = "bun run build:hosted"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "24"
+  BUN_VERSION = "1.4.5"
+  ELECTRON_SKIP_BINARY_DOWNLOAD = "1"
+
+[server]
+  size = "small"
+  region = "cmh"
+
+[server.scale]
+  min = 0
+  max = 1
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"
+    X-Frame-Options = "DENY"
+    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"

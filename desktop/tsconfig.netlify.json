@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.mobile.json",
+  "include": ["mobile/**/*.ts", "netlify/server/**/*.ts"]
+}

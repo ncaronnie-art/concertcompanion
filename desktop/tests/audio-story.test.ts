@@ -281,3 +281,51 @@ test("a cleaner source replaces a heavily clipped one when enough sound is avail
   assert.ok(result.audioSelections.every((selection) => selection.asset.path !== clips[2].asset.path));
   assert.equal(result.audioSelections.at(-1)?.asset.path, clips[3].asset.path);
 });
+
+const silenceChoiceFixtures = () => [1, 2, 3].map((number) => recording(number, {
+  asset: { ...recording(number).asset, duration: number === 1 ? 120 : 30 },
+  start: 9, end: 21,
+}));
+
+test("a longer near-silent recording does not displace audible performance sound", () => {
+  const clips = silenceChoiceFixtures();
+  const brief = interpretCreativeBrief({ description: "Energetic recap", separatePicture: true,
+    soundMomentCount: 2, pictureSourceCount: 3, targetSeconds: 12 }, clips,
+  { aspect: "portrait913", reduceRumble: false });
+  const byPath = { [clips[0].asset.path]: bins(0.0005, 240),
+    [clips[1].asset.path]: bins(0.1, 60), [clips[2].asset.path]: bins(0.2, 60) };
+  const result = planAudioStory(clips, brief, byPath);
+  assert.equal(result.audioSelections.length, 2);
+  assert.equal(total(result.audioSelections), 12);
+  assert.ok(result.audioSelections.every((selection) => selection.asset.path !== clips[0].asset.path),
+    "a near-silent recording must not win simply because it is longer");
+  assert.equal(result.clips.filter((clip) => clip.included).length, 3,
+    "the quiet recording can still contribute picture");
+});
+
+test("quiet sound remains available when needed for the chosen length", () => {
+  const clips = silenceChoiceFixtures();
+  const brief = interpretCreativeBrief({ description: "Recap", separatePicture: true,
+    soundMomentCount: 2, pictureSourceCount: 3, targetSeconds: 80 }, clips,
+  { aspect: "portrait913", reduceRumble: false });
+  const result = planAudioStory(clips, brief, { [clips[0].asset.path]: bins(0.0005, 240),
+    [clips[1].asset.path]: bins(0.1, 60), [clips[2].asset.path]: bins(0.2, 60) });
+  assert.equal(result.audioSelections.length, 2);
+  assert.ok(Math.abs(total(result.audioSelections) - 80) < 0.05);
+  assert.ok(result.audioSelections.some((selection) => selection.asset.path === clips[0].asset.path),
+    "the requested length is preserved when audible alternatives cannot fill it");
+});
+
+test("a kept quiet moment stays exactly marked while other sound avoids silence", () => {
+  const clips = silenceChoiceFixtures();
+  clips[0] = { ...clips[0], start: 50, end: 55, locked: true, selectionSource: "manual" };
+  const brief = interpretCreativeBrief({ description: "Energetic recap", separatePicture: true,
+    soundMomentCount: 3, pictureSourceCount: 3, targetSeconds: 12 }, clips,
+  { aspect: "portrait913", reduceRumble: false });
+  const result = planAudioStory(clips, brief, { [clips[0].asset.path]: bins(0.0005, 240),
+    [clips[1].asset.path]: bins(0.1, 60), [clips[2].asset.path]: bins(0.2, 60) });
+  const quiet = result.audioSelections.filter((selection) => selection.asset.path === clips[0].asset.path);
+  assert.equal(quiet.length, 1);
+  assert.deepEqual([quiet[0].start, quiet[0].end, quiet[0].locked], [50, 55, true]);
+  assert.equal(total(result.audioSelections), 12);
+});

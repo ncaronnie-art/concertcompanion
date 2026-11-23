@@ -169,10 +169,18 @@ function chooseTickets(spans: Span[], count: number, seconds: number,
   binsByPath: Readonly<Record<string, AudioBin[]>>): Span[] {
   if (count < 1) return [];
   const sampleLength = seconds / count;
-  const clean = spans.filter((span) => bestWithin(span, Math.min(length(span), sampleLength),
-    binsByPath[span.asset.path]).clipping < 0.02);
-  const cleanCapacity = sum([...clean].sort((a, b) => length(b) - length(a)).slice(0, count).map(length));
-  const pool = clean.length >= count && cleanCapacity + EPS >= seconds ? clean : spans;
+  const samples = new Map(spans.map((span) => [span,
+    bestWithin(span, Math.min(length(span), sampleLength), binsByPath[span.asset.path])]));
+  const canFill = (candidates: Span[]) => candidates.length >= count &&
+    sum([...candidates].sort((a, b) => length(b) - length(a)).slice(0, count).map(length)) + EPS >= seconds;
+  // Length alone must not let a silent recording displace audible performance.
+  // Use the highlight suggestion's conservative signal floor, then retain the
+  // full pool when this preference would prevent the requested count or length.
+  // Marked sound is already reserved separately and never enters this ranking.
+  const audible = spans.filter((span) => samples.get(span)!.energy >= 0.002);
+  const withSignal = canFill(audible) ? audible : spans;
+  const clean = withSignal.filter((span) => samples.get(span)!.clipping < 0.02);
+  const pool = canFill(clean) ? clean : withSignal;
   const ranked = [...pool].sort((a, b) => length(b) - length(a));
   const distinct: Span[] = [], seen = new Set<string>();
   for (const span of ranked) if (!seen.has(span.asset.path)) { distinct.push(span); seen.add(span.asset.path); }

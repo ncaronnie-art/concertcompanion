@@ -34,6 +34,27 @@ p { margin: 0; }
 .video-title-field { display: grid; gap: 7px; margin-top: 15px; font-weight: 750; }
 .video-title-field span { color: #c8b9d0; font-size: .82rem; font-weight: 450; }
 .video-title-field input { width: 100%; }
+.phone-connect { max-width: 650px; padding-top: 12vh; }
+.phone-connect h1 { font-size: clamp(2.4rem, 8vw, 4rem); }
+.phone-connect > p { line-height: 1.5; color: #d4c9df; }
+.phone-connect form { padding: 24px; margin: 24px 0; border: 1px solid #63516d; border-radius: 18px; background: #21162b; }
+.phone-connect label { display: grid; gap: 8px; font-weight: 750; }
+.phone-connect input { min-height: 52px; width: 100%; padding: 10px; font-size: 1.5rem; letter-spacing: .2em; background: #0e0b13; color: white; border: 1px solid #8c729b; border-radius: 9px; }
+.phone-connect button { min-height: 48px; width: 100%; padding: 12px; border-radius: 10px; margin: 16px 0; }
+.phone-connect form p { font-size: .9rem; line-height: 1.5; color: #dfcde9; }
+.phone-session, .phone-download { margin: 14px 0; border: 1px solid #594467; border-radius: 14px; padding: 17px; background: #21172b; }
+.phone-session p, .phone-download p { color: #cfc2db; font-size: .86rem; line-height: 1.45; margin-top: 7px; }
+.phone-download a { color: #ecd2ff; display: inline-block; margin: 12px 0; }
+.phone-download .download-button { padding: 14px 20px; background: #73389c; color: white; border-radius: 10px; font-weight: 750; text-decoration: none; }
+@media (max-width: 520px) {
+  input:not([type="checkbox"]):not([type="range"]), textarea { font-size: 16px !important; }
+  button, .seek button { min-height: 44px; }
+  input[type="checkbox"] { min-width: 20px; min-height: 20px; }
+  .status { flex-wrap: wrap; gap: 9px; position: static; }
+  .status > span { width: 100%; }
+  .status progress { flex: 1; min-width: 90px; }
+  .build-label { display: inline-block; margin: 8px 0 0; }
+}
 textarea, .brief input:not([type="checkbox"]), .moment-label input { background: #0e0b13; color: #fff; border: 1px solid #554960; border-radius: 10px; padding: 11px 13px; outline: none; }
 textarea:focus, input:focus-visible, button:focus-visible { outline: 2px solid #c58cf7; outline-offset: 2px; }
 textarea { width: 100%; resize: vertical; line-height: 1.5; min-height: 98px; }

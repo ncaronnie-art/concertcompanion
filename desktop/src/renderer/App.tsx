@@ -7,6 +7,7 @@ import {
 import { planAudioStory, refineAudioStory } from "../shared/audio-story";
 import { suggestedRange, type AudioSelection, type ExportOptions, type MediaAsset } from "../shared/render-plan";
 import type { AudioBin } from "../shared/suggestions";
+import { hostedPhoneTest, phoneConnection, phoneLimitSummary, remotePhoneTest, validatePhoneEdit } from "./browser-bridge";
 
 type Chosen = CreativeClip & { previewUrl: string };
 type UndoState = { clips: Chosen[]; options: ExportOptions; audioSelections: AudioSelection[] | null; briefInput: CreativeBriefInput; briefDirty: boolean };
@@ -70,10 +71,17 @@ function protectedPictureMatchesSoundtrack(clips: Chosen[], soundtrack: AudioSel
 }
 
 export function App() {
+  const mobile = window.concertCompass.mobile === true;
+  const hostedPhone = mobile && hostedPhoneTest();
+  const remotePhone = mobile && remotePhoneTest();
+  const hostedLimits = hostedPhone ? phoneConnection()?.limits : undefined;
   const [clips, setClips] = useState<Chosen[]>([]);
   const [busy, setBusy] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [message, setMessage] = useState("Choose videos from iCloud Drive or anywhere on this PC.");
+  const [message, setMessage] = useState(hostedPhone ? "Choose a few short videos from Photos or Files. This test uploads them to Netlify to make your edit." : mobile ? "Choose videos from Photos or Files. Your computer will prepare the edit." : "Choose videos from iCloud Drive or anywhere on this PC.");
+  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const [projectDownload, setProjectDownload] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState("");
   const [progress, setProgress] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [previewing, setPreviewing] = useState(false);
@@ -100,9 +108,10 @@ export function App() {
   const audioSuggestions = useRef(new Map<string, { start: number; end: number }>());
   const audioBins = useRef<Record<string, AudioBin[]>>({});
   const importCancelled = useRef(false);
+  const processingCancelled = useRef(false);
   const focusDragging = useRef(false);
 
-  useEffect(() => { window.concertCompass.onProgress(setProgress); }, []);
+  useEffect(() => { window.concertCompass.onProgress(setProgress); window.concertCompass.onActivity?.(setMessage); }, []);
   useEffect(() => {
     if (stage === "cut") document.getElementById("watch-first-cut")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [stage]);
@@ -129,6 +138,21 @@ export function App() {
   })();
   const cutSignature = JSON.stringify({ clips: selected.map((clip) => ({ path: clip.asset.path, start: clip.start, end: clip.end, locked: clip.locked, framing: clip.framing ?? "auto", focus: clip.focus ?? 0.5, label: clip.label })), audioSelections, options });
   const guidedCutPending = briefInput.separatePicture === true && audioSelections === null;
+  const savedLength = parseLength(lengthText);
+  const phoneSnapshot = mobile && clips.length && (savedLength === undefined || Number.isFinite(savedLength)) ? JSON.stringify({
+    version: 2, clips: clips.map(({ previewUrl: _previewUrl, ...clip }) => clip), options,
+    briefInput: { ...briefInput, targetSeconds: savedLength }, audioSelections, briefDirty,
+  }) : null;
+  useEffect(() => {
+    if (!phoneSnapshot || busy) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      setSaveStatus(hostedPhone ? "Saving this test edit…" : "Saving your edit on the computer…");
+      void window.concertCompass.saveProject(JSON.parse(phoneSnapshot), true).then((result) => { if (active) setSaveStatus(result.cancelled ? "Use Save project when processing finishes to keep these edits." : hostedPhone ? "Saved for this test session. Download your project and finished video before leaving; test storage may be cleared." : "Edit saved on your computer. Resume saved edit brings it back."); })
+        .catch(() => { if (active) setSaveStatus(hostedPhone ? "Could not save automatically. Check your internet connection, then use Save project." : "Could not save automatically. Check the computer connection, then use Save project."); });
+    }, 1000);
+    return () => { active = false; clearTimeout(timer); };
+  }, [phoneSnapshot, busy]);
 
   function remember() {
     setUndoStack((old) => [...old.slice(-24), { clips, options, audioSelections, briefInput, briefDirty }]);
@@ -186,18 +210,34 @@ export function App() {
 
   async function stopImport() {
     importCancelled.current = true;
-    await window.concertCompass.cancelRender();
-    setMessage("Stopping import…");
+    try { await window.concertCompass.cancelRender(); setMessage("Stopping import…"); }
+    catch { setMessage("The stop request could not be sent. Check your connection and try again."); }
+  }
+
+  async function stopProcessing() {
+    processingCancelled.current = true;
+    try { await window.concertCompass.cancelRender(); setMessage("Stopping processing… Your editing choices will stay."); }
+    catch { setMessage("The stop request could not reach the test. Check your connection and try again."); }
+  }
+  function checkProcessingCancelled() {
+    if (processingCancelled.current) throw new Error("Processing stopped. Your editing choices are unchanged.");
+  }
+  function checkHostedLength(seconds: number) {
+    if (hostedLimits && seconds > hostedLimits.maxOutputSeconds + 0.05) {
+      throw new Error(`This phone test makes videos up to ${hostedLimits.maxOutputSeconds} seconds. Shorten your plan or sections before continuing; your selections have not been changed.`);
+    }
   }
 
   async function importVideos() {
-    const paths = await window.concertCompass.pickVideos();
-    if (!paths.length) return;
     importCancelled.current = false;
-    setBusy(true); setImporting(true); setProgress(0); setMessage(`Preparing previews for ${paths.length} video${paths.length === 1 ? "" : "s"}…`);
+    setBusy(true); setImporting(true); setProgress(0); setMessage("Choose the videos you want to use…");
     try {
+      const paths = await window.concertCompass.pickVideos();
+      if (!paths.length) { setMessage("No videos added. Your edit is still here."); return; }
+      setMessage(`Preparing previews for ${paths.length} video${paths.length === 1 ? "" : "s"}…`);
       const usable: { asset: MediaAsset; previewUrl: string }[] = [];
       let failed = 0;
+      let firstFailure = "";
       let duplicates = 0;
       const knownPaths = new Set(clips.map((clip) => clip.asset.path.toLowerCase()));
       for (const [index, file] of paths.entries()) {
@@ -210,12 +250,12 @@ export function App() {
           if (asset.duration < 0.1 || !asset.width) throw new Error("Not a usable video");
           if (importCancelled.current) break;
           usable.push({ asset, previewUrl: await window.concertCompass.preview(file.id) });
-        } catch { if (importCancelled.current) break; failed++; }
+        } catch (error) { if (importCancelled.current) break; failed++; if (!firstFailure && error instanceof Error) firstFailure = error.message; }
       }
       const newClips = usable.map(({ asset, previewUrl }) => ({ asset, previewUrl, ...suggestedRange(asset), included: true,
           selectionSource: "suggested" as const, locked: false, excludedByUser: false }));
       if (newClips.length) changeClips([...clips, ...newClips]);
-      setMessage(importCancelled.current ? `Import stopped. ${newClips.length} video${newClips.length === 1 ? "" : "s"} already prepared are ready; your originals are safe.` : `${newClips.length} new video${newClips.length === 1 ? "" : "s"} ready.${duplicates ? ` ${duplicates} already imported.` : ""}${failed ? ` ${failed} could not be prepared; check that the files are downloaded and playable.` : ""} Describe what you want, or edit sections below.`);
+      setMessage(importCancelled.current ? `Import stopped. ${newClips.length} video${newClips.length === 1 ? "" : "s"} already prepared are ready; your originals are safe.` : `${newClips.length} new video${newClips.length === 1 ? "" : "s"} ready.${duplicates ? ` ${duplicates} already imported.` : ""}${failed ? ` ${failed} could not be prepared. ${firstFailure || "Check that the files are downloaded and playable."}` : ""} ${newClips.length ? "Describe what you want, or edit sections below." : "Choose another short video to try again."}`);
     } catch (error) { setMessage(`Could not read a video: ${error instanceof Error ? error.message : String(error)}`); }
     finally { setBusy(false); setImporting(false); }
   }
@@ -224,29 +264,33 @@ export function App() {
     try {
       const targetSeconds = parseLength(lengthText);
       if (targetSeconds !== undefined && (!Number.isFinite(targetSeconds) || targetSeconds < 0.1)) {
-        throw new Error("Enter a length like 2:00 for two minutes, or leave it blank.");
+        throw new Error(hostedPhone ? "Enter a length like 0:30 for thirty seconds, or leave it blank." : "Enter a length like 2:00 for two minutes, or leave it blank.");
       }
       const snapshot = { version: 2 as const, clips: clips.map(({ previewUrl: _previewUrl, ...clip }) => clip),
         options, briefInput: { ...briefInput, targetSeconds }, audioSelections, briefDirty };
       const result = await window.concertCompass.saveProject(snapshot);
+      if (result.downloadUrl) setProjectDownload(result.downloadUrl);
       setMessage(result.cancelled ? "Save cancelled. Your edit is still here." : `Project saved: ${result.path}`);
     } catch (error) { setMessage(`Could not save project: ${error instanceof Error ? error.message : String(error)}`); }
   }
 
-  async function openProject() {
+  async function openProject(recent = false) {
+    processingCancelled.current = false;
     setBusy(true);
     try {
-      const result = await window.concertCompass.openProject();
-      if (!result) return;
+      const result = await window.concertCompass.openProject(recent);
+      if (!result) { if (recent) setMessage("No saved edit yet. Import videos to get started."); return; }
       const byPath = new Map(result.files.map((file) => [file.path, file.id]));
       const restored: Chosen[] = [];
       for (const saved of result.snapshot.clips) {
+        checkProcessingCancelled();
         const id = byPath.get(saved.asset.path);
         if (!id) throw new Error(`Could not locate ${saved.asset.name}.`);
         const asset = await window.concertCompass.probe(saved.asset.path);
         if (saved.end > asset.duration + 0.05) throw new Error(`${asset.name} changed since this project was saved.`);
         restored.push({ ...saved, asset, previewUrl: await window.concertCompass.preview(id) });
       }
+      checkProcessingCancelled();
       const freshAssets = new Map(restored.map((clip) => [clip.asset.path, clip.asset]));
       const savedAudio = "audioSelections" in result.snapshot ? result.snapshot.audioSelections : null;
       const restoredAudio = savedAudio?.map((selection) => {
@@ -278,11 +322,13 @@ export function App() {
   function reviewPlan() {
     const targetSeconds = parseLength(lengthText);
     if (targetSeconds !== undefined && (!Number.isFinite(targetSeconds) || targetSeconds < 0.1)) {
-      setMessage("Enter a length like 2:00 for two minutes, or leave it blank."); return;
+      setMessage(hostedPhone ? "Enter a length like 0:30 for thirty seconds, or leave it blank." : "Enter a length like 2:00 for two minutes, or leave it blank."); return;
     }
     try {
       const input = { ...briefInput, targetSeconds };
       const interpreted = interpretCreativeBrief(input, clips, options);
+      if (typeof interpreted.targetSeconds === "number") checkHostedLength(interpreted.targetSeconds);
+      if (hostedPhone) validatePhoneEdit(0, interpreted.soundtrackIntent?.segmentCount);
       setBriefInput(input); setReviewBrief(interpreted); setStoryError(null); setStage("review");
       setMessage("Review the plan before Concert Compass changes your edit.");
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
@@ -290,6 +336,7 @@ export function App() {
 
   async function firstCut(resolution?: "extend" | "keep-marked") {
     if (!reviewBrief) return;
+    processingCancelled.current = false;
     setBusy(true);
     try {
       const candidates = clips.map((clip) => ({ ...clip }));
@@ -298,6 +345,7 @@ export function App() {
         if (reviewBrief.conflict) throw new Error(reviewBrief.conflict.message);
         const binsByPath: Record<string, AudioBin[]> = {};
         for (const clip of candidates) {
+          checkProcessingCancelled();
           if (clip.excludedByUser || !clip.asset.hasAudio) continue;
           const key = audioBinKey(clip.asset.path, reviewBrief.options.reduceRumble);
           if (!audioBins.current[key]) {
@@ -310,6 +358,7 @@ export function App() {
       } else {
         if (reviewBrief.selectionMode !== "use-my-sections" && !reviewBrief.keepWholePerformance && resolution !== "keep-marked") {
           for (let index = 0; index < candidates.length; index++) {
+            checkProcessingCancelled();
             const clip = candidates[index];
             if (reviewBrief.videoType === "one-song" && index !== candidates.findIndex((candidate) => candidate.included && !candidate.excludedByUser)) continue;
             if (clip.excludedByUser || clip.locked || clip.selectionSource === "manual") continue;
@@ -321,11 +370,13 @@ export function App() {
                 audioSuggestions.current.set(clip.asset.path, suggestion);
               }
               candidates[index] = { ...clip, start: suggestion.start, end: suggestion.end };
-            } catch { /* The current section remains a valid fallback. */ }
+            } catch { checkProcessingCancelled(); /* The current section remains a valid fallback. */ }
           }
         }
         result = makeFirstCut(candidates, reviewBrief, resolution);
       }
+      checkProcessingCancelled(); checkHostedLength(result.plannedSeconds);
+      if (hostedPhone) validatePhoneEdit(result.clips.filter((clip) => clip.included && !clip.excludedByUser).length, result.audioSelections?.length);
       remember(); setClips(result.clips); setAudioSelections(result.audioSelections ?? null); setStoryError(null); setBriefDirty(false);
       setAspect(result.options.aspect); setReduceRumble(result.options.reduceRumble);
       setFinish(result.options.finish ?? "natural"); setTransition(result.options.transition ?? "cut");
@@ -354,13 +405,14 @@ export function App() {
     if (briefDirty || storyNeedsRebuild) { setMessage("Review your updated plan before changing a soundtrack moment."); return; }
     const current = audioSelections[index];
     if (!current || current.locked) { setMessage("This sound moment is protected and will stay where you marked it."); return; }
-    setBusy(true);
+    processingCancelled.current = false; setBusy(true);
     try {
       const key = audioBinKey(current.asset.path, reduceRumble);
       if (!audioBins.current[key]) {
         setMessage(`Checking sound in ${current.asset.name}…`);
         audioBins.current[key] = await window.concertCompass.analyzeAudio(current.asset, reduceRumble);
       }
+      checkProcessingCancelled();
       const next = refineAudioStory(audioSelections, index, { [current.asset.path]: audioBins.current[key] });
       remember(); setAudioSelections(next);
       setMessage(`Chose another sound moment from ${current.asset.name}. The other sound and picture sections stayed the same. Watch the updated preview before exporting.`);
@@ -405,13 +457,14 @@ export function App() {
   async function suggest(index: number) {
     const clip = clips[index];
     if (clip.locked) { setMessage("This section is protected. Unlock it before asking for another suggestion."); return; }
-    setBusy(true); setMessage(`Listening for stronger sound in ${clip.asset.name}…`);
+    processingCancelled.current = false; setBusy(true); setMessage(`Listening for stronger sound in ${clip.asset.name}…`);
     try {
       const suggestion = await window.concertCompass.suggest(clip.asset);
+      checkProcessingCancelled();
       audioSuggestions.current.set(clip.asset.path, suggestion);
       changeClip(index, { start: suggestion.start, end: suggestion.end, selectionSource: "suggested" });
       seek(clip, suggestion.start); setMessage(suggestion.reason);
-    } catch { setMessage("Couldn't analyze this recording's sound. Your selection is unchanged; you can still choose the moment yourself."); }
+    } catch { setMessage(processingCancelled.current ? "Processing stopped. Your selection is unchanged." : "Couldn't analyze this recording's sound. Your selection is unchanged; you can still choose the moment yourself."); }
     finally { setBusy(false); }
   }
   async function exportReel() {
@@ -419,13 +472,15 @@ export function App() {
     if (guidedCutPending) { setMessage("Review the guided plan and make your first cut before exporting, or choose Edit sections myself."); return; }
     if (briefDirty) { setMessage("Your new description has not been made yet. Review the plan and make a first cut before exporting."); return; }
     if (storyNeedsRebuild) { setMessage(`${storyRebuildMessage} Make a first cut before exporting.`); return; }
-    setBusy(true); setExporting(true); setProgress(0); setMessage("Choose where to save your MP4…");
+    try { checkHostedLength(totalSeconds); if (hostedPhone) validatePhoneEdit(selected.length, audioSelections?.length); } catch (error) { setMessage((error as Error).message); return; }
+    setBusy(true); setExporting(true); setProgress(0); setMessage(hostedPhone ? "The Netlify test is making your finished MP4…" : mobile ? "Your computer is making the finished MP4…" : "Choose where to save your MP4…");
     try {
       const result = await window.concertCompass.render(selected, options, audioSelections ?? undefined);
+      if (result.downloadUrl) setDownloadUrl(result.downloadUrl);
       setMessage(result.cancelled ? "Export cancelled. Your original recordings were not changed." : `Finished MP4: ${result.output}${result.cleanupWarning ? " The video is saved, but a temporary folder could not be removed." : ""}`);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      setMessage(detail.includes("Export stopped.") ? "Export stopped. Your selections are still here." : `Export failed. Your originals are safe. ${detail}`);
+      setMessage(detail.includes("stopped") || detail.includes("cancel") ? "Export stopped. Your selections are still here." : `Export failed. Your originals are safe. ${detail}`);
     } finally { setBusy(false); setExporting(false); }
   }
   async function previewFirstCut() {
@@ -433,6 +488,7 @@ export function App() {
     if (guidedCutPending) { setMessage("Make your guided first cut before previewing, or choose Edit sections myself."); return; }
     if (briefDirty) { setMessage("Your new description has not been made yet. Review the plan and make a first cut before previewing."); return; }
     if (storyNeedsRebuild) { setMessage(`${storyRebuildMessage} Make a first cut before previewing.`); return; }
+    try { checkHostedLength(totalSeconds); if (hostedPhone) validatePhoneEdit(selected.length, audioSelections?.length); } catch (error) { setMessage((error as Error).message); return; }
     const signature = cutSignature;
     setBusy(true); setPreviewing(true); setProgress(0);
     setMessage("Preparing a watchable draft with your current sections and look…");
@@ -463,10 +519,12 @@ export function App() {
   }
 
   return <main className={clips.length ? "has-clips" : undefined}>
-    <header><div><p className="eyebrow">VIBE CAPSULE BY CONCERT COMPASS <span className="build-label">WINDOWS TEST BUILD</span></p><h1>Keep what the night felt like.</h1><p className="subhead">Turn your concert recordings into a video shaped around the moments you love.</p></div><div className="header-actions"><button disabled={busy} onClick={openProject}>Open project</button><button className="primary" disabled={busy} onClick={importVideos}>Import videos</button></div></header>
+    <header><div><p className="eyebrow">VIBE CAPSULE BY CONCERT COMPASS <span className="build-label">{mobile ? "PHONE PREVIEW" : "WINDOWS TEST BUILD"}</span></p><h1>Keep what the night felt like.</h1><p className="subhead">Turn your concert recordings into a video shaped around the moments you love.</p></div><div className="header-actions"><button disabled={busy} onClick={() => openProject(mobile)}>{mobile ? "Resume saved edit" : "Open project"}</button>{mobile && <button disabled={busy} onClick={() => openProject(false)}>Open project file</button>}<button className="primary" disabled={busy} onClick={importVideos}>Import videos</button></div></header>
     <nav className="workflow" aria-label="Video creation steps"><span className={clips.length ? "done" : "current"}>1 Import</span><span className={stage === "describe" && clips.length ? "current" : clips.length ? "done" : ""}>2 Describe</span><span className={stage === "review" ? "current" : stage === "cut" ? "done" : ""}>3 Review</span><span className={stage === "cut" ? "current" : ""}>4 Watch & adjust</span><span>5 Export</span></nav>
-    <section className="status" aria-live="polite"><span>{message}</span>{busy && ((exporting || previewing) ? <><progress max="1" value={progress} aria-label={exporting ? "Export progress" : "Preview progress"} /><button className="stop" onClick={async () => { if (await window.concertCompass.cancelRender()) setMessage(exporting ? "Stopping export…" : "Stopping preview…"); }}>{exporting ? "Stop export" : "Stop preview"}</button></> : importing ? <><progress max="1" value={progress} aria-label="Preparing video progress" /><button className="stop" onClick={stopImport}>Stop import</button></> : <progress aria-label="Preparing videos" />)}</section>
-    {!clips.length ? <section className="empty"><h2>Start with your recordings</h2><p>Choose videos from a synced iCloud Drive folder or this PC. Your original recordings stay untouched.</p><button className="primary" disabled={busy} onClick={importVideos}>Choose videos</button></section> : <>
+    <section className="status" aria-live="polite"><span>{message}</span>{busy && ((exporting || previewing) ? <><progress max="1" value={progress} aria-label={exporting ? "Export progress" : "Preview progress"} /><button className="stop" onClick={async () => { try { if (await window.concertCompass.cancelRender()) setMessage(exporting ? "Stopping export…" : "Stopping preview…"); } catch { setMessage("Could not send the stop request. Check your connection and try again."); } }}>{exporting ? "Stop export" : "Stop preview"}</button></> : importing ? <><progress max="1" value={progress} aria-label="Preparing video progress" /><button className="stop" onClick={stopImport}>Stop import</button></> : <><progress aria-label="Preparing videos" />{mobile && <button className="stop" onClick={stopProcessing}>Stop processing</button>}</>)}</section>
+    {mobile && <aside className="phone-session"><b>{hostedPhone ? "Small hosted test · processed on Netlify" : "Processed on your computer"}</b><p>{hostedPhone ? "The videos you choose are uploaded to Netlify for processing. Start with two short videos and keep Safari open during uploads. Your phone originals stay untouched." : remotePhone ? "Private phone test: video traffic passes through the approved relay. Start with two short videos. Keep this page open during uploads and the computer awake." : "Stay on the same Wi-Fi. Keep this page open during uploads and the computer awake while it edits."}</p>{hostedPhone && <p>{phoneLimitSummary()}</p>}{saveStatus && <p role="status">{saveStatus}</p>}</aside>}
+    {mobile && (downloadUrl || projectDownload) && <section className="phone-download" aria-label="Save to phone">{downloadUrl && <><h2>Your video is ready</h2><a className="download-button" href={downloadUrl} target="_blank" rel="noreferrer" download="Vibe Capsule.mp4">Open / Save MP4</a><p>Safari saves downloads in Files → Downloads. Open the video there to share it or save it to Photos.</p></>}{projectDownload && <a href={projectDownload} target="_blank" rel="noreferrer" download="Vibe Capsule project.json">Download project file</a>}</section>}
+    {!clips.length ? <section className="empty"><h2>Start with your recordings</h2><p>{hostedPhone ? "Choose short recordings from Photos or Files. Copies are uploaded to Netlify for this test; your phone originals stay untouched." : mobile ? "Choose recordings from Photos or Files. Copies are stored on your computer for editing; your phone originals stay untouched." : "Choose videos from a synced iCloud Drive folder or this PC. Your original recordings stay untouched."}</p><button className="primary" disabled={busy} onClick={importVideos}>Choose videos</button></section> : <>
       <section className="brief" aria-label="What are we making?">
         <div className="section-heading"><div><p className="eyebrow">YOUR VIDEO, YOUR FEELING</p><h2>What are we making?</h2><p>Tell us what you want. Your marked moments and video settings are already part of this plan.</p></div><button disabled={busy || !undoStack.length} onClick={undo}>Undo</button></div>
         {stage !== "review" ? <>
@@ -485,7 +543,7 @@ export function App() {
             <fieldset><legend>Vibe</legend><div className="choices">{vibes.map(({ value, label }) => <button type="button" key={value} aria-pressed={briefInput.vibe === value} disabled={busy} onClick={() => changeBrief({ vibe: briefInput.vibe === value ? undefined : value })}>{label}</button>)}</div>{briefInput.vibe === "custom" && <><input aria-label="Custom vibe" disabled={busy} placeholder="Describe your custom vibe" value={briefInput.customVibe ?? ""} onChange={(event) => changeBrief({ customVibe: event.target.value })} /><p className="helper">If we cannot match it with the current tools, the plan will tell you before editing.</p></>}</fieldset>
           </div>
           <fieldset><legend>Which moments?</legend><div className="choices">{modes.map(({ value, label }) => <button type="button" key={value} aria-pressed={briefInput.selectionMode === value} disabled={busy} onClick={() => changeBrief({ selectionMode: briefInput.selectionMode === value ? undefined : value })}>{label}</button>)}</div><p className="helper">Want a section kept exactly? Use “Keep this section” on its recording below.</p></fieldset></details>
-          <div className="brief-bottom"><label>Length <span>(optional; minutes or m:ss)</span><input disabled={busy} aria-label="Target length" value={lengthText} onChange={(event) => { setLengthText(event.target.value); setBriefDirty(true); setReviewBrief(null); setMessage("Your new length is saved here. Review the plan and make a first cut before exporting it."); }} placeholder={`Current edit ${clock(totalSeconds)}`} /></label><div className="brief-buttons"><button disabled={busy} onClick={editSectionsManually}>Edit sections myself (original sound)</button><button className="primary" disabled={busy} onClick={reviewPlan}>Review my plan</button></div></div>
+          <div className="brief-bottom"><label>Length <span>{hostedPhone ? `(optional; up to ${hostedLimits?.maxOutputSeconds ?? 60} seconds; e.g. 0:30)` : "(optional; minutes or m:ss)"}</span><input disabled={busy} aria-label="Target length" value={lengthText} onChange={(event) => { setLengthText(event.target.value); setBriefDirty(true); setReviewBrief(null); setMessage("Your new length is saved here. Review the plan and make a first cut before exporting it."); }} placeholder={`Current edit ${clock(totalSeconds)}`} /></label><div className="brief-buttons"><button disabled={busy} onClick={editSectionsManually}>Edit sections myself (original sound)</button><button className="primary" disabled={busy} onClick={reviewPlan}>Review my plan</button></div></div>
         </> : reviewBrief && <div className="brief-review"><p className="eyebrow">HERE’S YOUR PLAN</p><h3>{reviewBrief.summary}</h3>
           {reviewBrief.soundtrackIntent ? <>
             <div className="story-plan">
@@ -506,11 +564,11 @@ export function App() {
         </div>}
       </section>
       {stage === "cut" && <section id="watch-first-cut" className="draft" aria-label="Watch first cut">
-        <div className="draft-heading"><div><p className="eyebrow">FIRST CUT READY</p><h2>Watch your video</h2><p>{audioSelections ? `Hear ${audioSelections.length} sound moments with picture from ${reviewBrief?.pictureSourceCount ?? selected.length} imported ${(reviewBrief?.pictureSourceCount ?? selected.length) === 1 ? "recording" : "recordings"}. The assembled preview uses the new soundtrack; source previews below still play their original sound.` : "See the selected sections together with the chosen framing, color, sound, and joins."} This local draft is for review; Export MP4 saves the finished file.</p></div><button className="primary" disabled={busy || !selected.length || briefDirty || storyNeedsRebuild || guidedCutPending} onClick={previewFirstCut}>{draftUrl && draftSignature !== cutSignature ? "Update preview" : draftUrl ? "Make preview again" : "Watch first cut"}</button></div>
+        <div className="draft-heading"><div><p className="eyebrow">FIRST CUT READY</p><h2>Watch your video</h2><p>{audioSelections ? `Hear ${audioSelections.length} sound moments with picture from ${reviewBrief?.pictureSourceCount ?? selected.length} imported ${(reviewBrief?.pictureSourceCount ?? selected.length) === 1 ? "recording" : "recordings"}. The assembled preview uses the new soundtrack; source previews below still play their original sound.` : "See the selected sections together with the chosen framing, color, sound, and joins."} This draft is for review; Export MP4 saves the finished file.</p></div><button className="primary" disabled={busy || !selected.length || briefDirty || storyNeedsRebuild || guidedCutPending} onClick={previewFirstCut}>{draftUrl && draftSignature !== cutSignature ? "Update preview" : draftUrl ? "Make preview again" : "Watch first cut"}</button></div>
         {briefDirty && <p className="draft-stale" role="alert">Your new request has not been made yet. Review the plan and make a first cut.</p>}
         {storyNeedsRebuild && <p className="draft-stale" role="alert">{storyRebuildMessage}</p>}
         {previewing && <progress className="draft-progress" max="1" value={progress} aria-label="Preparing first-cut preview" />}
-        {draftUrl && draftSignature === cutSignature && !briefDirty && !storyNeedsRebuild && <video className="draft-player" src={draftUrl} controls preload="metadata" aria-label="Assembled first-cut preview" />}
+        {draftUrl && draftSignature === cutSignature && !briefDirty && !storyNeedsRebuild && <video playsInline className="draft-player" src={draftUrl} controls preload="metadata" aria-label="Assembled first-cut preview" />}
         {draftUrl && draftSignature !== cutSignature && !briefDirty && !storyNeedsRebuild && <p className="draft-stale">Your edit changed. Update the preview to see the latest version.</p>}
       </section>}
       {stage === "cut" && audioSelections && <section className="soundtrack" aria-label="Soundtrack moments">
@@ -529,7 +587,7 @@ export function App() {
         <div className="preview">
           <p className="preview-label">{showsCropGuide(aspect, clip.asset, clip.framing) ? "Framing guide with original sound" : "Source preview with original sound"} · selected part is {clock(clip.start)}–{clock(clip.end)}</p>
           <div className={showsCropGuide(aspect, clip.asset, clip.framing) ? "preview-screen crop-preview" : "preview-screen"} style={showsCropGuide(aspect, clip.asset, clip.framing) ? { aspectRatio: aspect === "landscape" ? "16 / 9" : aspect === "vertical" ? "9 / 16" : "9 / 13" } : undefined}>
-            <video style={showsCropGuide(aspect, clip.asset, clip.framing) ? { objectPosition: `${Math.round((clip.focus ?? 0.5) * 100)}% center` } : undefined} ref={(element) => { if (element) players.current.set(clip.asset.path, element); else players.current.delete(clip.asset.path); }} onTimeUpdate={(event) => { const time = event.currentTarget.currentTime; setPositions((old) => ({ ...old, [clip.asset.path]: time })); }} controls preload="auto" crossOrigin="anonymous" src={clip.previewUrl} aria-label={`Preview ${clip.asset.name}`} />
+            <video playsInline style={showsCropGuide(aspect, clip.asset, clip.framing) ? { objectPosition: `${Math.round((clip.focus ?? 0.5) * 100)}% center` } : undefined} ref={(element) => { if (element) players.current.set(clip.asset.path, element); else players.current.delete(clip.asset.path); }} onTimeUpdate={(event) => { const time = event.currentTarget.currentTime; setPositions((old) => ({ ...old, [clip.asset.path]: time })); }} controls preload={mobile ? "metadata" : "auto"} crossOrigin="anonymous" src={clip.previewUrl} aria-label={`Preview ${clip.asset.name}`} />
           </div>
           <div className="seek"><button disabled={busy} aria-label={`Back five seconds in ${clip.asset.name}`} onClick={() => seek(clip, (positions[clip.asset.path] ?? 0) - 5)}>−5s</button><input disabled={busy} aria-label={`Move through ${clip.asset.name}`} type="range" min="0" max={clip.asset.duration} step="0.1" value={Math.min(clip.asset.duration, positions[clip.asset.path] ?? 0)} onChange={(event) => seek(clip, Number(event.target.value))} /><button disabled={busy} aria-label={`Forward five seconds in ${clip.asset.name}`} onClick={() => seek(clip, (positions[clip.asset.path] ?? 0) + 5)}>+5s</button></div><small>{clock(positions[clip.asset.path] ?? 0)} / {clock(clip.asset.duration)}</small>
         </div>
@@ -547,6 +605,6 @@ export function App() {
         <p className="note">Selected range: {clock(clip.start)}–{clock(clip.end)} ({(clip.end - clip.start).toFixed(1)} seconds){clip.label ? ` · ${clip.label} (named by you)` : ""}</p>
       </article>)}</section>
     </>}
-    <footer><b>Honest creative tools:</b> local sound-based suggestions, your protected sections, pacing across recordings, subtle color looks, cuts or brief fades to black, and MP4 export. It does not recognize songs, lyrics, scenes, or emotions; create captions or title overlays; or publish to social media.</footer>
+    <footer><b>Honest creative tools:</b> local sound-based suggestions, your protected sections, pacing across recordings, optional titles and color looks, cuts or brief fades to black, and MP4 export. It does not recognize songs, lyrics, scenes, or emotions; generate captions; or publish to social media.</footer>
   </main>;
 }

@@ -131,18 +131,22 @@ test("v2 rejects missing, silent, overlapping, or out-of-bounds sound ranges", (
 test("new finishing settings round trip without changing protected sections or independent sound", () => {
   const options = { aspect: "vertical", reduceRumble: true, finish: "natural", transition: "dissolve",
     quality: "high", enhance: true, audioTransition: "crossfade", audioCrossfadeSeconds: 2,
-    eventTitle: "", showClipLabels: false };
+    beatSync: true, highlightFocus: "performance", eventTitle: "", showClipLabels: false };
   const saved = parseProjectSnapshot({ ...project, version: 2, options,
-    briefInput: { ...project.briefInput, transition: "dissolve" },
+    briefInput: { ...project.briefInput, transition: "dissolve", beatSync: true, highlightFocus: "performance" },
     audioSelections: [{ asset: project.clips[0].asset, start: 10, end: 24, locked: true }] });
   assert.deepEqual(saved.options, options);
   assert.equal(saved.briefInput.transition, "dissolve", "an explicit picture-transition choice survives review and reopen");
+  assert.equal(saved.briefInput.beatSync, true, "the explicit timing choice still overrides prompt wording after reopening");
+  assert.equal(saved.briefInput.highlightFocus, "performance");
   assert.deepEqual([saved.clips[0].start, saved.clips[0].end, saved.clips[0].locked, saved.clips[1].excludedByUser], [10, 24, true, true]);
   assert.deepEqual(saved.audioSelections?.map(({ start, end, locked }) => ({ start, end, locked })), [{ start: 10, end: 24, locked: true }]);
   assert.deepEqual(parseProjectSnapshot(JSON.parse(JSON.stringify(saved))), saved);
-  const slide = parseProjectSnapshot({ ...saved, options: { ...options, transition: "smoothslide", quality: "standard", enhance: false, audioTransition: "cut", audioCrossfadeSeconds: 0.1 } });
+  const slide = parseProjectSnapshot({ ...saved, options: { ...options, transition: "smoothslide", quality: "standard", enhance: false, audioTransition: "cut", audioCrossfadeSeconds: 0.1, beatSync: false, highlightFocus: "balanced" } });
   assert.equal(slide.options.transition, "smoothslide");
   assert.equal(slide.options.audioCrossfadeSeconds, 0.1);
+  assert.equal(slide.options.beatSync, false);
+  assert.equal(slide.options.highlightFocus, "balanced");
   assert.equal(parseProjectSnapshot({ ...saved, options: { ...options, audioCrossfadeSeconds: 5 } }).options.audioCrossfadeSeconds, 5);
 });
 
@@ -150,16 +154,19 @@ test("older projects retain their original framing and joins without receiving n
   for (const input of [project, { ...project, version: 2, audioSelections: null }]) {
     const saved = parseProjectSnapshot(input);
     assert.deepEqual(saved.options, project.options);
-    for (const field of ["quality", "enhance", "audioTransition", "audioCrossfadeSeconds"]) {
+    for (const field of ["quality", "enhance", "audioTransition", "audioCrossfadeSeconds", "beatSync", "highlightFocus"]) {
       assert.equal(field in saved.options, false, `legacy projects must not acquire ${field}`);
     }
     assert.equal("audioDuration" in saved.clips[0].asset, false);
+    assert.equal("beatSync" in saved.briefInput, false);
+    assert.equal("highlightFocus" in saved.briefInput, false);
   }
 });
 
 test("invalid finishing controls cannot enter a saved project", () => {
   const invalidOptions = [
     { quality: "ultra" }, { enhance: "yes" }, { audioTransition: "blend" }, { transition: "arbitrary" },
+    { beatSync: "yes" }, { beatSync: 1 }, { highlightFocus: "vocal-recognition" }, { highlightFocus: true },
     ...[0, 0.09, 5.01, Number.NaN, Number.POSITIVE_INFINITY, "2"].map((audioCrossfadeSeconds) => ({ audioCrossfadeSeconds })),
   ];
   for (const invalid of invalidOptions) {
@@ -167,6 +174,10 @@ test("invalid finishing controls cannot enter a saved project", () => {
   }
   assert.throws(() => parseProjectSnapshot({ ...project,
     briefInput: { ...project.briefInput, transition: "arbitrary" } }), /invalid creative brief/);
+  for (const invalid of [{ beatSync: "yes" }, { highlightFocus: "vocal-recognition" }]) {
+    assert.throws(() => parseProjectSnapshot({ ...project,
+      briefInput: { ...project.briefInput, ...invalid } }), /invalid creative brief/);
+  }
 });
 
 test("measured audio coverage survives project reopen for both picture and soundtrack sources", () => {

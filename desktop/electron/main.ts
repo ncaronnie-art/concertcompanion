@@ -80,7 +80,7 @@ function createWindow() {
         const freshDefaults = await finishingSmokeState(win);
         if (!freshDefaults.phone || !freshDefaults.high || !freshDefaults.dissolve || !freshDefaults.crossfade ||
           freshDefaults.overlap !== 2 || freshDefaults.enhance !== false || freshDefaults.title !== "" ||
-          freshDefaults.labels !== false || !freshDefaults.fill) {
+          freshDefaults.labels !== false || !freshDefaults.fill || !freshDefaults.beatSync || !freshDefaults.performance) {
           throw new Error(`Fresh phone finishing defaults were wrong: ${JSON.stringify(freshDefaults)}`);
         }
         smokeStage("fresh phone finishing defaults ready");
@@ -257,6 +257,8 @@ async function finishingSmokeState(win: BrowserWindow) {
       dissolve: pressed('Dissolve'), slide: pressed('Smooth slide'), cut: pressed('Straight cut'),
       crossfade: pressed('Blend sound'), overlap: Number(document.querySelector('input[aria-label="Sound overlap seconds"]')?.value),
       enhance: document.querySelector('input[aria-label="Gentle picture clarity"]')?.checked,
+      beatSync: document.querySelector('input[aria-label="Follow the beat"]')?.checked,
+      performance: document.querySelector('input[aria-label="Favor the performance"]')?.checked,
       title: document.querySelector('input[aria-label="Video title (optional)"]')?.value,
       labels: document.querySelector('input[aria-label="Show my named moments on video"]')?.checked,
       fill: articles.length > 0 && articles.every(article => Array.from(article.querySelectorAll('.frame-choice button')).find(b => b.textContent === 'Fill screen')?.getAttribute('aria-pressed') === 'true'),
@@ -272,6 +274,23 @@ async function chooseSmokeOption(win: BrowserWindow, waitFor: (expression: strin
 
 async function runFinishingSettingsSmoke(win: BrowserWindow, waitFor: (expression: string, label: string) => Promise<void>): Promise<void> {
   const before = parseProjectSnapshot(JSON.parse(await readFile(process.env.COMPASS_SMOKE_PROJECT!, "utf8")));
+  const viewBefore = await win.webContents.executeJavaScript(`document.querySelector('.workflow .current')?.textContent`);
+  for (const label of ["Follow the beat", "Favor the performance"]) {
+    const selector = JSON.stringify(`input[aria-label="${label}"]`);
+    await win.webContents.executeJavaScript(`document.querySelector(${selector}).click()`);
+    await waitFor(`document.querySelector(${selector})?.checked === false`, `disabled ${label}`);
+  }
+  await waitFor(`document.querySelector('.toolbar-actions button.primary')?.disabled === true`, "changed music preferences require review");
+  for (const label of ["Favor the performance", "Follow the beat"]) {
+    await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.brief button')).find(b => b.textContent === 'Undo').click()`);
+    const selector = JSON.stringify(`input[aria-label="${label}"]`);
+    await waitFor(`document.querySelector(${selector})?.checked === true`, `undo ${label}`);
+  }
+  await waitFor(`document.querySelector('.toolbar-actions button.primary')?.disabled === false`, "music preference undo restored edit");
+  if (await win.webContents.executeJavaScript(`document.querySelector('.workflow .current')?.textContent`) !== viewBefore) {
+    throw new Error("Music preference undo did not restore the previous editor step.");
+  }
+  smokeStage("music preferences undo restored");
   const sections = (project: ProjectSnapshot) => JSON.stringify({
     picture: project.clips.map(c => [c.asset.path, c.start, c.end, c.included, c.locked, c.excludedByUser, c.selectionSource, c.orderLocked, c.framing, c.focus, c.label]),
     sound: project.audioSelections?.map(s => [s.asset.path, s.start, s.end, s.locked]) ?? null,
@@ -297,7 +316,8 @@ async function runFinishingSettingsSmoke(win: BrowserWindow, waitFor: (expressio
   const saved = parseProjectSnapshot(JSON.parse(await readFile(process.env.COMPASS_SMOKE_PROJECT!, "utf8")));
   if (saved.options.aspect !== "vertical" || saved.options.quality !== "high" || saved.options.enhance !== true ||
     saved.options.audioTransition !== "crossfade" || saved.options.audioCrossfadeSeconds !== 1.5 || saved.options.transition !== "smoothslide" ||
-    saved.briefInput.transition !== "smoothslide" || sections(saved) !== sections(before)) {
+    saved.briefInput.transition !== "smoothslide" || saved.options.beatSync !== true ||
+    saved.options.highlightFocus !== "performance" || sections(saved) !== sections(before)) {
     throw new Error(`Saved finishing choices changed selections or lost settings: ${JSON.stringify(saved.options)}`);
   }
   await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Open project').click()`);
@@ -305,7 +325,7 @@ async function runFinishingSettingsSmoke(win: BrowserWindow, waitFor: (expressio
   const reopened = await finishingSmokeState(win);
   if (!reopened.phone || !reopened.high || !reopened.slide || !reopened.crossfade || reopened.overlap !== 1.5 ||
     reopened.enhance !== true || !reopened.exportReady || reopened.title !== (saved.options.eventTitle ?? "") ||
-    reopened.labels !== (saved.options.showClipLabels ?? false)) {
+    reopened.labels !== (saved.options.showClipLabels ?? false) || !reopened.beatSync || !reopened.performance) {
     throw new Error(`Reopened finishing choices were wrong: ${JSON.stringify(reopened)}`);
   }
   smokeStage("finishing controls survived project reopen");
@@ -606,9 +626,10 @@ function analyzeImportedAudio(asset: MediaAsset, reduceRumble = false): Promise<
 
 ipcMain.handle("media:analyze-audio", (_event, asset: MediaAsset, reduceRumble?: boolean) => analyzeImportedAudio(asset, reduceRumble));
 
-ipcMain.handle("media:suggest", async (_event, asset: MediaAsset) => {
+ipcMain.handle("media:suggest", async (_event, asset: MediaAsset, highlightFocus: "balanced" | "performance" = "balanced") => {
+  if (!["balanced", "performance"].includes(highlightFocus)) throw new Error("Choose a valid highlight preference.");
   const bins = await analyzeImportedAudio(asset, false);
-  return chooseAudioHighlight(asset, bins);
+  return chooseAudioHighlight(asset, bins, 0.5, highlightFocus);
 });
 
 async function writeVisualOverlay(directory: string, name: string, selections: RenderSelection[],

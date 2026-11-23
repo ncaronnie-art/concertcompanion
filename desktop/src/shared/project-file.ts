@@ -65,6 +65,8 @@ function readOptions(value: unknown): ExportOptions {
     (value.enhance !== undefined && typeof value.enhance !== "boolean") ||
     (value.audioTransition !== undefined && !oneOf(value.audioTransition, ["cut", "crossfade"] as const)) ||
     (value.audioCrossfadeSeconds !== undefined && (!isNumber(value.audioCrossfadeSeconds) || value.audioCrossfadeSeconds < 0.1 || value.audioCrossfadeSeconds > 5)) ||
+    (value.beatSync !== undefined && typeof value.beatSync !== "boolean") ||
+    (value.highlightFocus !== undefined && !oneOf(value.highlightFocus, ["balanced", "performance"] as const)) ||
     (value.eventTitle !== undefined && (!isString(value.eventTitle, 80) || /[\r\n\x00-\x1f]/.test(value.eventTitle))) ||
     (value.showClipLabels !== undefined && typeof value.showClipLabels !== "boolean")) {
     throw new Error("The project contains invalid video settings.");
@@ -76,6 +78,8 @@ function readOptions(value: unknown): ExportOptions {
     ...(value.enhance === undefined ? {} : { enhance: value.enhance }),
     ...(value.audioTransition === undefined ? {} : { audioTransition: value.audioTransition }),
     ...(value.audioCrossfadeSeconds === undefined ? {} : { audioCrossfadeSeconds: value.audioCrossfadeSeconds }),
+    ...(value.beatSync === undefined ? {} : { beatSync: value.beatSync }),
+    ...(value.highlightFocus === undefined ? {} : { highlightFocus: value.highlightFocus }),
     ...(value.eventTitle === undefined ? {} : { eventTitle: value.eventTitle }),
     ...(value.showClipLabels === undefined ? {} : { showClipLabels: value.showClipLabels }) };
 }
@@ -89,6 +93,8 @@ function readBrief(value: unknown): CreativeBriefInput {
       (!isNumber(value.targetSeconds) || value.targetSeconds < 0.1 || value.targetSeconds > 86400)) ||
     (value.aspect !== undefined && !oneOf(value.aspect, ["portrait913", "vertical", "landscape"] as const)) ||
     (value.reduceRumble !== undefined && typeof value.reduceRumble !== "boolean") ||
+    (value.beatSync !== undefined && typeof value.beatSync !== "boolean") ||
+    (value.highlightFocus !== undefined && !oneOf(value.highlightFocus, ["balanced", "performance"] as const)) ||
     (value.transition !== undefined && !oneOf(value.transition, ["cut", "fade", "dissolve", "smoothslide"] as const)) ||
     (value.eventTitle !== undefined && (!isString(value.eventTitle, 80) || /[\r\n\x00-\x1f]/.test(value.eventTitle))) ||
     (value.showClipLabels !== undefined && typeof value.showClipLabels !== "boolean") ||
@@ -107,6 +113,8 @@ function readBrief(value: unknown): CreativeBriefInput {
     ...(value.targetSeconds === undefined ? {} : { targetSeconds: value.targetSeconds }),
     ...(value.aspect === undefined ? {} : { aspect: value.aspect }),
     ...(value.reduceRumble === undefined ? {} : { reduceRumble: value.reduceRumble }),
+    ...(value.beatSync === undefined ? {} : { beatSync: value.beatSync }),
+    ...(value.highlightFocus === undefined ? {} : { highlightFocus: value.highlightFocus }),
     ...(value.transition === undefined ? {} : { transition: value.transition }),
     ...(value.eventTitle === undefined ? {} : { eventTitle: value.eventTitle }),
     ...(value.showClipLabels === undefined ? {} : { showClipLabels: value.showClipLabels }),

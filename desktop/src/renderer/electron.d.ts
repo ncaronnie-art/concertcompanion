@@ -8,7 +8,7 @@ declare global {
       pickVideos(): Promise<{ path: string; id: string }[]>;
       probe(filePath: string): Promise<MediaAsset>;
       preview(id: string): Promise<string>;
-      suggest(asset: MediaAsset): Promise<Suggestion>;
+      suggest(asset: MediaAsset, highlightFocus?: "balanced" | "performance"): Promise<Suggestion>;
       analyzeAudio(asset: MediaAsset, reduceRumble?: boolean): Promise<AudioBin[]>;
       render(selections: RenderSelection[], options: ExportOptions, audioSelections?: AudioSelection[]): Promise<{ cancelled: boolean; output?: string; cleanupWarning?: boolean }>;
       previewCut(selections: RenderSelection[], options: ExportOptions, audioSelections?: AudioSelection[]): Promise<{ url: string }>;

@@ -108,7 +108,7 @@ test("one-song stays in one recording, and unsupported requests are disclosed", 
   assert.deepEqual(cut.clips.map((clip) => clip.included), [false, true]);
   assert.equal(cut.plannedSeconds, 30);
   assert.match(brief.limitations.join(" "), /Opening event titles and your named moments are supported/);
-  assert.match(brief.limitations.join(" "), /speed changes/);
+  assert.match(brief.limitations.join(" "), /speed changes/i);
   const named = interpretCreativeBrief({ description: "Several songs" }, [recording(1, { label: "Song A" }), recording(2, { label: "Song B" })], options);
   assert.match(named.summary, /your labeled songs/);
   assert.match(named.limitations.join(" "), /labels/);
@@ -313,7 +313,7 @@ test("Ronnie's soundtrack-led request appears explicitly in review without claim
   assert.match(brief.summary, /sound-energy build/);
   assert.match(brief.summary, /picture from 3 recordings over the soundtrack/);
   assert.match(brief.limitations.join(" "), /cannot remove crowd voices/);
-  assert.match(brief.limitations.join(" "), /not musical crescendo or beat recognition/);
+  assert.match(brief.limitations.join(" "), /not recognition of a musical crescendo/);
   assert.throws(() => makeFirstCut(clips, brief), /separate soundtrack plan/);
 });
 

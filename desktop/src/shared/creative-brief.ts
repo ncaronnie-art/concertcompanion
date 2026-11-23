@@ -29,6 +29,8 @@ export type CreativeBriefInput = {
   eventTitle?: string;
   showClipLabels?: boolean;
   transition?: ExportOptions["transition"];
+  beatSync?: boolean;
+  highlightFocus?: "balanced" | "performance";
   separatePicture?: boolean;
   soundMomentCount?: number;
   pictureSourceCount?: number;
@@ -197,12 +199,12 @@ function supportedLimits(text: string, type: VideoType, vibe: Vibe, customVibe: 
   const notes: string[] = [];
   if (type === "one-song" || /\b(several|multiple|different|many) songs?\b/i.test(text)) notes.push(labeledSongs > 1 ? "Song names come from your labels; the app has not detected or verified them." : "Songs are not identified automatically. The cut can use different recordings; mark or name song sections yourself if needed.");
   if (/\b(lyrics?|captions?|subtitles?|logo|title card)\b/i.test(text)) notes.push("Opening event titles and your named moments are supported. Lyrics, automatic captions, logos, and full-screen title cards are not available yet.");
-  if (/\b(beat.sync|beat.match|slow.motion|speed ramp|stabiliz|camera tracking|face tracking)\b/i.test(text)) notes.push("Beat syncing, speed changes, stabilization, and tracking are not available yet. Sound crossfades blend recordings without matching their beats or changing playback speed.");
-  if (/\b(?:auto(?:matic(?:ally)?)?|find|follow|track|center|focus|crop|frame)\b.{0,55}\b(?:performer|singer|stage|crowd|face)\b|\b(?:performer|singer|stage|crowd|face)\b.{0,55}\b(?:auto(?:matic(?:ally)?)?|follow|track|center|focus|crop|frame)\b/i.test(text)) notes.push("Portrait cropping starts centered; it cannot identify or follow a performer, stage, or crowd. Use Aim the crop on each recording to place the picture where you want it.");
+  if (/\b(slow.motion|speed ramp|stabiliz|camera tracking|face tracking)\b/i.test(text)) notes.push("Speed changes, stabilization, and tracking are not available yet.");
+  if (/\b(?:auto(?:matic(?:ally)?)?|find|follow|track|center|focus|crop|frame)\b[^.!?\n]{0,55}\b(?:performer|singer|stage|crowd|face)\b|\b(?:performer|singer|stage|crowd|face)\b[^.!?\n]{0,55}\b(?:auto(?:matic(?:ally)?)?|follow|track|center|focus|crop|frame)\b/i.test(text)) notes.push("Portrait cropping starts centered; it cannot identify or follow a performer, stage, or crowd. Use Aim the crop on each recording to place the picture where you want it.");
   if (cleanupRequested) notes.push(rumbleEnabled ?
     "Sound cleanup here means reducing very low rumble. It cannot remove crowd voices, repair clipping, or fully denoise music." :
     "Low-rumble reduction is off by your choice. Full sound cleaning is not available; crowd voices, clipping, and music noise are not removed.");
-  if (soundtrackIntent?.buildEnding) notes.push("The ending is ordered by measured sound energy, not musical crescendo or beat recognition. Listen before exporting.");
+  if (soundtrackIntent?.buildEnding) notes.push("The ending is ordered by measured sound energy, not recognition of a musical crescendo. Listen before exporting.");
   if (/\b(filters?|visual effects?|special effects?|animation)\b/i.test(text)) notes.push("Natural, vivid, cinematic, and warm looks, dissolves, and occasional glide transitions are available. Custom animation and generated effects are not supported.");
   if (vibe === "custom") notes.push(`${customVibe.trim() ? "That custom vibe" : "A custom vibe"} cannot be translated reliably yet; this cut starts with natural color and straightforward cuts.`);
   return [...new Set(notes)];
@@ -210,6 +212,10 @@ function supportedLimits(text: string, type: VideoType, vibe: Vibe, customVibe: 
 
 export function interpretCreativeBrief(input: CreativeBriefInput, clips: CreativeClip[], current: ExportOptions): CreativeBrief {
   validateClips(clips);
+  if (input.beatSync !== undefined && typeof input.beatSync !== "boolean" ||
+    input.highlightFocus !== undefined && !["balanced", "performance"].includes(input.highlightFocus)) {
+    throw new Error("Choose valid music and highlight preferences.");
+  }
   if (input.separatePicture !== undefined && typeof input.separatePicture !== "boolean") {
     throw new Error("Choose a valid separate soundtrack and picture setting.");
   }
@@ -258,6 +264,17 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   const options: ExportOptions = { ...current, aspect, ...style,
     reduceRumble: input.reduceRumble ?? (cleanupRequested ? true : current.reduceRumble),
     eventTitle, showClipLabels: noText || soundtrackIntent?.separatePicture ? false : input.showClipLabels ?? current.showClipLabels ?? false };
+  const noBeat = /\b(?:no|without|don't|do not)\s+(?:(?:use|add|apply)\s+)?beat[- ]?(?:matching|sync(?:ing)?|alignment)\b/i.test(description);
+  const asksBeat = /\bbeat[- ]?(?:match(?:ing)?|sync(?:ing)?|align(?:ment)?)\b|\b(?:cuts?|pictures?|video)\b.{0,30}\b(?:follow|to|on) (?:the )?(?:music|beat|rhythm)\b/i.test(description);
+  const noPerformance = /\b(?:don't|do not|never)\s+(?:favor|prefer|prioritize)\s+(?:the )?(?:performance|vocals?|singer|artist)\b|\bfavor (?:the )?crowd\b/i.test(description);
+  const asksPerformance = /\b(?:big|strong|best|powerful) vocal moments?\b|\b(?:favor|prefer|prioritize|feature|focus on)\b.{0,45}\b(?:vocals?|singer|artist|performance)\b|\b(?:vocals?|singer|artist)\b.{0,30}\b(?:over|instead of|rather than)\b.{0,20}\bcrowd\b/i.test(description);
+  const beatSync = input.beatSync ?? (noBeat ? false : asksBeat ? true : current.beatSync);
+  const highlightFocus = input.highlightFocus ?? (noPerformance ? "balanced" : asksPerformance ? "performance" : current.highlightFocus);
+  if (beatSync !== undefined) options.beatSync = beatSync;
+  if (highlightFocus !== undefined) options.highlightFocus = highlightFocus;
+  if (asksBeat && !noBeat && options.audioTransition === undefined) {
+    options.audioTransition = "crossfade"; options.audioCrossfadeSeconds ??= 2;
+  }
   const describedTransition = /\b(glide|sliding|animated (?:visual )?transitions?)\b/i.test(description) ? "smoothslide" :
     /\b(?:cross[- ]?)?dissolves?\b/i.test(description) ? "dissolve" : undefined;
   options.transition = input.transition ?? describedTransition ?? (current.quality === "high" && requestedVibe ?
@@ -367,8 +384,13 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   const graphics = `${eventTitle ? ` · opening title “${eventTitle}”` : ""}${options.showClipLabels && !soundtrackIntent?.separatePicture && clips.some((clip) => clip.label?.trim()) ? " · your named moments on video" : ""}`;
   const joins = ({ cut: "direct cuts", fade: "soft joins", dissolve: "dissolves", smoothslide: "dissolves with occasional glides" })[options.transition ?? "cut"];
   const soundJoins = options.audioTransition === "crossfade" ? ` · sound overlaps up to ${options.audioCrossfadeSeconds ?? 2}s where spare sound is available` : "";
-  const summary = `${time(targetSeconds ?? naturalSeconds)} ${typeLabel[videoType]}${variety} · ${vibe === "clean-live" ? "clean/live" : vibe} pacing · ${options.finish} look · ${joins} · ${shape} · ${preserved}${graphics}${soundSummary}${soundJoins}.`;
+  const musicSummary = `${options.beatSync && soundtrackIntent ? " · follow clear beats where possible" : ""}${options.highlightFocus === "performance" && !keepWholePerformance && selectionMode !== "use-my-sections" ? " · favor sustained performance phrases" : ""}`;
+  const summary = `${time(targetSeconds ?? naturalSeconds)} ${typeLabel[videoType]}${variety} · ${vibe === "clean-live" ? "clean/live" : vibe} pacing · ${options.finish} look · ${joins} · ${shape} · ${preserved}${graphics}${soundSummary}${soundJoins}${musicSummary}.`;
   const limitations = supportedLimits(description, videoType, vibe, customVibe, labeledSongs, cleanupRequested, options.reduceRumble, soundtrackIntent);
+  if (options.beatSync) limitations.push(soundtrackIntent?.separatePicture ?
+    "Confident beats can guide picture timing and align compatible song transitions. Uncertain or different tempos keep their existing blend; song speed and protected moments stay unchanged." :
+    "Independent picture timing needs a separate soundtrack. This edit keeps the original performance and sound together.");
+  if (options.highlightFocus === "performance") limitations.push("Performance preference favors sustained musical phrases over noisy bursts. It cannot identify the singer, recognize a big vocal moment, or remove crowd voices.");
   if (keepWholePerformance && !intactSoundtrackConflict && requestedSoundtrack?.buildEnding) limitations.push("Keeping the performance intact preserves its original sound and order; the app will not rearrange it to create a stronger ending.");
   if (soundtrackIntent?.buildEnding && markedClips.length) limitations.push("Your marked sections keep their place and original sound; they may limit how steadily the energy rises.");
   if (vibe === "energetic" && eligible.length < 2) limitations.push("Quicker cuts need multiple recordings; this cut keeps the available footage continuous.");

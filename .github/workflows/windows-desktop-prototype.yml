@@ -1,7 +1,7 @@
 name: Concert Compass Windows prototype verification
 on:
   push:
-    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story', 'native/vibe-capsule-visual-finish', 'native/vibe-capsule-desktop-quality', 'native/vibe-capsule-smooth-reels']
+    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story', 'native/vibe-capsule-visual-finish', 'native/vibe-capsule-desktop-quality', 'native/vibe-capsule-smooth-reels', 'native/vibe-capsule-music-led']
 permissions:
   contents: read
 jobs:
@@ -136,7 +136,7 @@ jobs:
         if: always() && steps.desktop_smoke.outcome != 'skipped'
         shell: pwsh
         run: |
-          foreach ($stage in @('finishing controls undo restored', 'finishing controls survived project reopen')) {
+          foreach ($stage in @('music preferences undo restored', 'finishing controls undo restored', 'finishing controls survived project reopen')) {
             if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern $stage -SimpleMatch -Quiet -ErrorAction SilentlyContinue)) { throw "Finishing settings check did not finish: $stage" }
           }
       - name: Open sound-led desktop flow

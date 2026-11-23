@@ -1,5 +1,6 @@
 import type { AudioSelection, ExportOptions } from "./render-plan.js";
-import type { AudioBin } from "./suggestions.js";
+import { scoreAudioBins, type AudioBin, type HighlightFocus } from "./suggestions.js";
+import { alignSoundtrackBeats, alignPictureCutsToMusic } from "./music-timing.js";
 import type { CreativeBrief, CreativeClip } from "./creative-brief.js";
 
 export type AudioStoryResult<T extends CreativeClip> = {
@@ -11,7 +12,7 @@ export type AudioStoryResult<T extends CreativeClip> = {
 };
 
 type Span = { asset: AudioSelection["asset"]; start: number; end: number };
-type ScoredSelection = { selection: AudioSelection; span: Span; score: number; energy: number; clipping: number; tailRise: number; measured: boolean };
+type ScoredSelection = { selection: AudioSelection; span: Span; score: number; energy: number; clipping: number; tailRise: number; measured: boolean; performance: number; performanceMeasured: boolean };
 type Gap = { kind: "gap"; duration: number; count: number; selections: ScoredSelection[] };
 type Anchor = { kind: "anchor"; selection: AudioSelection };
 const MIN = 0.1;
@@ -129,8 +130,8 @@ function planPicture<T extends CreativeClip>(clips: T[], brief: CreativeBrief): 
   return { clips: next as T[], seconds: actual };
 }
 
-function scoreWindow(bins: AudioBin[] | undefined, start: number, seconds: number): { score: number; energy: number; clipping: number; tailRise: number; measured: boolean } {
-  if (!bins?.length) return { score: 0, energy: 0, clipping: 0, tailRise: 0, measured: false };
+function scoreWindow(bins: AudioBin[] | undefined, start: number, seconds: number, focus: HighlightFocus = "balanced") {
+  if (!bins?.length) return { score: 0, energy: 0, clipping: 0, tailRise: 0, measured: false, performance: 0, performanceMeasured: false };
   const first = Math.min(bins.length - 1, Math.max(0, Math.floor(start / BIN_SECONDS)));
   const last = Math.min(bins.length, Math.max(first + 1, Math.ceil((start + seconds) / BIN_SECONDS)));
   let rms = 0, clipping = 0;
@@ -143,7 +144,9 @@ function scoreWindow(bins: AudioBin[] | undefined, start: number, seconds: numbe
   const tail = sum(bins.slice(last - third, last).map((bin) => bin.rms)) / third;
   // Penalize clipped sound when choosing a window; order the chosen moments by
   // actual measured energy, not by this quality score.
-  return { score: energy - clippingFraction * 0.8, energy, clipping: clippingFraction, tailRise: tail - head, measured: true };
+  const features = scoreAudioBins(bins.slice(first, last), focus);
+  return { score: features.score, energy, clipping: clippingFraction, tailRise: tail - head, measured: true,
+    performance: features.tonalProminence * 0.5 - features.crowdNoise * 0.45, performanceMeasured: features.performanceMeasured };
 }
 
 function freeSpans(assets: AudioSelection["asset"][], reserved: AudioSelection[],
@@ -167,12 +170,12 @@ function freeSpans(assets: AudioSelection["asset"][], reserved: AudioSelection[]
 
 function chooseTickets(spans: Span[], count: number, seconds: number,
   binsByPath: Readonly<Record<string, AudioBin[]>>,
-  preference: { buildEnding: boolean; variedLabels: boolean;
+  preference: { buildEnding: boolean; variedLabels: boolean; highlightFocus?: HighlightFocus;
     labelsByPath: Readonly<Record<string, string>>; usedLabels: ReadonlySet<string> }): Span[] {
   if (count < 1) return [];
   const sampleLength = seconds / count;
   const samples = new Map(spans.map((span) => [span,
-    bestWithin(span, Math.min(length(span), sampleLength), binsByPath[span.asset.path])]));
+    bestWithin(span, Math.min(length(span), sampleLength), binsByPath[span.asset.path], false, preference.highlightFocus)]));
   const canFill = (candidates: Span[]) => candidates.length >= count &&
     sum([...candidates].sort((a, b) => length(b) - length(a)).slice(0, count).map(length)) + EPS >= seconds;
   // Length alone must not let a silent recording displace audible performance.
@@ -197,6 +200,9 @@ function chooseTickets(spans: Span[], count: number, seconds: number,
         const aNovel = Number(preference.variedLabels && !!labelOf(a) && !usedLabels.has(labelOf(a)));
         const bNovel = Number(preference.variedLabels && !!labelOf(b) && !usedLabels.has(labelOf(b)));
         if (!firstEndingChoice && aNovel !== bNovel) return bNovel - aNovel;
+        const aSound = samples.get(a)!, bSound = samples.get(b)!;
+        if (preference.highlightFocus === "performance" && aSound.performanceMeasured && bSound.performanceMeasured &&
+          Math.abs(aSound.performance - bSound.performance) > 0.12) return bSound.performance - aSound.performance;
         if (preference.buildEnding && chosen.length > 0 && wanted > 1) {
           // A crescendo needs audible contrast, not merely the three loudest
           // windows in ascending order. Keep the strongest clean source for
@@ -251,21 +257,21 @@ function chooseTickets(spans: Span[], count: number, seconds: number,
   return chosen;
 }
 
-function bestWithin(span: Span, seconds: number, bins: AudioBin[] | undefined, preferRisingTail = false): ScoredSelection {
+function bestWithin(span: Span, seconds: number, bins: AudioBin[] | undefined, preferRisingTail = false, focus: HighlightFocus = "balanced"): ScoredSelection {
   const lastStart = span.end - seconds;
   if (lastStart < span.start - EPS) throw new Error("A sound section cannot fit within the available recording.");
   const steps = Math.min(2000, Math.max(1, Math.ceil((lastStart - span.start) / BIN_SECONDS)));
-  let bestStart = span.start, best = scoreWindow(bins, span.start, seconds);
+  let bestStart = span.start, best = scoreWindow(bins, span.start, seconds, focus);
   for (let index = 1; index <= steps; index++) {
     const start = span.start + (lastStart - span.start) * index / steps;
-    const score = scoreWindow(bins, start, seconds);
+    const score = scoreWindow(bins, start, seconds, focus);
     const rank = score.score + (preferRisingTail ? Math.max(0, score.tailRise) * 0.2 : 0);
     const bestRank = best.score + (preferRisingTail ? Math.max(0, best.tailRise) * 0.2 : 0);
     if (rank > bestRank + 0.000001) { bestStart = start; best = score; }
   }
   return { selection: { asset: span.asset, start: bestStart, end: bestStart + seconds },
     span, score: best.score, energy: best.energy, clipping: best.clipping,
-    tailRise: best.tailRise, measured: best.measured };
+    tailRise: best.tailRise, measured: best.measured, performance: best.performance, performanceMeasured: best.performanceMeasured };
 }
 
 function soundtrackParts<T extends CreativeClip>(picture: T[], count: number): Array<Gap | Anchor> {
@@ -436,9 +442,9 @@ export function planAudioStory<T extends CreativeClip>(clips: T[], brief: Creati
       throw new Error("Sound analysis could not measure a rising ending. Try again or adjust the sound moments yourself.");
     }
     const tickets = chooseTickets(spans, gap.count, gap.duration, binsByPath,
-      { buildEnding: intent.buildEnding && gap === finalGap, variedLabels, labelsByPath, usedLabels });
+      { buildEnding: intent.buildEnding && gap === finalGap, variedLabels, labelsByPath, usedLabels, highlightFocus: brief.options.highlightFocus });
     const amounts = allocate(gap.duration, tickets.map(length));
-    gap.selections = tickets.map((ticket, index) => bestWithin(ticket, amounts[index], binsByPath[ticket.asset.path]));
+    gap.selections = tickets.map((ticket, index) => bestWithin(ticket, amounts[index], binsByPath[ticket.asset.path], false, brief.options.highlightFocus));
     if (intent.buildEnding) gap.selections.sort((a, b) => a.energy - b.energy);
     reserved.push(...gap.selections.map((scored) => scored.selection));
     for (const selection of gap.selections) {
@@ -452,7 +458,7 @@ export function planAudioStory<T extends CreativeClip>(clips: T[], brief: Creati
     const lastIndex = lastPart.selections.length - 1;
     const current = lastPart.selections[lastIndex];
     const alternative = bestWithin(current.span, length(current.selection),
-      binsByPath[current.selection.asset.path], true);
+      binsByPath[current.selection.asset.path], true, brief.options.highlightFocus);
     const prior = parts.flatMap((part) => part.kind === "anchor" ?
       [scoreWindow(binsByPath[part.selection.asset.path], part.selection.start, length(part.selection)).energy] :
       part.selections.map((selection) => selection.energy)).slice(0, -1);
@@ -462,7 +468,14 @@ export function planAudioStory<T extends CreativeClip>(clips: T[], brief: Creati
       lastPart.selections[lastIndex] = alternative;
     }
   }
-  const audioSelections = parts.flatMap((part) => part.kind === "anchor" ? [part.selection] : part.selections.map((scored) => scored.selection));
+  let audioSelections = parts.flatMap((part) => part.kind === "anchor" ? [part.selection] : part.selections.map((scored) => scored.selection));
+  const musicNotes: string[] = [];
+  if (brief.options.beatSync && brief.options.audioTransition === "crossfade") {
+    const aligned = alignSoundtrackBeats(audioSelections, binsByPath, { crossfadeSeconds: brief.options.audioCrossfadeSeconds ?? 2 });
+    audioSelections = aligned.audioSelections;
+    musicNotes.push(...aligned.notes);
+  }
+  if (brief.options.beatSync && brief.options.audioTransition !== "crossfade") musicNotes.push("Sound blending is off, so song joins keep their existing timing.");
   const soundSeconds = sum(audioSelections.map(length));
   if (audioSelections.length !== intent.segmentCount || Math.abs(soundSeconds - picture.seconds) > EPS) {
     throw new Error("The soundtrack and picture lengths do not match. Review the plan before exporting.");
@@ -476,10 +489,26 @@ export function planAudioStory<T extends CreativeClip>(clips: T[], brief: Creati
   }
   const separated = intent.separatePicture ? separatePicture(picture.clips, audioSelections, picture.seconds) :
     { clips: picture.clips, independentSeconds: 0 };
+  if (brief.options.beatSync && intent.separatePicture) {
+    const timed = alignPictureCutsToMusic(separated.clips, audioSelections, binsByPath, {
+      pictureCrossfadeSeconds: ["dissolve", "smoothslide"].includes(brief.options.transition ?? "") ? 0.4 : 0 });
+    if ((picture.seconds - pictureSoundCoupling(timed.clips, audioSelections).joinedSeconds) / picture.seconds >= 0.25 - 0.0001) {
+      separated.clips = timed.clips;
+      musicNotes.push(...timed.notes);
+    } else musicNotes.push("Kept the separate picture edit unchanged because beat trims would bring it too close to the original joined recording.");
+  }
   const pictureCount = separated.clips.filter(included).length;
   const notes = [`Used ${audioSelections.length} nonrepeating sound moments beneath picture from ${pictureCount} recording${pictureCount === 1 ? "" : "s"}.`];
   if (intent.separatePicture) notes.push("The suggested picture differs from its original sound for a meaningful part of the video; watch the assembled preview to judge the match.");
   if (anchors.length) notes.push("Kept your marked picture and original sound together at their original source ranges and output positions.");
+  if (brief.options.highlightFocus === "performance") {
+    const measured = audioSelections.filter(s => !s.locked).map(s => scoreWindow(binsByPath[s.asset.path], s.start, length(s)).performanceMeasured);
+    notes.push(measured.length && measured.every(Boolean) ?
+      "Favored sustained musical phrases over noisy bursts. This does not identify the singer or remove crowd voices; listen to the chosen moments." :
+      measured.some(Boolean) ? "Used performance cues where measured; some moments used sound energy because those cues were unavailable. The singer is not identified." :
+      "Kept protected moments or used sound energy because performance cues were unavailable. The singer is not identified.");
+  }
+  notes.push(...musicNotes);
   if (intent.buildEnding) {
     const scored = audioSelections.map((selection) => scoreWindow(binsByPath[selection.asset.path], selection.start, length(selection)));
     const rising = scored.every((current, index) => index === 0 || current.energy + 0.0001 >= scored[index - 1].energy);
@@ -492,7 +521,7 @@ export function planAudioStory<T extends CreativeClip>(clips: T[], brief: Creati
 }
 
 export function refineAudioStory(audioSelections: AudioSelection[], index: number,
-  binsByPath: Readonly<Record<string, AudioBin[]>>): AudioSelection[] {
+  binsByPath: Readonly<Record<string, AudioBin[]>>, focus: HighlightFocus = "balanced"): AudioSelection[] {
   const current = audioSelections[index];
   if (!current) throw new Error("Choose a sound moment to change.");
   if (current.locked) throw new Error("This sound moment is protected. Unlock its marked section before changing it.");
@@ -506,7 +535,7 @@ export function refineAudioStory(audioSelections: AudioSelection[], index: numbe
     .filter((span) => length(span) + EPS >= seconds);
   const pool = after.length ? after : before;
   if (!pool.length) throw new Error("There is no different sound moment at this length in this recording. Review the plan to choose other recordings or a shorter length.");
-  const choice = pool.map((span) => bestWithin(span, seconds, binsByPath[current.asset.path]))
+  const choice = pool.map((span) => bestWithin(span, seconds, binsByPath[current.asset.path], false, focus))
     .sort((a, b) => b.score - a.score)[0];
   return audioSelections.map((selection, position) => position === index ? choice.selection : selection);
 }

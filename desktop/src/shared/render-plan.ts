@@ -13,6 +13,8 @@ export type ExportOptions = {
   enhance?: boolean;
   audioTransition?: "cut" | "crossfade";
   audioCrossfadeSeconds?: number;
+  beatSync?: boolean;
+  highlightFocus?: "balanced" | "performance";
   eventTitle?: string;
   showClipLabels?: boolean;
 };
@@ -58,6 +60,8 @@ function outputSettings(options: ExportOptions, profile: "export" | "draft", sou
     || (options.transition !== undefined && !["cut", "fade", "dissolve", "smoothslide"].includes(options.transition))
     || (options.quality !== undefined && !["standard", "high"].includes(options.quality))
     || (options.enhance !== undefined && typeof options.enhance !== "boolean")
+    || (options.beatSync !== undefined && typeof options.beatSync !== "boolean")
+    || (options.highlightFocus !== undefined && !["balanced", "performance"].includes(options.highlightFocus))
     || (options.audioTransition !== undefined && !["cut", "crossfade"].includes(options.audioTransition))
     || (options.audioCrossfadeSeconds !== undefined && (!Number.isFinite(options.audioCrossfadeSeconds) || options.audioCrossfadeSeconds < 0.1 || options.audioCrossfadeSeconds > 5))
     || (options.eventTitle !== undefined && (typeof options.eventTitle !== "string" || options.eventTitle.length > 80 || /[\r\n\x00-\x1f]/.test(options.eventTitle)))

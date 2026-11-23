@@ -9,7 +9,8 @@ import { suggestedRange, type AudioSelection, type ExportOptions, type MediaAsse
 import type { AudioBin } from "../shared/suggestions";
 
 type Chosen = CreativeClip & { previewUrl: string };
-type UndoState = { clips: Chosen[]; options: ExportOptions; audioSelections: AudioSelection[] | null; briefInput: CreativeBriefInput; briefDirty: boolean };
+type UndoState = { clips: Chosen[]; options: ExportOptions; audioSelections: AudioSelection[] | null; briefInput: CreativeBriefInput; briefDirty: boolean;
+  stage: "describe" | "review" | "cut"; reviewBrief: CreativeBrief | null };
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
 const videoTypes: { value: VideoType; label: string }[] = [
   { value: "highlight", label: "Highlights" }, { value: "one-song", label: "One song" },
@@ -26,6 +27,7 @@ const modes: { value: SelectionMode; label: string }[] = [
   { value: "keep-and-choose", label: "Keep mine, choose the rest" },
 ];
 const audioBinKey = (path: string, reduceRumble: boolean) => JSON.stringify([path, reduceRumble]);
+const suggestionKey = (path: string, focus: ExportOptions["highlightFocus"]) => JSON.stringify([path, focus ?? "balanced"]);
 const pictureTransitionNames: Record<NonNullable<ExportOptions["transition"]>, string> = {
   cut: "straight cuts", fade: "brief fades to black", dissolve: "dissolves", smoothslide: "smooth slides",
 };
@@ -95,6 +97,8 @@ export function App() {
   const [enhance, setEnhance] = useState(false);
   const [audioTransition, setAudioTransition] = useState<NonNullable<ExportOptions["audioTransition"]>>("crossfade");
   const [audioCrossfadeSeconds, setAudioCrossfadeSeconds] = useState(2);
+  const [beatSync, setBeatSync] = useState(true);
+  const [highlightFocus, setHighlightFocus] = useState<NonNullable<ExportOptions["highlightFocus"]>>("performance");
   const [eventTitle, setEventTitle] = useState("");
   const [showClipLabels, setShowClipLabels] = useState(false);
   const [briefInput, setBriefInput] = useState<CreativeBriefInput>({ description: "", separatePicture: true });
@@ -131,7 +135,7 @@ export function App() {
     storyProtectedMismatch ? "A kept picture or sound moment moved. Review your plan to keep them together." :
     "The picture and soundtrack lengths differ. Review your plan to align them again.";
   const options: ExportOptions = { aspect, reduceRumble, finish, transition, quality, enhance,
-    audioTransition, audioCrossfadeSeconds, eventTitle, showClipLabels };
+    audioTransition, audioCrossfadeSeconds, beatSync, highlightFocus, eventTitle, showClipLabels };
   const availableRecordings = clips.filter((clip) => !clip.excludedByUser).length;
   const suggestedPictureCount = Math.min(3, availableRecordings);
   const suggestedSoundCount = (() => {
@@ -143,7 +147,7 @@ export function App() {
   const guidedCutPending = briefInput.separatePicture === true && audioSelections === null;
 
   function remember() {
-    setUndoStack((old) => [...old.slice(-24), { clips, options, audioSelections, briefInput, briefDirty }]);
+    setUndoStack((old) => [...old.slice(-24), { clips, options, audioSelections, briefInput, briefDirty, stage, reviewBrief }]);
   }
   function applyOptions(next: ExportOptions) {
     setAspect(next.aspect); setReduceRumble(next.reduceRumble);
@@ -151,6 +155,7 @@ export function App() {
     // Missing fields belong to an older project, not to the new-project defaults.
     setQuality(next.quality ?? "standard"); setEnhance(next.enhance ?? false);
     setAudioTransition(next.audioTransition ?? "cut"); setAudioCrossfadeSeconds(next.audioCrossfadeSeconds ?? 2);
+    setBeatSync(next.beatSync ?? false); setHighlightFocus(next.highlightFocus ?? "balanced");
     setEventTitle(next.eventTitle ?? ""); setShowClipLabels(next.showClipLabels ?? false);
   }
   function changeClips(next: Chosen[]) {
@@ -198,6 +203,14 @@ export function App() {
     if (!audioCrossfadeDragging.current) remember();
     setAudioCrossfadeSeconds(value); invalidateReview();
   }
+  function changeMusicPreferences(patch: { beatSync?: boolean; highlightFocus?: ExportOptions["highlightFocus"] }) {
+    remember();
+    if (patch.beatSync !== undefined) setBeatSync(patch.beatSync);
+    if (patch.highlightFocus !== undefined) setHighlightFocus(patch.highlightFocus);
+    setBriefInput((old) => ({ ...old, ...patch }));
+    setBriefDirty(true); setReviewBrief(null); setStage("describe");
+    setMessage("Your music choices are saved here. Review the plan and make a first cut to apply them; kept sections stay protected.");
+  }
   function undo() {
     const previous = undoStack.at(-1);
     if (!previous) return;
@@ -206,6 +219,7 @@ export function App() {
     setAudioSelections(previous.audioSelections);
     setBriefInput(previous.briefInput);
     setBriefDirty(previous.briefDirty);
+    setStage(previous.stage); setReviewBrief(previous.reviewBrief);
     applyOptions(previous.options);
     setMessage("Undid the last edit. Your earlier choices are back.");
   }
@@ -339,10 +353,11 @@ export function App() {
             if (clip.excludedByUser || clip.locked || clip.selectionSource === "manual") continue;
             try {
               setMessage(`Finding a starting moment in ${clip.asset.name}…`);
-              let suggestion = audioSuggestions.current.get(clip.asset.path);
+              const key = suggestionKey(clip.asset.path, reviewBrief.options.highlightFocus);
+              let suggestion = audioSuggestions.current.get(key);
               if (!suggestion) {
-                suggestion = await window.concertCompass.suggest(clip.asset);
-                audioSuggestions.current.set(clip.asset.path, suggestion);
+                suggestion = await window.concertCompass.suggest(clip.asset, reviewBrief.options.highlightFocus);
+                audioSuggestions.current.set(key, suggestion);
               }
               candidates[index] = { ...clip, start: suggestion.start, end: suggestion.end };
             } catch { /* The current section remains a valid fallback. */ }
@@ -389,7 +404,7 @@ export function App() {
         setMessage(`Checking sound in ${current.asset.name}…`);
         audioBins.current[key] = await window.concertCompass.analyzeAudio(current.asset, reduceRumble);
       }
-      const next = refineAudioStory(audioSelections, index, { [current.asset.path]: audioBins.current[key] });
+      const next = refineAudioStory(audioSelections, index, { [current.asset.path]: audioBins.current[key] }, highlightFocus);
       remember(); setAudioSelections(next);
       setMessage(`Chose another sound moment from ${current.asset.name}. The other sound and picture sections stayed the same. Watch the updated preview before exporting.`);
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
@@ -433,10 +448,10 @@ export function App() {
   async function suggest(index: number) {
     const clip = clips[index];
     if (clip.locked) { setMessage("This section is protected. Unlock it before asking for another suggestion."); return; }
-    setBusy(true); setMessage(`Listening for stronger sound in ${clip.asset.name}…`);
+    setBusy(true); setMessage(`Finding a musical moment in ${clip.asset.name}…`);
     try {
-      const suggestion = await window.concertCompass.suggest(clip.asset);
-      audioSuggestions.current.set(clip.asset.path, suggestion);
+      const suggestion = await window.concertCompass.suggest(clip.asset, highlightFocus);
+      audioSuggestions.current.set(suggestionKey(clip.asset.path, highlightFocus), suggestion);
       changeClip(index, { start: suggestion.start, end: suggestion.end, selectionSource: "suggested" });
       seek(clip, suggestion.start); setMessage(suggestion.reason);
     } catch { setMessage("Couldn't analyze this recording's sound. Your selection is unchanged; you can still choose the moment yourself."); }
@@ -576,7 +591,9 @@ export function App() {
             onPointerDown={() => { remember(); audioCrossfadeDragging.current = true; }} onPointerUp={() => { audioCrossfadeDragging.current = false; }}
             onPointerCancel={() => { audioCrossfadeDragging.current = false; }} onBlur={() => { audioCrossfadeDragging.current = false; }}
             onChange={(event) => changeAudioCrossfade(Number(event.target.value))} />
-        </div>}<p>{audioTransition === "crossfade" ? "Blends nearby source audio where there is room, without changing kept moments." : "Keeps each recording’s sound separate at the join."} Songs are not beat-matched; listen to the assembled preview.</p></div>
+        </div>}<p>{audioTransition === "crossfade" ? "Blends nearby source audio where there is room, without changing kept moments." : "Keeps each recording’s sound separate at the join."} Listen to the assembled preview to check the song changes.</p></div>
+        <div><b>Music-led timing</b><label><input aria-label="Follow the beat" disabled={busy} type="checkbox" checked={beatSync} onChange={(event) => changeMusicPreferences({ beatSync: event.target.checked })} /> Follow the beat</label><p>With a separate soundtrack, aligns song changes and picture cuts to clear, compatible beats without changing song speed. Uncertain rhythm keeps the existing timing; your kept sections stay protected.</p></div>
+        <div><b>Highlight choices</b><label><input aria-label="Favor the performance" disabled={busy} type="checkbox" checked={highlightFocus === "performance"} onChange={(event) => changeMusicPreferences({ highlightFocus: event.target.checked ? "performance" : "balanced" })} /> Favor the performance</label><p>Favors sustained musical phrases over bursts of crowd noise. It cannot identify the singer.</p></div>
         <div><b>Finishing look</b><div className="clip-actions">{(["natural", "vivid", "cinematic", "warm"] as const).map((look) => <button key={look} disabled={busy} aria-pressed={finish === look} onClick={() => { remember(); setFinish(look); invalidateReview(); }}>{look}</button>)}</div><p>Subtle color treatment; it does not detect scenes or moods.</p></div>
         <div><b>Optional picture clarity</b><label><input aria-label="Gentle picture clarity" disabled={busy} type="checkbox" checked={enhance} onChange={(event) => { remember(); setEnhance(event.target.checked); invalidateReview(); }} /> Gentle cleanup and sharpening</label><p>Light grain reduction and sharpening. It cannot restore missing detail; compare the preview before keeping it.</p></div>
         <label><input disabled={busy} type="checkbox" checked={reduceRumble} onChange={(event) => { remember(); setReduceRumble(event.target.checked); setBriefInput((old) => ({ ...old, reduceRumble: event.target.checked })); invalidateReview(); if (audioSelections) { setBriefDirty(true); setMessage("Low-rumble processing changes how sound moments are chosen. Review your plan and make a new first cut before exporting."); } }} /> Reduce low rumble <small>Gently lowers very low bass. It does not remove crowd voices.</small></label>
@@ -605,6 +622,6 @@ export function App() {
         <p className="note">Selected range: {clock(clip.start)}–{clock(clip.end)} ({(clip.end - clip.start).toFixed(1)} seconds){clip.label ? ` · ${clip.label} (named by you)` : ""}</p>
       </article>)}</section>
     </>}
-    <footer><b>Your recordings, your choices.</b> Sound-based suggestions, optional finishing, and local MP4 export. The app does not recognize songs or match beats. Review the assembled video before sharing.</footer>
+    <footer><b>Your recordings, your choices.</b> Music-led suggestions, optional finishing, and local MP4 export. The app does not identify songs or singers. Review the assembled video before sharing.</footer>
   </main>;
 }

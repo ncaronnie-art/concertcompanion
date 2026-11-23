@@ -25,9 +25,11 @@ function readAsset(value: unknown): MediaAsset {
     !isNumber(value.duration) || value.duration < 0.1 ||
     !isNumber(value.width) || value.width < 1 ||
     !isNumber(value.height) || value.height < 1 ||
+    (value.audioDuration !== undefined && (!isNumber(value.audioDuration) || value.audioDuration <= 0 || value.audioDuration > value.duration + 0.25)) ||
     typeof value.hasAudio !== "boolean") throw new Error("The project contains an invalid video.");
   return { path: value.path, name: value.name, duration: value.duration,
-    width: value.width, height: value.height, hasAudio: value.hasAudio };
+    width: value.width, height: value.height, hasAudio: value.hasAudio,
+    ...(value.audioDuration === undefined ? {} : { audioDuration: value.audioDuration }) };
 }
 
 function readClip(value: unknown): CreativeClip {
@@ -58,7 +60,11 @@ function readOptions(value: unknown): ExportOptions {
   if (!isObject(value) || !oneOf(value.aspect, ["portrait913", "vertical", "landscape"] as const) ||
     typeof value.reduceRumble !== "boolean" ||
     (value.finish !== undefined && !oneOf(value.finish, ["natural", "vivid", "cinematic", "warm"] as const)) ||
-    (value.transition !== undefined && !oneOf(value.transition, ["cut", "fade"] as const)) ||
+    (value.transition !== undefined && !oneOf(value.transition, ["cut", "fade", "dissolve", "smoothslide"] as const)) ||
+    (value.quality !== undefined && !oneOf(value.quality, ["standard", "high"] as const)) ||
+    (value.enhance !== undefined && typeof value.enhance !== "boolean") ||
+    (value.audioTransition !== undefined && !oneOf(value.audioTransition, ["cut", "crossfade"] as const)) ||
+    (value.audioCrossfadeSeconds !== undefined && (!isNumber(value.audioCrossfadeSeconds) || value.audioCrossfadeSeconds < 0.1 || value.audioCrossfadeSeconds > 5)) ||
     (value.eventTitle !== undefined && (!isString(value.eventTitle, 80) || /[\r\n\x00-\x1f]/.test(value.eventTitle))) ||
     (value.showClipLabels !== undefined && typeof value.showClipLabels !== "boolean")) {
     throw new Error("The project contains invalid video settings.");
@@ -66,6 +72,10 @@ function readOptions(value: unknown): ExportOptions {
   return { aspect: value.aspect, reduceRumble: value.reduceRumble,
     ...(value.finish === undefined ? {} : { finish: value.finish }),
     ...(value.transition === undefined ? {} : { transition: value.transition }),
+    ...(value.quality === undefined ? {} : { quality: value.quality }),
+    ...(value.enhance === undefined ? {} : { enhance: value.enhance }),
+    ...(value.audioTransition === undefined ? {} : { audioTransition: value.audioTransition }),
+    ...(value.audioCrossfadeSeconds === undefined ? {} : { audioCrossfadeSeconds: value.audioCrossfadeSeconds }),
     ...(value.eventTitle === undefined ? {} : { eventTitle: value.eventTitle }),
     ...(value.showClipLabels === undefined ? {} : { showClipLabels: value.showClipLabels }) };
 }
@@ -79,6 +89,7 @@ function readBrief(value: unknown): CreativeBriefInput {
       (!isNumber(value.targetSeconds) || value.targetSeconds < 0.1 || value.targetSeconds > 86400)) ||
     (value.aspect !== undefined && !oneOf(value.aspect, ["portrait913", "vertical", "landscape"] as const)) ||
     (value.reduceRumble !== undefined && typeof value.reduceRumble !== "boolean") ||
+    (value.transition !== undefined && !oneOf(value.transition, ["cut", "fade", "dissolve", "smoothslide"] as const)) ||
     (value.eventTitle !== undefined && (!isString(value.eventTitle, 80) || /[\r\n\x00-\x1f]/.test(value.eventTitle))) ||
     (value.showClipLabels !== undefined && typeof value.showClipLabels !== "boolean") ||
     (value.separatePicture !== undefined && typeof value.separatePicture !== "boolean") ||
@@ -96,6 +107,7 @@ function readBrief(value: unknown): CreativeBriefInput {
     ...(value.targetSeconds === undefined ? {} : { targetSeconds: value.targetSeconds }),
     ...(value.aspect === undefined ? {} : { aspect: value.aspect }),
     ...(value.reduceRumble === undefined ? {} : { reduceRumble: value.reduceRumble }),
+    ...(value.transition === undefined ? {} : { transition: value.transition }),
     ...(value.eventTitle === undefined ? {} : { eventTitle: value.eventTitle }),
     ...(value.showClipLabels === undefined ? {} : { showClipLabels: value.showClipLabels }),
     ...(value.separatePicture === undefined ? {} : { separatePicture: value.separatePicture }),

@@ -75,14 +75,14 @@ test("vibes change selection density and supported finishing choices", () => {
   assert.equal(makeFirstCut(clips, clean).clips.filter((clip) => clip.included).length, 2);
   assert.deepEqual([cinematic.options.finish, cinematic.options.transition], ["cinematic", "fade"]);
   assert.deepEqual([clean.options.finish, clean.options.transition], ["natural", "cut"]);
-  assert.equal(energetic.options.showClipLabels, true);
-  assert.equal(cinematic.options.showClipLabels, true);
+  assert.equal(energetic.options.showClipLabels, false, "vibe must not add unsolicited text");
+  assert.equal(cinematic.options.showClipLabels, false);
   assert.equal(clean.options.showClipLabels, false);
 });
 
 test("video title and user named moments shape the brief without inventing song labels", () => {
   const clips = [recording(1, { label: "First song" }), recording(2)];
-  const brief = interpretCreativeBrief({ description: "Cinematic recap", eventTitle: "The Night", vibe: "cinematic" }, clips, options);
+  const brief = interpretCreativeBrief({ description: "Cinematic recap", eventTitle: "The Night", showClipLabels: true, vibe: "cinematic" }, clips, options);
   assert.equal(brief.options.eventTitle, "The Night");
   assert.equal(brief.options.showClipLabels, true);
   assert.match(brief.summary, /opening title “The Night”/);
@@ -487,4 +487,23 @@ test("an unset length fits the requested picture recording count without shorten
   assert.equal(explicit.targetSeconds, 36);
   assert.equal(explicit.conflict?.kind, "audio-story-picture-count");
   assert.match(explicit.conflict?.message ?? "", /cannot fill/);
+});
+
+test("no text overrides saved titles and labels while modern transition choices survive the brief", () => {
+  const clips = [recording(1, { label: "Named performance" }), recording(2)];
+  const current = { ...options, quality: "high" as const, transition: "dissolve" as const,
+    audioTransition: "crossfade" as const, audioCrossfadeSeconds: 2, eventTitle: "Old title", showClipLabels: true };
+  const brief = interpretCreativeBrief({ description: "Cinematic recap, no additional text added as an overlay.",
+    transition: "smoothslide", eventTitle: "Another title", showClipLabels: true }, clips, current);
+  assert.equal(brief.options.eventTitle, "");
+  assert.equal(brief.options.showClipLabels, false);
+  assert.equal(brief.options.transition, "smoothslide");
+  assert.equal(brief.options.audioTransition, "crossfade");
+  assert.match(brief.summary, /occasional glides/);
+  assert.match(brief.summary, /sound overlaps up to 2s/);
+  const blank = interpretCreativeBrief({ description: "" }, clips, { ...current, eventTitle: "", showClipLabels: false });
+  assert.equal(blank.options.transition, "dissolve", "an unspecified vibe must not erase the chosen transition");
+  assert.equal(blank.options.showClipLabels, false);
+  const cinematic = interpretCreativeBrief({ description: "Cinematic recap" }, clips, current);
+  assert.equal(cinematic.options.transition, "dissolve");
 });

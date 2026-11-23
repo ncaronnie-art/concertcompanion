@@ -127,3 +127,60 @@ test("v2 rejects missing, silent, overlapping, or out-of-bounds sound ranges", (
   assert.throws(() => parseProjectSnapshot({ ...base,
     briefInput: { ...project.briefInput, pictureSourceCount: 2.5 } }), /invalid creative brief/);
 });
+
+test("new finishing settings round trip without changing protected sections or independent sound", () => {
+  const options = { aspect: "vertical", reduceRumble: true, finish: "natural", transition: "dissolve",
+    quality: "high", enhance: true, audioTransition: "crossfade", audioCrossfadeSeconds: 2,
+    eventTitle: "", showClipLabels: false };
+  const saved = parseProjectSnapshot({ ...project, version: 2, options,
+    briefInput: { ...project.briefInput, transition: "dissolve" },
+    audioSelections: [{ asset: project.clips[0].asset, start: 10, end: 24, locked: true }] });
+  assert.deepEqual(saved.options, options);
+  assert.equal(saved.briefInput.transition, "dissolve", "an explicit picture-transition choice survives review and reopen");
+  assert.deepEqual([saved.clips[0].start, saved.clips[0].end, saved.clips[0].locked, saved.clips[1].excludedByUser], [10, 24, true, true]);
+  assert.deepEqual(saved.audioSelections?.map(({ start, end, locked }) => ({ start, end, locked })), [{ start: 10, end: 24, locked: true }]);
+  assert.deepEqual(parseProjectSnapshot(JSON.parse(JSON.stringify(saved))), saved);
+  const slide = parseProjectSnapshot({ ...saved, options: { ...options, transition: "smoothslide", quality: "standard", enhance: false, audioTransition: "cut", audioCrossfadeSeconds: 0.1 } });
+  assert.equal(slide.options.transition, "smoothslide");
+  assert.equal(slide.options.audioCrossfadeSeconds, 0.1);
+  assert.equal(parseProjectSnapshot({ ...saved, options: { ...options, audioCrossfadeSeconds: 5 } }).options.audioCrossfadeSeconds, 5);
+});
+
+test("older projects retain their original framing and joins without receiving new export defaults", () => {
+  for (const input of [project, { ...project, version: 2, audioSelections: null }]) {
+    const saved = parseProjectSnapshot(input);
+    assert.deepEqual(saved.options, project.options);
+    for (const field of ["quality", "enhance", "audioTransition", "audioCrossfadeSeconds"]) {
+      assert.equal(field in saved.options, false, `legacy projects must not acquire ${field}`);
+    }
+    assert.equal("audioDuration" in saved.clips[0].asset, false);
+  }
+});
+
+test("invalid finishing controls cannot enter a saved project", () => {
+  const invalidOptions = [
+    { quality: "ultra" }, { enhance: "yes" }, { audioTransition: "blend" }, { transition: "arbitrary" },
+    ...[0, 0.09, 5.01, Number.NaN, Number.POSITIVE_INFINITY, "2"].map((audioCrossfadeSeconds) => ({ audioCrossfadeSeconds })),
+  ];
+  for (const invalid of invalidOptions) {
+    assert.throws(() => parseProjectSnapshot({ ...project, options: { ...project.options, ...invalid } }), /invalid video settings/);
+  }
+  assert.throws(() => parseProjectSnapshot({ ...project,
+    briefInput: { ...project.briefInput, transition: "arbitrary" } }), /invalid creative brief/);
+});
+
+test("measured audio coverage survives project reopen for both picture and soundtrack sources", () => {
+  const asset = { ...project.clips[0].asset, audioDuration: 55.25 };
+  const saved = parseProjectSnapshot({ ...project, version: 2,
+    clips: [{ ...project.clips[0], asset }, project.clips[1]],
+    audioSelections: [{ asset, start: 10, end: 24, locked: true }] });
+  assert.equal(saved.clips[0].asset.audioDuration, 55.25);
+  assert.equal(saved.audioSelections?.[0].asset.audioDuration, 55.25);
+  assert.deepEqual(parseProjectSnapshot(JSON.parse(JSON.stringify(saved))), saved);
+  for (const audioDuration of [0, -1, 60.26, Number.NaN, Number.POSITIVE_INFINITY, "55"]) {
+    assert.throws(() => parseProjectSnapshot({ ...project,
+      clips: [{ ...project.clips[0], asset: { ...asset, audioDuration } }, project.clips[1]] }), /invalid video/);
+  }
+  assert.equal(parseProjectSnapshot({ ...project,
+    clips: [{ ...project.clips[0], asset: { ...asset, audioDuration: 60.25 } }, project.clips[1]] }).clips[0].asset.audioDuration, 60.25);
+});

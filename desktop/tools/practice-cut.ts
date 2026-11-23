@@ -57,7 +57,7 @@ if (mode === "plan") {
   const stem = path.basename(input, ".json");
   const file = path.join(out, `${stem}-${profile}.mp4`);
   const script = buildOverlayAss({ eventTitle: snapshot.options.eventTitle,
-    ...renderDimensions(snapshot.options, profile as "draft" | "export"), style: snapshot.options.finish ?? "natural" });
+    ...renderDimensions(snapshot.options, profile as "draft" | "export", snapshot.clips.filter(c => c.included).map(c => c.asset)), style: snapshot.options.finish ?? "natural" });
   const ass = script ? path.join(out, `${stem}-${profile}.ass`) : undefined;
   if (script && ass) await writeFile(ass, script);
   const command = buildAudioLedRenderCommand(snapshot.clips.filter(c => c.included && !c.excludedByUser),

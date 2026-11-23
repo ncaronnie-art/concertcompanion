@@ -77,9 +77,19 @@ function createWindow() {
         };
         await waitFor(`document.body.innerText.includes('${smokeStory ? "3" : "2"} selected')`, "import");
         smokeStage("videos imported");
-        const defaultShape = await win.webContents.executeJavaScript(`document.querySelector('.options button[aria-pressed="true"]')?.textContent`);
-        if (!defaultShape?.includes("9:13")) throw new Error(`New-project portrait default was wrong: ${defaultShape}`);
-        smokeStage("portrait 9:13 default ready");
+        const freshDefaults = await finishingSmokeState(win);
+        if (!freshDefaults.phone || !freshDefaults.high || !freshDefaults.dissolve || !freshDefaults.crossfade ||
+          freshDefaults.overlap !== 2 || freshDefaults.enhance !== false || freshDefaults.title !== "" ||
+          freshDefaults.labels !== false || !freshDefaults.fill) {
+          throw new Error(`Fresh phone finishing defaults were wrong: ${JSON.stringify(freshDefaults)}`);
+        }
+        smokeStage("fresh phone finishing defaults ready");
+        // Preserve the established pixel, title, duration and cancellation checks
+        // under their explicit legacy profile. New blends have separate render tests.
+        for (const label of ["Portrait 9:13", "Standard · smaller file", "Straight cut", "Direct join"]) {
+          await chooseSmokeOption(win, waitFor, label);
+        }
+        smokeStage("portrait 9:13 legacy profile ready");
         await waitFor(`(() => { const v = document.querySelector('video'); return v && v.videoWidth > 0 && v.readyState >= 2 })()`, "video picture");
         smokeStage("source picture ready");
         const picture = await win.webContents.executeJavaScript(`(() => { try { const v=document.querySelector('video'), c=document.createElement('canvas'); c.width=8; c.height=8; c.getContext('2d').drawImage(v,0,0,8,8); return Array.from(c.getContext('2d').getImageData(0,0,8,8).data).some((n,i)=>i%4!==3 && n>20) } catch(e) { return String(e) } })()`);
@@ -168,7 +178,7 @@ function createWindow() {
         const leftCropEdge = await win.webContents.executeJavaScript(`(() => { const v=document.querySelector('.draft-player'), c=document.createElement('canvas'); c.width=v.videoWidth; c.height=v.videoHeight; const x=c.getContext('2d'); x.drawImage(v,0,0); return Array.from(x.getImageData(5,Math.floor(v.videoHeight/2),1,1).data).slice(0,3) })()`);
         if (leftCropEdge[2] < 60 || leftCropEdge[2] < leftCropEdge[0] * 1.5 || leftCropEdge[2] < leftCropEdge[1] * 1.5) throw new Error(`Portrait aim did not shift the rendered crop left: ${leftCropEdge}`);
         smokeStage("portrait aim changed rendered picture");
-        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Widescreen')).click(); document.querySelector('.options input[type=checkbox]').click()`);
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Widescreen')).click(); Array.from(document.querySelectorAll('.options label')).find(label => label.textContent.includes('Reduce low rumble')).querySelector('input[type=checkbox]').click()`);
         await waitFor(`!!document.querySelector('.draft-stale')`, "draft invalidation after settings change");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Save project').click()`);
         await waitFor(`document.body.innerText.includes('Project saved:')`, "project save");
@@ -183,7 +193,7 @@ function createWindow() {
         smokeStage("project saved");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Open project').click()`);
         await waitFor(`document.body.innerText.includes('Project opened. Your sections and protected moments are ready.')`, "project open");
-        const restored = await win.webContents.executeJavaScript(`(() => ({ description: document.querySelector('.brief textarea').value, locked: document.querySelectorAll('.clips article')[1].querySelector('.trim-heading input[type=checkbox]').checked, aspect: document.querySelector('.options button[aria-pressed="true"]').textContent, rumble: document.querySelector('.options input[type=checkbox]').checked, title: document.querySelector('input[aria-label="Video title (optional)"]')?.value, namedMoments: document.querySelector('input[aria-label="Show my named moments on video"]')?.checked, labels: Array.from(document.querySelectorAll('.clips article .moment-label input')).map(input => input.value) }))()`);
+        const restored = await win.webContents.executeJavaScript(`(() => ({ description: document.querySelector('.brief textarea').value, locked: document.querySelectorAll('.clips article')[1].querySelector('.trim-heading input[type=checkbox]').checked, aspect: document.querySelector('.options button[aria-pressed="true"]').textContent, rumble: Array.from(document.querySelectorAll('.options label')).find(label => label.textContent.includes('Reduce low rumble')).querySelector('input[type=checkbox]').checked, title: document.querySelector('input[aria-label="Video title (optional)"]')?.value, namedMoments: document.querySelector('input[aria-label="Show my named moments on video"]')?.checked, labels: Array.from(document.querySelectorAll('.clips article .moment-label input')).map(input => input.value) }))()`);
         if (!restored.description.includes('energetic recap') || !restored.locked || !restored.aspect.includes('Widescreen') || !restored.rumble || restored.title !== 'Live at the show' || !restored.namedMoments || restored.labels.join() !== 'Opening energy,Final roar') throw new Error(`Project restore failed: ${JSON.stringify(restored)}`);
         smokeStage("visual options survived project reopen");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.options button')).find(b => b.textContent.includes('9:13')).click()`);
@@ -231,11 +241,74 @@ function createWindow() {
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Open project').click()`);
         await waitFor(`document.body.innerText.includes('Project opened.') && Array.from(document.querySelectorAll('button')).some(b => b.textContent === 'Export MP4' && !b.disabled)`, "intact project reopen remains exportable");
         smokeStage("intact performance ready after project reopen");
+        await runFinishingSettingsSmoke(win, waitFor);
         smokeStage("smoke passed");
         console.log("Desktop creative brief, protected selection, first cut, refinement, project save/open and MP4 export passed"); clearTimeout(timer); app.exit(0);
       } catch (error) { smokeStage(`desktop smoke test failed: ${error instanceof Error ? error.stack : String(error)}`); console.error("Desktop smoke test failed", error); clearTimeout(timer); app.exit(1); }
     });
   }
+}
+
+async function finishingSmokeState(win: BrowserWindow) {
+  return win.webContents.executeJavaScript(`(() => {
+    const pressed = label => Array.from(document.querySelectorAll('.options button')).find(b => b.textContent === label)?.getAttribute('aria-pressed') === 'true';
+    const articles = Array.from(document.querySelectorAll('.clips article'));
+    return { phone: pressed('Phone 9:16 · default'), high: pressed('Best available · up to 1080p'),
+      dissolve: pressed('Dissolve'), slide: pressed('Smooth slide'), cut: pressed('Straight cut'),
+      crossfade: pressed('Blend sound'), overlap: Number(document.querySelector('input[aria-label="Sound overlap seconds"]')?.value),
+      enhance: document.querySelector('input[aria-label="Gentle picture clarity"]')?.checked,
+      title: document.querySelector('input[aria-label="Video title (optional)"]')?.value,
+      labels: document.querySelector('input[aria-label="Show my named moments on video"]')?.checked,
+      fill: articles.length > 0 && articles.every(article => Array.from(article.querySelectorAll('.frame-choice button')).find(b => b.textContent === 'Fill screen')?.getAttribute('aria-pressed') === 'true'),
+      exportReady: document.querySelector('.toolbar-actions button.primary')?.disabled === false };
+  })()`);
+}
+
+async function chooseSmokeOption(win: BrowserWindow, waitFor: (expression: string, label: string) => Promise<void>, label: string) {
+  const literal = JSON.stringify(label);
+  await win.webContents.executeJavaScript(`(() => { const button = Array.from(document.querySelectorAll('.options button')).find(b => b.textContent === ${literal}); if (!button || button.disabled) throw new Error('Finishing option unavailable: ' + ${literal}); button.click(); })()`);
+  await waitFor(`Array.from(document.querySelectorAll('.options button')).some(b => b.textContent === ${literal} && b.getAttribute('aria-pressed') === 'true')`, label);
+}
+
+async function runFinishingSettingsSmoke(win: BrowserWindow, waitFor: (expression: string, label: string) => Promise<void>): Promise<void> {
+  const before = parseProjectSnapshot(JSON.parse(await readFile(process.env.COMPASS_SMOKE_PROJECT!, "utf8")));
+  const sections = (project: ProjectSnapshot) => JSON.stringify({
+    picture: project.clips.map(c => [c.asset.path, c.start, c.end, c.included, c.locked, c.excludedByUser, c.selectionSource, c.orderLocked, c.framing, c.focus, c.label]),
+    sound: project.audioSelections?.map(s => [s.asset.path, s.start, s.end, s.locked]) ?? null,
+  });
+  await chooseSmokeOption(win, waitFor, "Phone 9:16 · default");
+  await chooseSmokeOption(win, waitFor, "Best available · up to 1080p");
+  await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('input[aria-label="Gentle picture clarity"]'); if (!input || input.disabled) throw new Error('Picture clarity control unavailable'); if (!input.checked) input.click(); })()`);
+  await waitFor(`document.querySelector('input[aria-label="Gentle picture clarity"]')?.checked === true`, "picture clarity choice");
+  await chooseSmokeOption(win, waitFor, "Blend sound");
+  await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('input[aria-label="Sound overlap seconds"]'); if (!input) throw new Error('Sound overlap control unavailable'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(input, '1.5'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await waitFor(`document.querySelector('input[aria-label="Sound overlap seconds"]')?.value === '1.5'`, "sound overlap choice");
+  await chooseSmokeOption(win, waitFor, "Smooth slide");
+  await win.webContents.executeJavaScript(`(() => { const button = Array.from(document.querySelectorAll('.brief button')).find(b => b.textContent === 'Undo'); if (!button || button.disabled) throw new Error('Finishing undo unavailable'); button.click(); })()`);
+  await waitFor(`Array.from(document.querySelectorAll('.options button')).some(b => b.textContent === 'Straight cut' && b.getAttribute('aria-pressed') === 'true')`, "visual-transition undo");
+  const undone = await finishingSmokeState(win);
+  if (!undone.phone || !undone.high || !undone.cut || !undone.crossfade || undone.overlap !== 1.5 || undone.enhance !== true || !undone.exportReady) {
+    throw new Error(`Undo changed unrelated finishing choices or export readiness: ${JSON.stringify(undone)}`);
+  }
+  smokeStage("finishing controls undo restored");
+  await chooseSmokeOption(win, waitFor, "Smooth slide");
+  await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Save project').click()`);
+  await waitFor(`document.body.innerText.includes('Project saved:')`, "finishing settings save");
+  const saved = parseProjectSnapshot(JSON.parse(await readFile(process.env.COMPASS_SMOKE_PROJECT!, "utf8")));
+  if (saved.options.aspect !== "vertical" || saved.options.quality !== "high" || saved.options.enhance !== true ||
+    saved.options.audioTransition !== "crossfade" || saved.options.audioCrossfadeSeconds !== 1.5 || saved.options.transition !== "smoothslide" ||
+    saved.briefInput.transition !== "smoothslide" || sections(saved) !== sections(before)) {
+    throw new Error(`Saved finishing choices changed selections or lost settings: ${JSON.stringify(saved.options)}`);
+  }
+  await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Open project').click()`);
+  await waitFor(`document.body.innerText.includes('Project opened.') && document.querySelector('.toolbar-actions button.primary')?.disabled === false`, "finishing settings reopen");
+  const reopened = await finishingSmokeState(win);
+  if (!reopened.phone || !reopened.high || !reopened.slide || !reopened.crossfade || reopened.overlap !== 1.5 ||
+    reopened.enhance !== true || !reopened.exportReady || reopened.title !== (saved.options.eventTitle ?? "") ||
+    reopened.labels !== (saved.options.showClipLabels ?? false)) {
+    throw new Error(`Reopened finishing choices were wrong: ${JSON.stringify(reopened)}`);
+  }
+  smokeStage("finishing controls survived project reopen");
 }
 
 async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: string, label: string) => Promise<void>): Promise<void> {
@@ -503,9 +576,13 @@ ipcMain.handle("media:probe", async (_event, filePath: string): Promise<MediaAss
   const data = JSON.parse(raw);
   const streams = data.streams ?? [];
   const video = streams.find((stream: { codec_type: string }) => stream.codec_type === "video");
+  const audio = streams.find((stream: { codec_type: string }) => stream.codec_type === "audio");
   const dimensions = video ? displayDimensions(video) : { width: 0, height: 0 };
-  const asset = { path: filePath, name: path.basename(filePath), duration: Number(data.format?.duration ?? 0),
-    width: dimensions.width, height: dimensions.height, hasAudio: streams.some((stream: { codec_type: string }) => stream.codec_type === "audio") };
+  const duration = Number(data.format?.duration ?? 0);
+  const audioDuration = Number(audio?.duration);
+  const asset = { path: filePath, name: path.basename(filePath), duration,
+    width: dimensions.width, height: dimensions.height, hasAudio: !!audio,
+    ...(Number.isFinite(audioDuration) && audioDuration > 0 ? { audioDuration: Math.min(duration, audioDuration) } : {}) };
   probedDurations.set(filePath, asset.duration);
   return asset;
 });
@@ -536,7 +613,7 @@ ipcMain.handle("media:suggest", async (_event, asset: MediaAsset) => {
 
 async function writeVisualOverlay(directory: string, name: string, selections: RenderSelection[],
   options: ExportOptions, profile: "draft" | "export", soundLed: boolean): Promise<string | undefined> {
-  const { width, height } = renderDimensions(options, profile);
+  const { width, height } = renderDimensions(options, profile, selections.map(s => s.asset));
   let offset = 0;
   const labels = selections.flatMap((selection) => {
     const start = offset;

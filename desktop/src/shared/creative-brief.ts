@@ -28,6 +28,7 @@ export type CreativeBriefInput = {
   reduceRumble?: boolean;
   eventTitle?: string;
   showClipLabels?: boolean;
+  transition?: ExportOptions["transition"];
   separatePicture?: boolean;
   soundMomentCount?: number;
   pictureSourceCount?: number;
@@ -184,9 +185,9 @@ function parsedSelection(text: string): SelectionMode | undefined {
 
 function styleFor(vibe: Vibe): Pick<ExportOptions, "finish" | "transition" | "showClipLabels"> {
   switch (vibe) {
-    case "energetic": return { finish: "vivid", transition: "cut", showClipLabels: true };
-    case "cinematic": return { finish: "cinematic", transition: "fade", showClipLabels: true };
-    case "nostalgic": return { finish: "warm", transition: "fade", showClipLabels: true };
+    case "energetic": return { finish: "vivid", transition: "cut", showClipLabels: false };
+    case "cinematic": return { finish: "cinematic", transition: "fade", showClipLabels: false };
+    case "nostalgic": return { finish: "warm", transition: "fade", showClipLabels: false };
     case "intimate": return { finish: "warm", transition: "cut", showClipLabels: false };
     default: return { finish: "natural", transition: "cut", showClipLabels: false };
   }
@@ -196,13 +197,13 @@ function supportedLimits(text: string, type: VideoType, vibe: Vibe, customVibe: 
   const notes: string[] = [];
   if (type === "one-song" || /\b(several|multiple|different|many) songs?\b/i.test(text)) notes.push(labeledSongs > 1 ? "Song names come from your labels; the app has not detected or verified them." : "Songs are not identified automatically. The cut can use different recordings; mark or name song sections yourself if needed.");
   if (/\b(lyrics?|captions?|subtitles?|logo|title card)\b/i.test(text)) notes.push("Opening event titles and your named moments are supported. Lyrics, automatic captions, logos, and full-screen title cards are not available yet.");
-  if (/\b(beat.sync|slow.motion|speed ramp|stabiliz|camera tracking|face tracking|swipe transition)\b/i.test(text)) notes.push("Beat syncing, speed changes, stabilization, and tracking are not available yet. The cut uses real-time footage and cuts or short fades.");
+  if (/\b(beat.sync|beat.match|slow.motion|speed ramp|stabiliz|camera tracking|face tracking)\b/i.test(text)) notes.push("Beat syncing, speed changes, stabilization, and tracking are not available yet. Sound crossfades blend recordings without matching their beats or changing playback speed.");
   if (/\b(?:auto(?:matic(?:ally)?)?|find|follow|track|center|focus|crop|frame)\b.{0,55}\b(?:performer|singer|stage|crowd|face)\b|\b(?:performer|singer|stage|crowd|face)\b.{0,55}\b(?:auto(?:matic(?:ally)?)?|follow|track|center|focus|crop|frame)\b/i.test(text)) notes.push("Portrait cropping starts centered; it cannot identify or follow a performer, stage, or crowd. Use Aim the crop on each recording to place the picture where you want it.");
   if (cleanupRequested) notes.push(rumbleEnabled ?
     "Sound cleanup here means reducing very low rumble. It cannot remove crowd voices, repair clipping, or fully denoise music." :
     "Low-rumble reduction is off by your choice. Full sound cleaning is not available; crowd voices, clipping, and music noise are not removed.");
   if (soundtrackIntent?.buildEnding) notes.push("The ending is ordered by measured sound energy, not musical crescendo or beat recognition. Listen before exporting.");
-  if (/\b(filters?|visual effects?|special effects?|animation)\b/i.test(text)) notes.push("Natural, vivid, cinematic, and warm looks are available. Custom animations and effects are not yet supported.");
+  if (/\b(filters?|visual effects?|special effects?|animation)\b/i.test(text)) notes.push("Natural, vivid, cinematic, and warm looks, dissolves, and occasional glide transitions are available. Custom animation and generated effects are not supported.");
   if (vibe === "custom") notes.push(`${customVibe.trim() ? "That custom vibe" : "A custom vibe"} cannot be translated reliably yet; this cut starts with natural color and straightforward cuts.`);
   return [...new Set(notes)];
 }
@@ -217,6 +218,9 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   if (input.pictureSourceCount !== undefined && (!Number.isInteger(input.pictureSourceCount) ||
     input.pictureSourceCount < 1)) throw new Error("Choose a whole number of picture recordings.");
   const description = (input.description || "").trim();
+  if (input.transition !== undefined && !["cut", "fade", "dissolve", "smoothslide"].includes(input.transition)) {
+    throw new Error("Choose a supported picture transition.");
+  }
   const cleanupRequested = requestsCleanup(description);
   const requestedSoundtrack = parsedSoundtrackIntent(description, cleanupRequested, input.separatePicture, input.soundMomentCount);
   const videoType = input.videoType ?? parsedType(description) ?? "highlight";
@@ -246,13 +250,19 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   const aspect = input.aspect ?? (/\b(horizontal|widescreen|landscape|16:9)\b/i.test(description) ? "landscape" : /\b9:16\b/i.test(description) ? "vertical" : /\b(vertical|portrait|9:13)\b/i.test(description) ? "portrait913" : current.aspect);
   if (!["portrait913", "vertical", "landscape"].includes(aspect)) throw new Error("Choose a valid video shape.");
   const customVibe = input.customVibe?.trim() ?? "";
-  const eventTitle = (input.eventTitle ?? current.eventTitle ?? "").trim();
+  const noText = /\b(?:no|without|don't add|do not add)\s+(?:(?:any|additional|added)\s+)*(?:text|titles?|overlays?|captions?|labels?)\b/i.test(description);
+  const eventTitle = noText ? "" : (input.eventTitle ?? current.eventTitle ?? "").trim();
   if (eventTitle.length > 80 || /[\r\n\x00-\x1f]/.test(eventTitle)) throw new Error("Keep the video title under 81 characters.");
   const style = cleanupRequested && !requestedVibe ?
     { finish: current.finish ?? "natural", transition: current.transition ?? "cut", showClipLabels: current.showClipLabels ?? false } : styleFor(vibe);
   const options: ExportOptions = { ...current, aspect, ...style,
     reduceRumble: input.reduceRumble ?? (cleanupRequested ? true : current.reduceRumble),
-    eventTitle, showClipLabels: soundtrackIntent?.separatePicture ? false : input.showClipLabels ?? style.showClipLabels };
+    eventTitle, showClipLabels: noText || soundtrackIntent?.separatePicture ? false : input.showClipLabels ?? current.showClipLabels ?? false };
+  const describedTransition = /\b(glide|sliding|animated (?:visual )?transitions?)\b/i.test(description) ? "smoothslide" :
+    /\b(?:cross[- ]?)?dissolves?\b/i.test(description) ? "dissolve" : undefined;
+  options.transition = input.transition ?? describedTransition ?? (current.quality === "high" && requestedVibe ?
+    vibe === "energetic" ? "smoothslide" : ["cinematic", "nostalgic", "intimate"].includes(vibe) ? "dissolve" : "cut" :
+    current.quality === "high" ? current.transition ?? "dissolve" : style.transition);
   const protectedClips = clips.filter((clip) => clip.included && !clip.excludedByUser && (clip.locked || clip.selectionSource === "manual" || selectionMode === "use-my-sections"));
   const markedClips = clips.filter((clip) => clip.included && !clip.excludedByUser && (clip.locked || clip.selectionSource === "manual"));
   const eligible = clips.filter((clip) => !clip.excludedByUser);
@@ -355,7 +365,9 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   const soundSummary = soundtrackIntent ? ` · ${soundtrackIntent.segmentCount} audio moments${cleanupRequested ? options.reduceRumble ? " with low-rumble reduction" : " with low-rumble reduction off" : ""}${soundtrackIntent.buildEnding ? " · aiming for a sound-energy build toward the strongest measured ending" : ""}${soundtrackIntent.separatePicture ? ` · picture from ${pictureSourceCount} recording${pictureSourceCount === 1 ? "" : "s"} over the soundtrack` : ""}` : "";
   const shape = aspect === "landscape" ? "horizontal 16:9" : aspect === "vertical" ? "tall 9:16" : "portrait 9:13";
   const graphics = `${eventTitle ? ` · opening title “${eventTitle}”` : ""}${options.showClipLabels && !soundtrackIntent?.separatePicture && clips.some((clip) => clip.label?.trim()) ? " · your named moments on video" : ""}`;
-  const summary = `${time(targetSeconds ?? naturalSeconds)} ${typeLabel[videoType]}${variety} · ${vibe === "clean-live" ? "clean/live" : vibe} pacing · ${options.finish} look · ${options.transition === "fade" ? "soft joins" : "direct cuts"} · ${shape} · ${preserved}${graphics}${soundSummary}.`;
+  const joins = ({ cut: "direct cuts", fade: "soft joins", dissolve: "dissolves", smoothslide: "dissolves with occasional glides" })[options.transition ?? "cut"];
+  const soundJoins = options.audioTransition === "crossfade" ? ` · sound overlaps up to ${options.audioCrossfadeSeconds ?? 2}s where spare sound is available` : "";
+  const summary = `${time(targetSeconds ?? naturalSeconds)} ${typeLabel[videoType]}${variety} · ${vibe === "clean-live" ? "clean/live" : vibe} pacing · ${options.finish} look · ${joins} · ${shape} · ${preserved}${graphics}${soundSummary}${soundJoins}.`;
   const limitations = supportedLimits(description, videoType, vibe, customVibe, labeledSongs, cleanupRequested, options.reduceRumble, soundtrackIntent);
   if (keepWholePerformance && !intactSoundtrackConflict && requestedSoundtrack?.buildEnding) limitations.push("Keeping the performance intact preserves its original sound and order; the app will not rearrange it to create a stronger ending.");
   if (soundtrackIntent?.buildEnding && markedClips.length) limitations.push("Your marked sections keep their place and original sound; they may limit how steadily the energy rises.");

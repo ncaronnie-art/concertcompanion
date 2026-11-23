@@ -1,7 +1,7 @@
 name: Concert Compass Windows prototype verification
 on:
   push:
-    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story', 'native/vibe-capsule-visual-finish', 'native/vibe-capsule-desktop-quality']
+    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story', 'native/vibe-capsule-visual-finish', 'native/vibe-capsule-desktop-quality', 'native/vibe-capsule-smooth-reels']
 permissions:
   contents: read
 jobs:
@@ -83,6 +83,11 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'source picture ready' -Quiet -ErrorAction SilentlyContinue)) { throw 'Source picture was not ready.' }
+      - name: Check fresh phone finishing defaults
+        if: always() && steps.desktop_smoke.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'fresh phone finishing defaults ready' -SimpleMatch -Quiet -ErrorAction SilentlyContinue)) { throw 'Fresh phone shape, quality, transitions, or text defaults were not confirmed.' }
       - name: Check creative brief and first cut
         if: always()
         shell: pwsh
@@ -106,7 +111,7 @@ jobs:
         shell: pwsh
         run: |
           $stages = "$env:RUNNER_TEMP\compass-stages.log"
-          foreach ($stage in @('portrait 9:13 default ready', 'landscape source filled portrait frame', 'portrait aim changed rendered picture', 'portrait aim survived project reopen')) {
+          foreach ($stage in @('portrait 9:13 legacy profile ready', 'landscape source filled portrait frame', 'portrait aim changed rendered picture', 'portrait aim survived project reopen')) {
             if (-not (Select-String -Path $stages -Pattern $stage -SimpleMatch -Quiet -ErrorAction SilentlyContinue)) { throw "Portrait framing check did not finish: $stage" }
           }
       - name: Check project save and export
@@ -127,6 +132,13 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'smoke passed' -Quiet -ErrorAction SilentlyContinue)) { throw 'Full creative workflow did not complete.' }
+      - name: Check finishing controls undo and project reopen
+        if: always() && steps.desktop_smoke.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          foreach ($stage in @('finishing controls undo restored', 'finishing controls survived project reopen')) {
+            if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern $stage -SimpleMatch -Quiet -ErrorAction SilentlyContinue)) { throw "Finishing settings check did not finish: $stage" }
+          }
       - name: Open sound-led desktop flow
         id: sound_story
         shell: pwsh

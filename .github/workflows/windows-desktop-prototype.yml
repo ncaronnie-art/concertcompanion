@@ -1,7 +1,7 @@
 name: Concert Compass Windows prototype verification
 on:
   push:
-    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story', 'native/vibe-capsule-visual-finish', 'native/vibe-capsule-desktop-quality', 'native/vibe-capsule-smooth-reels', 'native/vibe-capsule-music-led', 'native/vibe-capsule-three-act-audio']
+    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story', 'native/vibe-capsule-visual-finish', 'native/vibe-capsule-desktop-quality', 'native/vibe-capsule-smooth-reels', 'native/vibe-capsule-music-led', 'native/vibe-capsule-three-act-audio', 'native/vibe-capsule-crowd-check']
 permissions:
   contents: read
 jobs:
@@ -207,3 +207,11 @@ jobs:
         run: |
           if (-not (Select-String -Path "$env:RUNNER_TEMP\story-stages.log" -Pattern 'story smoke passed' -Quiet -ErrorAction SilentlyContinue)) { throw 'Sound-led export or full desktop flow did not complete.' }
           if (-not (Select-String -Path "$env:RUNNER_TEMP\story-stages.log" -Pattern 'story title exported' -Quiet -ErrorAction SilentlyContinue)) { throw 'Sound-led title was not visible in the exported picture.' }
+      - name: Check automatic sound review and interruption override
+        if: always() && steps.sound_story.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'automatic standard sound review ready' -SimpleMatch -Quiet -ErrorAction SilentlyContinue)) { throw 'Standard selections were not checked automatically.' }
+          foreach ($stage in @('automatic soundtrack review ready', 'interruption warning reviewed before export', 'reviewed sound export completed')) {
+            if (-not (Select-String -Path "$env:RUNNER_TEMP\story-stages.log" -Pattern $stage -SimpleMatch -Quiet -ErrorAction SilentlyContinue)) { throw "Automatic sound review did not finish: $stage" }
+          }

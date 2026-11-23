@@ -133,6 +133,16 @@ footer { padding: 16px 18px; color: #bdb4c8; font-size: .87rem; line-height: 1.5
 .draft-player { width: min(100%, 900px); max-height: 68vh; margin: 18px auto 0; object-fit: contain; }
 .draft-stale { margin-top: 14px; color: #e8c8dd; }
 .soundtrack { margin-top: 14px; border: 1px solid #675079; border-radius: 18px; background: #17111e; padding: 22px; }
+.sound-check { margin-top: 14px; border: 1px solid #715982; border-radius: 18px; background: #1b1422; padding: 20px 22px; scroll-margin-top: 82px; }
+.sound-check h2 { margin: 0 0 9px; font-size: 1.15rem; }
+.sound-check p { color: #d2c6dc; line-height: 1.45; margin: 8px 0; }
+.sound-check-source { border-top: 1px solid #493950; margin-top: 13px; padding-top: 13px; }
+.sound-check-source strong { overflow-wrap: anywhere; }
+.sound-check-source ul { list-style: none; padding: 0; margin: 8px 0; }
+.sound-check-source li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 9px; padding: 7px 0; color: #f1d7eb; }
+.sound-check-source li button { flex-shrink: 0; }
+.sound-check .sound-check-limit { font-size: .83rem; color: #bfb1cb; }
+.sound-check-actions { border-top: 1px solid #594665; padding-top: 10px; margin-top: 13px; }
 .soundtrack-heading h2 { margin: 7px 0; }
 .soundtrack-heading > p:not(.eyebrow), .soundtrack-note { color: #c9bfd3; line-height: 1.45; }
 .soundtrack-list { list-style: none; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; margin: 17px 0 13px; padding: 0; }

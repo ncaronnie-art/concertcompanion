@@ -1,4 +1,5 @@
 import { suggestedRange, type MediaAsset } from "./render-plan.js";
+import { scanAudioInterruptions, type AudioInterruptionReport } from "./audio-interruptions.js";
 
 export type AudioBin = { rms: number; clipping: number; endSeconds?: number;
   tonalProminence?: number; crowdNoise?: number; beatTimes?: number[];
@@ -13,7 +14,7 @@ export type Suggestion = { start: number; end: number; reason: string };
 // Texture cannot distinguish a singer from an instrument or a sustained crowd
 // scream. Use it conservatively to penalize noisy passages, never as a large
 // positive vocal score. Older analyses keep their established energy ranking.
-export function scoreAudioBins(bins: readonly AudioBin[], focus: HighlightFocus = "balanced") {
+export function scoreAudioBins(bins: readonly AudioBin[], focus: HighlightFocus = "balanced", interruptionReport?: AudioInterruptionReport) {
   const count = Math.max(1, bins.length);
   const energy = bins.reduce((sum, bin) => sum + bin.rms, 0) / count;
   const clipping = bins.reduce((sum, bin) => sum + bin.clipping, 0) / count;
@@ -60,11 +61,21 @@ export function scoreAudioBins(bins: readonly AudioBin[], focus: HighlightFocus 
   // An unclassified opening or tail is uncertainty, not extra high-scoring
   // singing. Discount the ranking for incomplete coverage without inventing
   // zero-valued class observations for that missing audio.
-  const score = eventUsed ? eventSound * Math.min(1, eventWeightSum / count) * (1 - 0.65 * vocalLeadIn) - clipping * 0.8 : fallbackScore;
+  const baseScore = eventUsed ? eventSound * Math.min(1, eventWeightSum / count) * (1 - 0.65 * vocalLeadIn) - clipping * 0.8 : fallbackScore;
+  // A brief shout can disappear in the mean of a long section. Check short
+  // windows throughout it and penalize the strongest interruption, not just
+  // the amount of crowd sound averaged across the whole selection.
+  // Callers scoring a slice supply its original source-time report, so absolute
+  // decoded-tail times cannot be mistaken for relative slice positions.
+  const interruptions = focus === "performance" && bins.length ? interruptionReport ??
+    scanAudioInterruptions(bins, { start: 0, end: bins.length * 0.5 }) : undefined;
+  const interruptionRisk = interruptions?.risk ?? 0;
+  const score = baseScore - (Math.max(0, baseScore) + energy * 0.25) * interruptionRisk * 0.9;
   const vocalSupport = eventUsed ? singingEvidence >= musicEvidence * 0.03 && singingEvidence >= crowdEvidence * 0.75 &&
     musicEvidence + singingEvidence > crowdEvidence + speechEvidence : undefined;
   return { score, energy, clipping, tonalProminence, crowdNoise, performanceMeasured,
-    eventMeasured, eventUsed, vocalSupport, singingEvidence, musicEvidence, crowdEvidence, speechEvidence, vocalActivity };
+    eventMeasured, eventUsed, vocalSupport, singingEvidence, musicEvidence, crowdEvidence, speechEvidence, vocalActivity,
+    interruptionRisk, interruptionStatus: interruptions?.status ?? "unavailable" as const };
 }
 
 export function chooseAudioHighlight(asset: MediaAsset, bins: AudioBin[], binSeconds = 0.5,
@@ -76,7 +87,8 @@ export function chooseAudioHighlight(asset: MediaAsset, bins: AudioBin[], binSec
   let bestScore = -Infinity, bestIndex = 0, usedPerformance = false, usedEvents = false, supportedVoice = false;
   for (let index = 0; index <= Math.max(0, bins.length - count); index++) {
     const window = bins.slice(index, index + count);
-    const result = scoreAudioBins(window, focus);
+    const result = scoreAudioBins(window, focus, focus === "performance" ?
+      scanAudioInterruptions(bins, { start: index * binSeconds, end: Math.min(asset.duration, index * binSeconds + length), binSeconds }) : undefined);
     const supported = result.vocalSupport === true && result.clipping < 0.02;
     if ((supported && !supportedVoice) || supported === supportedVoice && result.score > bestScore) {
       bestScore = result.score; bestIndex = index; usedPerformance = result.performanceMeasured && focus === "performance";

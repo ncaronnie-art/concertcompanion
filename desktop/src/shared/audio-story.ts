@@ -1,6 +1,7 @@
 import type { AudioSelection, ExportOptions } from "./render-plan.js";
 import { scoreAudioBins, type AudioBin, type HighlightFocus } from "./suggestions.js";
 import { alignSoundtrackBeats, alignPictureCutsToMusic } from "./music-timing.js";
+import { scanAudioInterruptions } from "./audio-interruptions.js";
 import type { CreativeBrief, CreativeClip } from "./creative-brief.js";
 
 export type AudioStoryResult<T extends CreativeClip> = {
@@ -12,7 +13,7 @@ export type AudioStoryResult<T extends CreativeClip> = {
 };
 
 type Span = { asset: AudioSelection["asset"]; start: number; end: number };
-type ScoredSelection = { selection: AudioSelection; span: Span; score: number; energy: number; clipping: number; tailRise: number; measured: boolean; performance: number; performanceMeasured: boolean; eventUsed: boolean; vocalSupport?: boolean; openingVocalSupport?: boolean; endingVocalSupport?: boolean; crowdNoise: number; tempoBpm?: number };
+type ScoredSelection = { selection: AudioSelection; span: Span; score: number; energy: number; clipping: number; tailRise: number; measured: boolean; performance: number; performanceMeasured: boolean; eventUsed: boolean; vocalSupport?: boolean; openingVocalSupport?: boolean; endingVocalSupport?: boolean; crowdNoise: number; tempoBpm?: number; interruptionRisk: number; interruptionStatus: "checked" | "partial" | "unavailable" };
 type Gap = { kind: "gap"; duration: number; count: number; selections: ScoredSelection[] };
 type Anchor = { kind: "anchor"; selection: AudioSelection };
 const MIN = 0.1;
@@ -20,6 +21,7 @@ const EPS = 0.05;
 const BIN_SECONDS = 0.5;
 const length = (selection: { start: number; end: number }) => selection.end - selection.start;
 const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
+const sourceTime = (seconds: number) => Math.max(0, Math.round(seconds * 1e9) / 1e9);
 const included = (clip: CreativeClip) => clip.included && !clip.excludedByUser;
 const protectedClip = (clip: CreativeClip) => included(clip) && (clip.locked || clip.selectionSource === "manual");
 const overlap = (a: { start: number; end: number }, b: { start: number; end: number }) =>
@@ -156,9 +158,9 @@ function progressesInTempo(tempos: number[]): boolean {
 function scoreWindow(bins: AudioBin[] | undefined, start: number, seconds: number, focus: HighlightFocus = "balanced") {
   if (!bins?.length) return { score: 0, energy: 0, clipping: 0, tailRise: 0, measured: false, performance: 0, performanceMeasured: false, eventUsed: false, vocalSupport: undefined as boolean | undefined,
     openingVocalSupport: undefined as boolean | undefined, endingVocalSupport: undefined as boolean | undefined,
-    crowdNoise: 0, tempoBpm: undefined as number | undefined };
-  const first = Math.min(bins.length - 1, Math.max(0, Math.floor(start / BIN_SECONDS)));
-  const last = Math.min(bins.length, Math.max(first + 1, Math.ceil((start + seconds) / BIN_SECONDS)));
+    crowdNoise: 0, tempoBpm: undefined as number | undefined, interruptionRisk: 0, interruptionStatus: "unavailable" as const };
+  const first = Math.min(bins.length - 1, Math.max(0, Math.floor(start / BIN_SECONDS + 1e-8)));
+  const last = Math.min(bins.length, Math.max(first + 1, Math.ceil((start + seconds) / BIN_SECONDS - 1e-8)));
   let rms = 0, clipping = 0;
   for (let index = first; index < last; index++) { rms += bins[index].rms; clipping += bins[index].clipping; }
   const count = Math.max(1, last - first);
@@ -170,11 +172,14 @@ function scoreWindow(bins: AudioBin[] | undefined, start: number, seconds: numbe
   // Penalize clipped sound when choosing a window; order the chosen moments by
   // actual measured energy, not by this quality score.
   const window = bins.slice(first, last);
-  const features = scoreAudioBins(window, focus);
+  const interruptions = focus === "performance" ? scanAudioInterruptions(bins, { start, end: start + seconds }) : undefined;
+  const features = scoreAudioBins(window, focus, interruptions);
   const openingFeatures = scoreAudioBins(bins.slice(first,
-    Math.min(last, Math.ceil((start + Math.min(4, seconds)) / BIN_SECONDS))), focus);
+    Math.min(last, Math.ceil((start + Math.min(4, seconds)) / BIN_SECONDS - 1e-8))), focus,
+    focus === "performance" ? scanAudioInterruptions(bins, { start, end: start + Math.min(4, seconds) }) : undefined);
   const endingFeatures = scoreAudioBins(bins.slice(Math.max(first,
-    Math.floor((start + seconds - Math.min(4, seconds)) / BIN_SECONDS)), last), focus);
+    Math.floor((start + seconds - Math.min(4, seconds)) / BIN_SECONDS + 1e-8)), last), focus,
+    focus === "performance" ? scanAudioInterruptions(bins, { start: start + seconds - Math.min(4, seconds), end: start + seconds }) : undefined);
   const openingCount = Math.min(count, 8);
   const opening = sum(window.slice(0, openingCount).map(bin => bin.rms)) / openingCount;
   // A loud later section must not conceal several quiet lead-in seconds. This
@@ -186,7 +191,7 @@ function scoreWindow(bins: AudioBin[] | undefined, start: number, seconds: numbe
     openingVocalSupport: openingFeatures.vocalSupport === undefined ? undefined :
       openingFeatures.vocalSupport && openingFeatures.singingEvidence >= openingFeatures.crowdEvidence,
     endingVocalSupport: endingFeatures.vocalSupport,
-    crowdNoise: features.crowdNoise, tempoBpm: measuredTempo(window) };
+    crowdNoise: features.crowdNoise, tempoBpm: measuredTempo(window), interruptionRisk: features.interruptionRisk, interruptionStatus: features.interruptionStatus };
 }
 
 function freeSpans(assets: AudioSelection["asset"][], reserved: AudioSelection[],
@@ -230,7 +235,9 @@ function chooseTickets(spans: Span[], count: number, seconds: number,
   const clean = withSignal.filter((span) => samples.get(span)!.clipping < 0.02);
   const qualityPool = canFill(clean) ? clean : withSignal;
   const classified = qualityPool.filter(span => samples.get(span)!.vocalSupport === true);
-  const pool = canFillWithSplits(classified) ? classified : qualityPool;
+  const vocalPool = canFillWithSplits(classified) ? classified : qualityPool;
+  const uninterrupted = vocalPool.filter(span => samples.get(span)!.interruptionStatus === "checked" && samples.get(span)!.interruptionRisk === 0);
+  const pool = preference.highlightFocus === "performance" && canFillWithSplits(uninterrupted) ? uninterrupted : vocalPool;
   const labelOf = (span: Span) => preference.labelsByPath[span.asset.path] ?? "";
   const choose = (distinctSources: boolean, wanted: number): Span[] | null => {
     const chosen: Span[] = [];
@@ -307,9 +314,9 @@ function bestWithin(span: Span, seconds: number, bins: AudioBin[] | undefined, p
   const lastStart = span.end - seconds;
   if (lastStart < span.start - EPS) throw new Error("A sound section cannot fit within the available recording.");
   const steps = Math.min(2000, Math.max(1, Math.ceil((lastStart - span.start) / BIN_SECONDS)));
-  let bestStart = span.start, best = scoreWindow(bins, span.start, seconds, focus);
+  let bestStart = sourceTime(span.start), best = scoreWindow(bins, bestStart, seconds, focus);
   for (let index = 1; index <= steps; index++) {
-    const start = span.start + (lastStart - span.start) * index / steps;
+    const start = sourceTime(span.start + (lastStart - span.start) * index / steps);
     const score = scoreWindow(bins, start, seconds, focus);
     const rank = score.score + (preferRisingTail ? Math.max(0, score.tailRise) * 0.2 : 0);
     const bestRank = best.score + (preferRisingTail ? Math.max(0, best.tailRise) * 0.2 : 0);
@@ -321,7 +328,7 @@ function bestWithin(span: Span, seconds: number, bins: AudioBin[] | undefined, p
     span, score: best.score, energy: best.energy, clipping: best.clipping,
     tailRise: best.tailRise, measured: best.measured, performance: best.performance, performanceMeasured: best.performanceMeasured, eventUsed: best.eventUsed, vocalSupport: best.vocalSupport,
     openingVocalSupport: best.openingVocalSupport, endingVocalSupport: best.endingVocalSupport,
-    crowdNoise: best.crowdNoise, tempoBpm: best.tempoBpm };
+    crowdNoise: best.crowdNoise, tempoBpm: best.tempoBpm, interruptionRisk: best.interruptionRisk, interruptionStatus: best.interruptionStatus };
 }
 
 function chooseTempoArc(spans: Span[], count: number, seconds: number,
@@ -348,9 +355,9 @@ function chooseTempoArc(spans: Span[], count: number, seconds: number,
     const lastStart = span.end - amount;
     const steps = Math.min(2000, Math.max(1, Math.ceil((lastStart - span.start) / BIN_SECONDS)));
     for (let index = 0; index <= steps; index++) {
-      const start = span.start + (lastStart - span.start) * index / steps;
+      const start = sourceTime(span.start + (lastStart - span.start) * index / steps);
       const score = scoreWindow(binsByPath[span.asset.path], start, amount, focus);
-      const band = `${score.tempoBpm === undefined ? "unknown" : Math.round(Math.log(score.tempoBpm) / Math.log(1.1))}|${score.openingVocalSupport}|${score.endingVocalSupport}`;
+      const band = `${score.tempoBpm === undefined ? "unknown" : Math.round(Math.log(score.tempoBpm) / Math.log(1.1))}|${score.openingVocalSupport}|${score.endingVocalSupport}|${score.interruptionRisk > 0}`;
       if (!byTempo.has(band) || score.score > byTempo.get(band)!.score) byTempo.set(band,
         { selection: { asset: span.asset, start, end: start + amount }, span, ...score });
     }
@@ -382,6 +389,10 @@ function chooseTempoArc(spans: Span[], count: number, seconds: number,
     (c: ScoredSelection) => c.vocalSupport === true]) {
     const preferred = candidates.filter(keep);
     if (capacity(preferred) >= count) candidates = preferred;
+  }
+  if (focus === "performance") {
+    const uninterrupted = candidates.filter(c => c.interruptionStatus === "checked" && c.interruptionRisk === 0);
+    if (capacity(uninterrupted) >= count) candidates = uninterrupted;
   }
   // Unknown event evidence is not evidence of singing. If actual supported
   // vocals cannot fill the length, keep measured instrumental music competing

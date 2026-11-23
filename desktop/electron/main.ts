@@ -143,6 +143,8 @@ function createWindow() {
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Make my first cut').click()`);
         await waitFor(`document.body.innerText.includes('First cut ready:')`, "first cut");
         smokeStage("first cut planned");
+        await waitFor(`document.querySelector('[aria-label="Automatic sound check"]')?.getAttribute('data-sound-check') === 'complete'`, "automatic standard-edit sound review");
+        smokeStage("automatic standard sound review ready");
         await win.webContents.executeJavaScript(`document.querySelector('.clips article .refine-actions button').click()`);
         await waitFor(`document.body.innerText.includes('Other sections stayed the same')`, "first-cut adjustment");
         await win.webContents.executeJavaScript(`document.querySelector('.draft-heading button').click()`);
@@ -397,6 +399,8 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
   if (pictureCount !== 2 || !firstCut.toolbar.includes("3 sound moments") ||
     !firstCut.lowRumble.includes("Very low rumble will be reduced")) throw new Error(`Sound-led first cut was wrong: ${JSON.stringify(firstCut)}`);
   smokeStage("story first cut planned");
+  await waitFor(`document.querySelector('[aria-label="Automatic sound check"]')?.getAttribute('data-sound-check') === 'complete'`, "automatic soundtrack review");
+  smokeStage("automatic soundtrack review ready");
 
   await win.webContents.executeJavaScript(`document.querySelector('.draft-heading button').click()`);
   await waitFor(`document.body.innerText.includes('Draft preview is ready')`, "sound-led draft render");
@@ -428,6 +432,17 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
     throw new Error("Saved project lost the explicit soundtrack or picture counts, brief, or sound moments.");
   }
   smokeStage("story project saved");
+  // The actual bundled model was exercised earlier. Inject a deterministic
+  // event-score fixture here to test the warning/override UI, not to claim that
+  // a synthetic sine wave has been recognized as a human shout.
+  const reviewedSound: AudioSelection = saved.audioSelections[0];
+  const reviewFixture: AudioBin[] = Array.from({ length: Math.ceil(reviewedSound.asset.duration / 0.5) }, (_, index) => {
+    const inside = index * 0.5 >= reviewedSound.start + 0.25 && index * 0.5 < reviewedSound.end - 0.1;
+    return { rms: inside ? 0.5 : 0.12, clipping: 0, endSeconds: Math.min((index + 1) * 0.5, reviewedSound.asset.duration),
+      singingScore: inside ? 0.01 : 0.5, musicScore: 0.5, crowdScore: 0.01, speechScore: inside ? 0.85 : 0.002,
+      eventCoverage: 1, eventStatus: "classified" };
+  });
+  for (const rumble of [false, true]) audioBins.set(JSON.stringify([reviewedSound.asset.path, rumble]), reviewFixture);
   await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Open project').click()`);
   await waitFor(`document.body.innerText.includes('Project opened') && document.querySelector('.toolbar b')?.textContent.includes('3 sound moments') && document.querySelectorAll('.soundtrack-list li').length === 3 && !!document.querySelector('.draft-heading button')`, "sound-led project reopen");
   const restored = await win.webContents.executeJavaScript(`(() => ({ description: document.querySelector('.brief textarea').value, soundCount: document.querySelector('input[aria-label="Number of sound moments"]')?.value, pictureCount: document.querySelector('input[aria-label="Number of videos to show"]')?.value, toolbar: document.querySelector('.toolbar b').textContent, soundMoments: document.querySelectorAll('.soundtrack-list li').length, previewAction: document.querySelector('.draft-heading button')?.textContent, staleDraft: !!document.querySelector('.draft-player'), exportReady: !document.querySelector('.toolbar-actions button.primary').disabled, title: document.querySelector('input[aria-label="Video title (optional)"]')?.value, labelsEnabled: document.querySelector('input[aria-label="Show my named moments on video"]')?.checked }))()`);
@@ -444,7 +459,25 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
   // The legacy smoke deliberately slows its first export to exercise cancellation.
   smokeCancelPending = false;
   await win.webContents.executeJavaScript(`document.querySelector('.toolbar-actions button.primary').click()`);
+  await waitFor(`document.querySelector('[aria-label="Automatic sound check"]')?.getAttribute('data-sound-check') === 'complete' && Array.from(document.querySelectorAll('button')).some(b => b.textContent === 'Export with this sound' && !b.disabled)`, "pre-export interruption review");
+  try { await access(process.env.COMPASS_SMOKE_OUTPUT!); throw new Error("Export started before the interruption was reviewed."); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const afterReview = await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.soundtrack-list li small')).map(x => x.textContent)`);
+  if (JSON.stringify(afterReview) !== JSON.stringify(adjusted)) throw new Error("Sound review changed the chosen sections.");
+  const reviewSeekSeconds = await win.webContents.executeJavaScript(`(() => {
+    const listen = document.querySelector('button[aria-label^="Listen near"]');
+    if (!listen) throw new Error('Missing interruption listen action');
+    const label = listen.getAttribute('aria-label'), timing = /Listen near ([0-9]+):([0-9]+)/.exec(label);
+    if (!timing || !label.endsWith(${JSON.stringify(` in ${reviewedSound.asset.name}`)})) throw new Error('Wrong interruption source');
+    const player = Array.from(document.querySelectorAll('.clips video')).find(v => v.getAttribute('aria-label') === ${JSON.stringify(`Preview ${reviewedSound.asset.name}`)});
+    if (!player) throw new Error('Missing interruption source preview');
+    player.pause(); player.currentTime = 0; listen.click(); return Number(timing[1]) * 60 + Number(timing[2]);
+  })()`);
+  await waitFor(`(() => { const v = Array.from(document.querySelectorAll('.clips video')).find(v => v.getAttribute('aria-label') === ${JSON.stringify(`Preview ${reviewedSound.asset.name}`)}); return v && !v.seeking && v.currentTime >= ${Math.max(0, reviewSeekSeconds - 0.6)} && v.currentTime <= ${reviewSeekSeconds + 2}; })()`, "interruption source seek");
+  smokeStage("interruption warning reviewed before export");
+  await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('video')).forEach(v => v.pause()); Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Export with this sound').click()`);
   await waitFor(`document.body.innerText.includes('Finished MP4:')`, "sound-led MP4 export");
+  smokeStage("reviewed sound export completed");
   await access(process.env.COMPASS_SMOKE_OUTPUT!);
   const probe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,width,height,duration", "-of", "json", process.env.COMPASS_SMOKE_OUTPUT!]));
   const video = probe.streams?.find((stream: { codec_type: string }) => stream.codec_type === "video");

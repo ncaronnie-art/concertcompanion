@@ -7,6 +7,7 @@ import {
 import { planAudioStory, refineAudioStory } from "../shared/audio-story";
 import { suggestedRange, type AudioSelection, type ExportOptions, type MediaAsset } from "../shared/render-plan";
 import type { AudioBin } from "../shared/suggestions";
+import { audibleReviewRanges, buildSoundReview, soundReviewNeedsDecision, soundReviewSignature, type SoundReview } from "../shared/audio-review";
 
 type Chosen = CreativeClip & { previewUrl: string };
 type UndoState = { clips: Chosen[]; options: ExportOptions; audioSelections: AudioSelection[] | null; briefInput: CreativeBriefInput; briefDirty: boolean;
@@ -90,6 +91,9 @@ export function App() {
   const [progress, setProgress] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [previewing, setPreviewing] = useState(false);
+  const [checkingSound, setCheckingSound] = useState(false);
+  const [soundReview, setSoundReview] = useState<SoundReview | null>(null);
+  const [acceptedSoundSignature, setAcceptedSoundSignature] = useState<string | null>(null);
   const [draftUrl, setDraftUrl] = useState<string | null>(null);
   const [draftSignature, setDraftSignature] = useState<string | null>(null);
   const [audioSelections, setAudioSelections] = useState<AudioSelection[] | null>(null);
@@ -119,6 +123,8 @@ export function App() {
   const players = useRef(new Map<string, HTMLVideoElement>());
   const audioSuggestions = useRef(new Map<string, { start: number; end: number }>());
   const audioBins = useRef<Record<string, AudioBin[]>>({});
+  const soundReviewCache = useRef<SoundReview | null>(null);
+  const soundCheckCancelled = useRef(false);
   const importCancelled = useRef(false);
   const focusDragging = useRef(false);
   const audioCrossfadeDragging = useRef(false);
@@ -151,6 +157,49 @@ export function App() {
   })();
   const cutSignature = JSON.stringify({ clips: selected.map((clip) => ({ path: clip.asset.path, start: clip.start, end: clip.end, locked: clip.locked, framing: clip.framing ?? "auto", focus: clip.focus ?? 0.5, label: clip.label })), audioSelections, options });
   const guidedCutPending = briefInput.separatePicture === true && audioSelections === null;
+  const currentSoundSignature = soundReviewSignature(selected, audioSelections, options);
+  const currentSoundReview = soundReview?.signature === currentSoundSignature ? soundReview : null;
+  const soundDecisionNeeded = currentSoundReview !== null && soundReviewNeedsDecision(currentSoundReview);
+  const soundWarnings = currentSoundReview?.items.filter(item => item.report.intervals.length || item.report.status !== "checked") ?? [];
+
+  async function checkSelectedSound(picture: Chosen[], soundtrack: AudioSelection[] | null,
+    settings: ExportOptions): Promise<SoundReview | null> {
+    const signature = soundReviewSignature(picture, soundtrack, settings);
+    if (soundReviewCache.current?.signature === signature) return soundReviewCache.current;
+    soundCheckCancelled.current = false; setCheckingSound(true);
+    try {
+      const ranges = audibleReviewRanges(picture, soundtrack, settings).filter(selection => selection.asset.hasAudio);
+      const binsByPath: Record<string, AudioBin[] | undefined> = {};
+      for (const selection of ranges) {
+        if (soundCheckCancelled.current) return null;
+        if (selection.asset.path in binsByPath) continue;
+        // The model always measured raw audio. Reuse existing signal/model bins
+        // from first-cut analysis; otherwise the raw key also shares the main
+        // process cache used by Suggest a moment. No duplicate model pass.
+        const rawKey = audioBinKey(selection.asset.path, false);
+        const cached = audioBins.current[audioBinKey(selection.asset.path, settings.reduceRumble)] ??
+          audioBins.current[rawKey] ?? audioBins.current[audioBinKey(selection.asset.path, true)];
+        let bins = cached;
+        if (!bins) {
+          setMessage(`Checking the whole sound section in ${selection.asset.name} for possible crowd interruptions…`);
+          try {
+            bins = await window.concertCompass.analyzeAudio(selection.asset, false);
+            audioBins.current[rawKey] = bins;
+          } catch { /* Unavailable analysis is shown for review; it never counts as clear. */ }
+        }
+        if (soundCheckCancelled.current) return null;
+        binsByPath[selection.asset.path] = bins;
+      }
+      const review = buildSoundReview(picture, soundtrack, settings, binsByPath);
+      soundReviewCache.current = review; setSoundReview(review); setAcceptedSoundSignature(null);
+      return review;
+    } finally { setCheckingSound(false); }
+  }
+
+  function stopSoundCheck() {
+    soundCheckCancelled.current = true;
+    setMessage("Stopping the sound check after the current recording. Your selections will stay unchanged.");
+  }
 
   function remember() {
     setUndoStack((old) => [...old.slice(-24), { clips, options, audioSelections, briefInput, briefDirty, stage, reviewBrief, lengthText, lengthFollowsDescription }]);
@@ -334,6 +383,7 @@ export function App() {
       setLengthFollowsDescription(false);
       setReviewBrief(null); setStoryError(null); setStage(restoredAudio && !savedBriefDirty ? "cut" : "describe");
       setDraftUrl(null); setDraftSignature(null); audioSuggestions.current.clear(); audioBins.current = {};
+      soundReviewCache.current = null; setSoundReview(null); setAcceptedSoundSignature(null);
       setMessage(savedBriefDirty ?
         "Project opened. Your new description is saved; review the plan and make a first cut before exporting." :
         restoredAudio ? "Project opened. Your picture and soundtrack are ready to preview or adjust." :
@@ -402,7 +452,11 @@ export function App() {
           soundMomentCount: undefined, pictureSourceCount: undefined, tempoArc: false }));
       }
       applyOptions(result.options);
-      setStage("cut"); setMessage(`First cut ready: ${clock(result.plannedSeconds)}. ${result.notes.join(" ")} Watch the first cut, adjust anything, then export.`);
+      setStage("cut");
+      const checked = await checkSelectedSound(result.clips.filter(clip => clip.included && !clip.excludedByUser), result.audioSelections ?? null, result.options);
+      const checkNote = !checked ? "Sound check stopped; your cut is still ready." : soundReviewNeedsDecision(checked) ?
+        "The sound check found something to review before export. See Automatic sound check below." : "Sound check finished; see the coverage notes below.";
+      setMessage(`First cut ready: ${clock(result.plannedSeconds)}. ${result.notes.join(" ")} ${checkNote} Watch the first cut, adjust anything, then export.`);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       if (reviewBrief.soundtrackIntent) setStoryError(detail);
@@ -435,7 +489,8 @@ export function App() {
       }
       const next = refineAudioStory(audioSelections, index, { [current.asset.path]: audioBins.current[key] }, highlightFocus);
       remember(); setAudioSelections(next);
-      setMessage(`Chose another sound moment from ${current.asset.name}. The other sound and picture sections stayed the same. Watch the updated preview before exporting.`);
+      const checked = await checkSelectedSound(selected, next, options);
+      setMessage(`Chose another sound moment from ${current.asset.name}. The other sound and picture sections stayed the same. ${!checked ? "Sound check stopped; your new section is still here." : soundReviewNeedsDecision(checked) ? "Review the possible sound interruptions below." : "Sound check finished."} Watch the updated preview before exporting.`);
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   }
@@ -486,13 +541,22 @@ export function App() {
     } catch { setMessage("Couldn't analyze this recording's sound. Your selection is unchanged; you can still choose the moment yourself."); }
     finally { setBusy(false); }
   }
-  async function exportReel() {
+  async function exportReel(confirmedSignature?: string) {
     if (!selected.length) return;
     if (guidedCutPending) { setMessage("Review the guided plan and make your first cut before exporting, or choose Edit sections myself."); return; }
     if (briefDirty) { setMessage("Your new description has not been made yet. Review the plan and make a first cut before exporting."); return; }
     if (storyNeedsRebuild) { setMessage(`${storyRebuildMessage} Make a first cut before exporting.`); return; }
-    setBusy(true); setExporting(true); setProgress(0); setMessage("Choose where to save your MP4…");
+    setBusy(true); setProgress(0);
     try {
+      const checked = await checkSelectedSound(selected, audioSelections, options);
+      if (!checked) { setMessage("Sound check stopped. Export has not started; your selections are unchanged."); return; }
+      if (soundReviewNeedsDecision(checked) && confirmedSignature !== checked.signature && acceptedSoundSignature !== checked.signature) {
+        setMessage("Review the sound check before saving. Listen to a flagged moment, adjust it, or choose Export with this sound to keep your selection.");
+        window.setTimeout(() => document.getElementById("sound-check")?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+        return;
+      }
+      if (confirmedSignature === checked.signature) setAcceptedSoundSignature(checked.signature);
+      setExporting(true); setMessage("Choose where to save your MP4…");
       const result = await window.concertCompass.render(selected, options, audioSelections ?? undefined);
       setMessage(result.cancelled ? "Export cancelled. Your original recordings were not changed." : `Finished MP4: ${result.output}${result.cleanupWarning ? " The video is saved, but a temporary folder could not be removed." : ""}`);
     } catch (error) {
@@ -506,12 +570,14 @@ export function App() {
     if (briefDirty) { setMessage("Your new description has not been made yet. Review the plan and make a first cut before previewing."); return; }
     if (storyNeedsRebuild) { setMessage(`${storyRebuildMessage} Make a first cut before previewing.`); return; }
     const signature = cutSignature;
-    setBusy(true); setPreviewing(true); setProgress(0);
-    setMessage("Preparing a watchable draft with your current sections and look…");
+    setBusy(true); setProgress(0);
     try {
+      const checked = await checkSelectedSound(selected, audioSelections, options);
+      if (!checked) { setMessage("Sound check stopped. Preview has not started; your edit is still here."); return; }
+      setPreviewing(true); setMessage("Preparing a watchable draft with your current sections and look…");
       const result = await window.concertCompass.previewCut(selected, options, audioSelections ?? undefined);
       setDraftUrl(result.url); setDraftSignature(signature);
-      setMessage("Draft preview is ready. Watch it through, then adjust or export.");
+      setMessage(soundReviewNeedsDecision(checked) ? "Draft preview is ready. The sound check has moments to review below; listen before exporting." : "Draft preview is ready. Watch it through, then adjust or export.");
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       setMessage(detail.includes("stopped") || detail.includes("cancel") ? "Preview stopped. Your edit is still here." : `Could not make the preview: ${detail}`);
@@ -537,7 +603,7 @@ export function App() {
   return <main className={clips.length ? "has-clips" : undefined}>
     <header><div><p className="eyebrow">VIBE CAPSULE BY CONCERT COMPASS <span className="build-label">WINDOWS TEST BUILD</span></p><h1>Keep what the night felt like.</h1><p className="subhead">Turn your concert recordings into a video shaped around the moments you love.</p></div><div className="header-actions"><button disabled={busy} onClick={openProject}>Open project</button><button className="primary" disabled={busy} onClick={importVideos}>Import videos</button></div></header>
     <nav className="workflow" aria-label="Video creation steps"><span className={clips.length ? "done" : "current"}>1 Import</span><span className={stage === "describe" && clips.length ? "current" : clips.length ? "done" : ""}>2 Describe</span><span className={stage === "review" ? "current" : stage === "cut" ? "done" : ""}>3 Review</span><span className={stage === "cut" ? "current" : ""}>4 Watch & adjust</span><span>5 Export</span></nav>
-    <section className="status" aria-live="polite"><span>{message}</span>{busy && ((exporting || previewing) ? <><progress max="1" value={progress} aria-label={exporting ? "Export progress" : "Preview progress"} /><button className="stop" onClick={async () => { if (await window.concertCompass.cancelRender()) setMessage(exporting ? "Stopping export…" : "Stopping preview…"); }}>{exporting ? "Stop export" : "Stop preview"}</button></> : importing ? <><progress max="1" value={progress} aria-label="Preparing video progress" /><button className="stop" onClick={stopImport}>Stop import</button></> : <progress aria-label="Preparing videos" />)}</section>
+    <section className="status" aria-live="polite"><span>{message}</span>{busy && (checkingSound ? <><progress aria-label="Checking selected sound" /><button className="stop" onClick={stopSoundCheck}>Stop sound check</button></> : (exporting || previewing) ? <><progress max="1" value={progress} aria-label={exporting ? "Export progress" : "Preview progress"} /><button className="stop" onClick={async () => { if (await window.concertCompass.cancelRender()) setMessage(exporting ? "Stopping export…" : "Stopping preview…"); }}>{exporting ? "Stop export" : "Stop preview"}</button></> : importing ? <><progress max="1" value={progress} aria-label="Preparing video progress" /><button className="stop" onClick={stopImport}>Stop import</button></> : <progress aria-label="Preparing videos" />)}</section>
     {!clips.length ? <section className="empty"><h2>Start with your recordings</h2><p>Choose videos from a synced iCloud Drive folder or this PC. Your original recordings stay untouched.</p><button className="primary" disabled={busy} onClick={importVideos}>Choose videos</button></section> : <>
       <section className="brief" aria-label="What are we making?">
         <div className="section-heading"><div><p className="eyebrow">YOUR VIDEO, YOUR FEELING</p><h2>What are we making?</h2><p>Tell us what you want. Your marked moments and video settings are already part of this plan.</p></div><button disabled={busy || !undoStack.length} onClick={undo}>Undo</button></div>
@@ -585,6 +651,32 @@ export function App() {
         {draftUrl && draftSignature === cutSignature && !briefDirty && !storyNeedsRebuild && <video className="draft-player" src={draftUrl} controls preload="metadata" aria-label="Assembled first-cut preview" />}
         {draftUrl && draftSignature !== cutSignature && !briefDirty && !storyNeedsRebuild && <p className="draft-stale">Your edit changed. Update the preview to see the latest version.</p>}
       </section>}
+      {!guidedCutPending && selected.length > 0 && <section id="sound-check" className="sound-check" aria-label="Automatic sound check"
+        data-sound-check={currentSoundReview ? "complete" : checkingSound ? "checking" : "pending"}
+        data-checked-sections={currentSoundReview?.items.length ?? 0}>
+        <h2>Automatic sound check</h2>
+        {!currentSoundReview ? <p>{checkingSound ? "Checking each selected sound section, including the sound used in overlaps…" : "Sound will be checked across each selected section before preview or export. Changing a section updates this check."}</p> : <>
+          <p>{!currentSoundReview.items.length ? "These selections have no recorded sound to check." :
+            currentSoundReview.items.every(item => item.report.status === "checked") ? "Sound checked across every selected section, including overlaps." :
+            "Sound checked with some gaps in coverage. Unchecked sound is not confirmed clear."}</p>
+          {soundWarnings.map(item => <div className="sound-check-source" key={`${item.selection.asset.path}-${item.index}`}>
+            <strong>Sound {item.index + 1} · {item.selection.asset.name}</strong>
+            {item.report.status === "unavailable" ? <p>The automatic check is unavailable for this section. Listen to it before keeping the sound.</p> :
+              item.report.status === "partial" && <p>About {Math.min(99, Math.floor(item.report.analyzedFraction * 100))}% of this section could be checked. Unchecked edges or gaps still need a listen.</p>}
+            {!!item.report.intervals.length && <ul>{item.report.intervals.map((interval, index) => <li key={`${interval.start}-${index}`}>
+              <span>Possible {interval.kind === "speech" ? "speech or shout" : "crowd interruption"} · {clock(interval.start)}–{clock(interval.end)} in the recording</span>
+              <button disabled={busy} aria-label={`Listen near ${clock(interval.start)} in ${item.selection.asset.name}`}
+                onClick={() => listenSoundMoment({ ...item.selection, start: Math.max(0, interval.start - 0.5) })}>Listen here</button>
+            </li>)}</ul>}
+          </div>)}
+          {!soundWarnings.length && currentSoundReview.items.length > 0 && <p>No likely crowd or speech interruptions were found in the checked sound.</p>}
+          <p className="sound-check-limit">This check can miss an interruption or flag the artist speaking. It never removes a kept moment or changes your sound by itself.</p>
+          {soundDecisionNeeded && <div className="sound-check-actions"><p>Listen to the flagged moments, choose another section, or keep this sound if it belongs in your video.</p>
+            <button className="primary" disabled={busy || briefDirty || storyNeedsRebuild}
+              onClick={() => exportReel(currentSoundReview.signature)}>Export with this sound</button>
+          </div>}
+        </>}
+      </section>}
       {stage === "cut" && audioSelections && <section className="soundtrack" aria-label="Soundtrack moments">
         <div className="soundtrack-heading"><p className="eyebrow">YOUR SOUNDTRACK</p><h2>{audioSelections.length} sound moments, one video</h2><p>These moments play in order while the selected imported recordings provide the picture. Listen to the assembled preview to judge how the ending feels.</p></div>
         <ol className="soundtrack-list">{audioSelections.map((sound, index) => <li key={`${sound.asset.path}-${index}`}>
@@ -594,7 +686,7 @@ export function App() {
         <p className="soundtrack-note">{reduceRumble ? "Very low rumble will be reduced." : "Live sound stays as recorded."} This does not remove crowd sound or fix mic distortion.</p>
       </section>}
       {stage === "cut" && <section className="refine"><div><h2>Make it yours</h2><p>{audioSelections ? "Try another sound moment above or choose a different picture section below. To change the total length, review your plan again." : "Change one thing at a time. Everything else stays where it is."}</p></div>{!audioSelections && <button disabled={busy} onClick={() => refine({ kind: "fewer-cuts" })}>Fewer cuts</button>}</section>}
-      <section className="toolbar"><div><b>{audioSelections ? `${selected.length} videos to show · ${audioSelections.length} sound moments` : `${selected.length} selected`}</b><span>{clock(totalSeconds)} planned output · recordings play from top to bottom</span>{guidedCutPending && <span className="pending-badge">Make a first cut or choose manual editing before export</span>}{briefDirty && <span className="pending-badge">Make your new request before export</span>}{!briefDirty && storyNeedsRebuild && <span className="pending-badge">Rebuild the picture and soundtrack before export</span>}</div><div className="toolbar-actions"><button disabled={busy} onClick={saveProject}>Save project</button><button className="primary" disabled={busy || !selected.length || briefDirty || storyNeedsRebuild || guidedCutPending} onClick={exportReel}>Export MP4</button></div></section>
+      <section className="toolbar"><div><b>{audioSelections ? `${selected.length} videos to show · ${audioSelections.length} sound moments` : `${selected.length} selected`}</b><span>{clock(totalSeconds)} planned output · recordings play from top to bottom</span>{guidedCutPending && <span className="pending-badge">Make a first cut or choose manual editing before export</span>}{briefDirty && <span className="pending-badge">Make your new request before export</span>}{!briefDirty && storyNeedsRebuild && <span className="pending-badge">Rebuild the picture and soundtrack before export</span>}</div><div className="toolbar-actions"><button disabled={busy} onClick={saveProject}>Save project</button><button className="primary" disabled={busy || !selected.length || briefDirty || storyNeedsRebuild || guidedCutPending} onClick={() => exportReel()}>Export MP4</button></div></section>
       <section className="options" aria-label="Export options">
         <div><b>Video shape</b><div className="clip-actions">
           <button disabled={busy} aria-pressed={aspect === "vertical"} onClick={() => setShape("vertical")}>Phone 9:16 · default</button>
@@ -622,7 +714,7 @@ export function App() {
             onChange={(event) => changeAudioCrossfade(Number(event.target.value))} />
         </div>}<p>{audioTransition === "crossfade" ? "Blends nearby source audio where there is room, without changing kept moments." : "Keeps each recording’s sound separate at the join."} Listen to the assembled preview to check the song changes.</p></div>
         <div><b>Music-led timing</b><label><input aria-label="Follow the beat" disabled={busy} type="checkbox" checked={beatSync} onChange={(event) => changeMusicPreferences({ beatSync: event.target.checked })} /> Follow the beat</label><p>With a separate soundtrack, aligns song changes and picture cuts to clear, compatible beats without changing song speed. Uncertain rhythm keeps the existing timing; your kept sections stay protected.</p></div>
-        <div><b>Highlight choices</b><label><input aria-label="Favor the performance" disabled={busy} type="checkbox" checked={highlightFocus === "performance"} onChange={(event) => changeMusicPreferences({ highlightFocus: event.target.checked ? "performance" : "balanced" })} /> Favor the performance</label><p>Looks for likely singing and favors it over speech, cheering, and instrumental lead-ins. It works on this PC; it cannot tell the artist from a singing crowd or guarantee a big vocal moment.</p></div>
+        <div><b>Highlight choices</b><label><input aria-label="Favor the performance" disabled={busy} type="checkbox" checked={highlightFocus === "performance"} onChange={(event) => changeMusicPreferences({ highlightFocus: event.target.checked ? "performance" : "balanced" })} /> Favor the performance</label><p>Looks across each candidate for likely singing and possible crowd or speech interruptions. It works on this PC; it cannot tell the artist from a singing crowd or guarantee a big vocal moment. Your chosen sound is checked again before export.</p></div>
         <div><b>Finishing look</b><div className="clip-actions">{(["natural", "vivid", "cinematic", "warm"] as const).map((look) => <button key={look} disabled={busy} aria-pressed={finish === look} onClick={() => { remember(); setFinish(look); invalidateReview(); }}>{look}</button>)}</div><p>Subtle color treatment; it does not detect scenes or moods.</p></div>
         <div><b>Optional picture clarity</b><label><input aria-label="Gentle picture clarity" disabled={busy} type="checkbox" checked={enhance} onChange={(event) => { remember(); setEnhance(event.target.checked); invalidateReview(); }} /> Gentle cleanup and sharpening</label><p>Light grain reduction and sharpening. It cannot restore missing detail; compare the preview before keeping it.</p></div>
         <label><input disabled={busy} type="checkbox" checked={reduceRumble} onChange={(event) => { remember(); setReduceRumble(event.target.checked); setBriefInput((old) => ({ ...old, reduceRumble: event.target.checked })); invalidateReview(); if (audioSelections) { setBriefDirty(true); setMessage("Low-rumble processing changes how sound moments are chosen. Review your plan and make a new first cut before exporting."); } }} /> Reduce low rumble <small>Gently lowers very low bass. It does not remove crowd voices.</small></label>

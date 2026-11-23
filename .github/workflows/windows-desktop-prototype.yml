@@ -1,7 +1,7 @@
 name: Concert Compass Windows prototype verification
 on:
   push:
-    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story', 'native/vibe-capsule-visual-finish']
+    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story', 'native/vibe-capsule-visual-finish', 'native/vibe-capsule-desktop-quality']
 permissions:
   contents: read
 jobs:

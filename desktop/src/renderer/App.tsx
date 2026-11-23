@@ -327,6 +327,12 @@ export function App() {
         result = makeFirstCut(candidates, reviewBrief, resolution);
       }
       remember(); setClips(result.clips); setAudioSelections(result.audioSelections ?? null); setStoryError(null); setBriefDirty(false);
+      // An intact performance resolves the guided default to its original sound.
+      // Store that confirmed choice so preview/export also work after reopening.
+      if (reviewBrief.keepWholePerformance && !reviewBrief.soundtrackIntent) {
+        setBriefInput((old) => ({ ...old, separatePicture: false,
+          soundMomentCount: undefined, pictureSourceCount: undefined }));
+      }
       setAspect(result.options.aspect); setReduceRumble(result.options.reduceRumble);
       setFinish(result.options.finish ?? "natural"); setTransition(result.options.transition ?? "cut");
       setEventTitle(result.options.eventTitle ?? ""); setShowClipLabels(result.options.showClipLabels ?? false);

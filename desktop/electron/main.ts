@@ -215,6 +215,7 @@ function createWindow() {
         });
         if (color.length < 3 || color[0] < color[1] * 2 || color[0] < color[2] * 2) throw new Error(`Export order was wrong: ${color.toString("hex")}`);
         await win.webContents.executeJavaScript(`document.querySelectorAll('.clips article')[1].querySelector('.trim-heading input[type=checkbox]').click()`);
+        await win.webContents.executeJavaScript(`(() => { const guided=document.querySelector('.brief-picture-toggle input'); if (!guided.checked) guided.click(); })()`);
         await win.webContents.executeJavaScript(`(() => { const input=document.querySelector('.brief textarea'), set=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set; set.call(input,'Just this song, keep the performance intact.'); input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Review my plan').click()`);
         await waitFor(`document.body.innerText.includes('Which recording contains this song?')`, "one-song recording question");
@@ -224,6 +225,12 @@ function createWindow() {
         await waitFor(`(() => { const plan=document.querySelector('.brief-review h3'); return plan && plan.textContent.includes('one-recording performance') })()`, "one-song interpretation");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Make my first cut').click()`);
         await waitFor(`document.body.innerText.includes('First cut ready:') && document.body.innerText.includes('1 selected')`, "one-song first cut");
+        await waitFor(`Array.from(document.querySelectorAll('button')).some(b => b.textContent === 'Export MP4' && !b.disabled) && document.querySelector('.brief-picture-toggle input')?.checked === false`, "intact performance ready for export");
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Save project').click()`);
+        await waitFor(`document.body.innerText.includes('Project saved:')`, "intact project save");
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Open project').click()`);
+        await waitFor(`document.body.innerText.includes('Project opened.') && Array.from(document.querySelectorAll('button')).some(b => b.textContent === 'Export MP4' && !b.disabled)`, "intact project reopen remains exportable");
+        smokeStage("intact performance ready after project reopen");
         smokeStage("smoke passed");
         console.log("Desktop creative brief, protected selection, first cut, refinement, project save/open and MP4 export passed"); clearTimeout(timer); app.exit(0);
       } catch (error) { smokeStage(`desktop smoke test failed: ${error instanceof Error ? error.stack : String(error)}`); console.error("Desktop smoke test failed", error); clearTimeout(timer); app.exit(1); }

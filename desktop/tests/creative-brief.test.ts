@@ -141,6 +141,90 @@ test("keep this performance intact selects the full original recording", () => {
   assert.deepEqual([clips[0].start, clips[0].end], [39, 51]);
 });
 
+test("guided defaults keep an intact performance continuous with its original picture and sound", () => {
+  const clips = [recording(1, { included: false }), recording(2), recording(3, { included: false, excludedByUser: true })];
+  const original = structuredClone(clips);
+  const brief = interpretCreativeBrief({ description: "Keep this performance intact but clean up the presentation",
+    separatePicture: true, eventTitle: "Our night" }, clips, options);
+  assert.equal(brief.conflict, null);
+  assert.equal(brief.soundtrackIntent, null, "the default wizard setting must not invent a separate soundtrack request");
+  assert.equal(brief.pictureSourceCount, null);
+  assert.equal(brief.targetSeconds, null);
+  assert.match(brief.summary, /^1:30.*whole performance stays/);
+  const cut = makeFirstCut(clips, brief);
+  assert.deepEqual(cut.clips.map((clip) => clip.included), [false, true, false]);
+  assert.deepEqual([cut.clips[1].start, cut.clips[1].end, cut.clips[1].locked], [0, 90, true]);
+  assert.equal(cut.clips[2].excludedByUser, true);
+  assert.equal(cut.plannedSeconds, 90);
+  assert.equal(cut.options.eventTitle, "Our night");
+  assert.deepEqual(clips, original);
+});
+
+test("an intact performance with explicit independent sound or picture instructions asks which edit to make", () => {
+  const clips = [recording(1, { start: 0, end: 90, selectionSource: "manual", locked: true }), recording(2, { included: false })];
+  const original = structuredClone(clips);
+  const inputs = [
+    { description: "Keep this performance intact, but use three audio moments" },
+    { description: "Keep this performance intact with a separate soundtrack" },
+    { description: "Keep this performance intact, with footage from multiple videos over the soundtrack" },
+    { description: "Keep this performance intact, with picture from two recordings" },
+    { description: "Keep this performance intact", separatePicture: true, soundMomentCount: 3 },
+    { description: "Keep this performance intact", separatePicture: true, pictureSourceCount: 2 },
+  ];
+  for (const input of inputs) {
+    const brief = interpretCreativeBrief(input, clips, options);
+    assert.equal(brief.conflict?.kind, "intact-vs-soundtrack", JSON.stringify(input));
+    assert.match(brief.conflict?.message ?? "", /Keep the whole performance.*or.*separate soundtrack/);
+    assert.throws(() => makeFirstCut(clips, brief));
+  }
+  assert.deepEqual(clips, original, "asking for clarification must not alter the locked performance");
+  for (const wording of ["without a separate soundtrack", "don't use independent audio", "no replacement sound"]) {
+    const brief = interpretCreativeBrief({ description: `Keep this performance intact, ${wording}`,
+      separatePicture: true }, clips, options);
+    assert.equal(brief.conflict, null, wording);
+    assert.equal(brief.soundtrackIntent, null, wording);
+  }
+});
+
+test("one sound moment and one picture recording remain compatible with keeping a performance intact", () => {
+  const clips = [recording(1)];
+  const brief = interpretCreativeBrief({ description: "Keep this performance intact and clean up the sound",
+    separatePicture: true, soundMomentCount: 1, pictureSourceCount: 1 }, clips,
+  { aspect: "portrait913", reduceRumble: false, finish: "cinematic", transition: "fade" });
+  assert.equal(brief.conflict, null);
+  assert.equal(brief.soundtrackIntent, null);
+  const cut = makeFirstCut(clips, brief);
+  assert.equal(cut.plannedSeconds, 90);
+  assert.equal(cut.options.reduceRumble, true);
+  assert.equal(cut.options.finish, "cinematic");
+  assert.match(brief.limitations.join(" "), /cannot remove crowd voices/);
+});
+
+test("an intact performance discloses that a requested stronger ending cannot rearrange its sound", () => {
+  const clips = [recording(1)];
+  const brief = interpretCreativeBrief({ description: "Keep this performance intact with a crescendo",
+    separatePicture: true }, clips, options);
+  assert.equal(brief.conflict, null);
+  assert.equal(brief.soundtrackIntent, null);
+  assert.match(brief.limitations.join(" "), /will not rearrange it to create a stronger ending/);
+  const cut = makeFirstCut(clips, brief);
+  assert.deepEqual([cut.clips[0].start, cut.clips[0].end], [0, 90]);
+});
+
+test("guided intact requests still require consent before replacing a marked range or extending a target", () => {
+  const clips = [recording(1, { start: 15, end: 35, selectionSource: "manual", locked: true })];
+  const marked = interpretCreativeBrief({ description: "Keep this performance intact", separatePicture: true }, clips, options);
+  assert.equal(marked.conflict?.kind, "intact-vs-marked");
+  assert.throws(() => makeFirstCut(clips, marked), /marked/);
+  const kept = makeFirstCut(clips, marked, "keep-marked");
+  assert.deepEqual([kept.clips[0].start, kept.clips[0].end, kept.clips[0].locked], [15, 35, true]);
+  const shortTarget = interpretCreativeBrief({ description: "Keep this performance intact", separatePicture: true,
+    targetSeconds: 30 }, [recording(2)], options);
+  assert.equal(shortTarget.conflict?.kind, "protected-over-target");
+  assert.throws(() => makeFirstCut([recording(2)], shortTarget), /whole recording/);
+  assert.equal(makeFirstCut([recording(2)], shortTarget, "extend").plannedSeconds, 90);
+});
+
 test("intact performance versus a partial marked section asks one question", () => {
   const clips = [recording(1, { start: 15, end: 35, selectionSource: "manual", locked: true })];
   const brief = interpretCreativeBrief({ description: "Keep this performance intact" }, clips, options);

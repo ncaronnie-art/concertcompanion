@@ -166,20 +166,78 @@ function freeSpans(assets: AudioSelection["asset"][], reserved: AudioSelection[]
 }
 
 function chooseTickets(spans: Span[], count: number, seconds: number,
-  binsByPath: Readonly<Record<string, AudioBin[]>>): Span[] {
+  binsByPath: Readonly<Record<string, AudioBin[]>>,
+  preference: { buildEnding: boolean; variedLabels: boolean;
+    labelsByPath: Readonly<Record<string, string>>; usedLabels: ReadonlySet<string> }): Span[] {
   if (count < 1) return [];
   const sampleLength = seconds / count;
-  const clean = spans.filter((span) => bestWithin(span, Math.min(length(span), sampleLength),
-    binsByPath[span.asset.path]).clipping < 0.02);
-  const cleanCapacity = sum([...clean].sort((a, b) => length(b) - length(a)).slice(0, count).map(length));
-  const pool = clean.length >= count && cleanCapacity + EPS >= seconds ? clean : spans;
-  const ranked = [...pool].sort((a, b) => length(b) - length(a));
-  const distinct: Span[] = [], seen = new Set<string>();
-  for (const span of ranked) if (!seen.has(span.asset.path)) { distinct.push(span); seen.add(span.asset.path); }
-  let chosen = distinct.slice(0, count);
-  if (sum(chosen.map(length)) + EPS < seconds || chosen.length < count) {
-    chosen = ranked.slice(0, count);
-  }
+  const samples = new Map(spans.map((span) => [span,
+    bestWithin(span, Math.min(length(span), sampleLength), binsByPath[span.asset.path])]));
+  const canFill = (candidates: Span[]) => candidates.length >= count &&
+    sum([...candidates].sort((a, b) => length(b) - length(a)).slice(0, count).map(length)) + EPS >= seconds;
+  // Length alone must not let a silent recording displace audible performance.
+  // Use the highlight suggestion's conservative signal floor, then retain the
+  // full pool when this preference would prevent the requested count or length.
+  // Marked sound is already reserved separately and never enters this ranking.
+  const audible = spans.filter((span) => samples.get(span)!.energy >= 0.002);
+  const withSignal = canFill(audible) ? audible : spans;
+  const clean = withSignal.filter((span) => samples.get(span)!.clipping < 0.02);
+  const pool = canFill(clean) ? clean : withSignal;
+  const labelOf = (span: Span) => preference.labelsByPath[span.asset.path] ?? "";
+  const choose = (distinctSources: boolean, wanted: number): Span[] | null => {
+    const chosen: Span[] = [];
+    const usedLabels = new Set(preference.usedLabels);
+    let capacity = 0;
+    while (chosen.length < wanted) {
+      const usedPaths = new Set(chosen.map((span) => span.asset.path));
+      const candidates = pool.filter((span) => !chosen.includes(span) &&
+        (!distinctSources || !usedPaths.has(span.asset.path)));
+      candidates.sort((a, b) => {
+        const firstEndingChoice = preference.buildEnding && chosen.length === 0;
+        const aNovel = Number(preference.variedLabels && !!labelOf(a) && !usedLabels.has(labelOf(a)));
+        const bNovel = Number(preference.variedLabels && !!labelOf(b) && !usedLabels.has(labelOf(b)));
+        if (!firstEndingChoice && aNovel !== bNovel) return bNovel - aNovel;
+        if (preference.buildEnding && chosen.length > 0 && wanted > 1) {
+          // A crescendo needs audible contrast, not merely the three loudest
+          // windows in ascending order. Keep the strongest clean source for
+          // the end and seek measured, still audible levels before it.
+          const peak = samples.get(chosen[0])!.energy;
+          const target = peak * (0.65 + 0.35 * (wanted - chosen.length - 1) / (wanted - 1));
+          const floor = peak * 0.55;
+          const aEnergy = samples.get(a)!.energy, bEnergy = samples.get(b)!.energy;
+          if ((aEnergy >= floor) !== (bEnergy >= floor)) return aEnergy >= floor ? -1 : 1;
+          const contrast = Math.abs(aEnergy - target) - Math.abs(bEnergy - target);
+          if (Math.abs(contrast) > 0.000001) return contrast;
+        }
+        const score = samples.get(b)!.score - samples.get(a)!.score;
+        if (Math.abs(score) > 0.000001) return score;
+        if (aNovel !== bNovel) return bNovel - aNovel;
+        return length(b) - length(a);
+      });
+      const candidate = candidates.find((span) => {
+        const remainingSlots = wanted - chosen.length - 1;
+        const rest = candidates.filter((other) => other !== span &&
+          (!distinctSources || other.asset.path !== span.asset.path));
+        const capacities = distinctSources ? (() => {
+          const longestBySource = new Map<string, number>();
+          for (const other of rest) longestBySource.set(other.asset.path,
+            Math.max(longestBySource.get(other.asset.path) ?? 0, length(other)));
+          return [...longestBySource.values()];
+        })() : rest.map(length);
+        capacities.sort((a, b) => b - a);
+        return capacities.length >= remainingSlots &&
+          capacity + length(span) + sum(capacities.slice(0, remainingSlots)) + EPS >= seconds;
+      });
+      if (!candidate) return null;
+      chosen.push(candidate); capacity += length(candidate);
+      const label = labelOf(candidate); if (label) usedLabels.add(label);
+    }
+    return chosen;
+  };
+  const distinctCount = new Set(pool.map((span) => span.asset.path)).size;
+  let chosen = distinctCount >= count ? choose(true, count) : null;
+  chosen ??= choose(false, Math.min(count, pool.length));
+  if (!chosen) throw new Error(`There is not enough nonrepeating sound for ${count} separate moments at this length. Add recordings or shorten the video.`);
   while (chosen.length < count && chosen.length) {
     const largest = chosen.reduce((best, span, index) => length(span) > length(chosen[best]) ? index : best, 0);
     const span = chosen[largest], middle = (span.start + span.end) / 2;
@@ -359,21 +417,37 @@ export function planAudioStory<T extends CreativeClip>(clips: T[], brief: Creati
     }
   }
   const reserved: AudioSelection[] = [...anchors];
-  const gaps = parts.filter((part): part is Gap => part.kind === "gap").sort((a, b) => b.duration - a.duration);
+  const labelsByPath = Object.fromEntries(clips.filter((clip) => !clip.excludedByUser && clip.asset.hasAudio)
+    .map((clip) => [clip.asset.path, clip.label?.trim().toLowerCase() ?? ""]));
+  const variedLabels = /\b(several|multiple|different|many) songs?\b/i.test(brief.description) &&
+    new Set(Object.values(labelsByPath).filter(Boolean)).size > 1;
+  const usedLabels = new Set(anchors.map((anchor) => labelsByPath[anchor.asset.path]).filter(Boolean));
+  const lastPart = parts.at(-1);
+  const finalGap = lastPart?.kind === "gap" ? lastPart : undefined;
+  const canPlanEndingFirst = !!finalGap && parts.every((part) =>
+    part.kind !== "gap" || part.duration <= finalGap.duration + EPS);
+  const gaps = parts.filter((part): part is Gap => part.kind === "gap").sort((a, b) =>
+    Number(intent.buildEnding && canPlanEndingFirst && b === finalGap) -
+      Number(intent.buildEnding && canPlanEndingFirst && a === finalGap) ||
+    b.duration - a.duration);
   for (const gap of gaps) {
     const spans = freeSpans(audioAssets, reserved, binsByPath);
     if (intent.buildEnding && !spans.some((span) => binsByPath[span.asset.path]?.length)) {
       throw new Error("Sound analysis could not measure a rising ending. Try again or adjust the sound moments yourself.");
     }
-    const tickets = chooseTickets(spans, gap.count, gap.duration, binsByPath);
+    const tickets = chooseTickets(spans, gap.count, gap.duration, binsByPath,
+      { buildEnding: intent.buildEnding && gap === finalGap, variedLabels, labelsByPath, usedLabels });
     const amounts = allocate(gap.duration, tickets.map(length));
     gap.selections = tickets.map((ticket, index) => bestWithin(ticket, amounts[index], binsByPath[ticket.asset.path]));
     if (intent.buildEnding) gap.selections.sort((a, b) => a.energy - b.energy);
     reserved.push(...gap.selections.map((scored) => scored.selection));
+    for (const selection of gap.selections) {
+      const label = labelsByPath[selection.selection.asset.path];
+      if (label) usedLabels.add(label);
+    }
   }
   // A final unprotected sound moment can favor a rising tail, but never at the
   // expense of obvious clipping or a quieter ending than the earlier moments.
-  const lastPart = parts.at(-1);
   if (intent.buildEnding && lastPart?.kind === "gap" && lastPart.selections.length) {
     const lastIndex = lastPart.selections.length - 1;
     const current = lastPart.selections[lastIndex];

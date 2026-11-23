@@ -1,13 +1,13 @@
 import { spawn } from "node:child_process";
 import type { AudioBin } from "../src/shared/suggestions.js";
 
-export function measureAudio(binary: string, source: string, reduceRumble = false): Promise<AudioBin[]> {
+export function measureAudio(binary: string, source: string, reduceRumble = false, signal?: AbortSignal): Promise<AudioBin[]> {
   return new Promise((resolve, reject) => {
     const args = ["-v", "error", "-nostdin", "-i", source, "-map", "0:a:0", "-vn"];
     // Match the export filter before calculating the bins used to rank the soundtrack.
     if (reduceRumble) args.push("-af", "aresample=48000,aformat=channel_layouts=stereo,highpass=f=80");
     args.push("-ac", "1", "-ar", "8000", "-f", "f32le", "pipe:1");
-    const child = spawn(binary, args, { windowsHide: true });
+    const child = spawn(binary, args, { windowsHide: true, signal });
     const bins: AudioBin[] = []; let remainder = Buffer.alloc(0), sum = 0, count = 0, clipped = 0, stderr = "";
     child.stdout.on("data", (data: Buffer) => {
       const chunk = Buffer.concat([remainder, data]); const limit = chunk.length - chunk.length % 4;

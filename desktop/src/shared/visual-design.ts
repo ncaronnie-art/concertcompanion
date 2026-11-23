@@ -105,7 +105,11 @@ export function buildOverlayAss({ eventTitle, labels = [], width, height, style 
     lines.push(dialogue(0, titleEnd, "Title", `${fade}${wrap(title, portrait ? 30 : 45)}`));
   }
   for (const cue of cues) {
-    const start = title && cue.start < 2.4 ? 2.4 : cue.start;
+    const preferredStart = title && cue.start < 2.4 ? 2.4 : cue.start;
+    // Keep a short first moment readable even when its whole shot ends under
+    // the opening title. The title and label occupy separate safe areas.
+    const latestStart = cue.start + cue.duration - Math.min(1.5, cue.duration);
+    const start = Math.max(cue.start, Math.min(preferredStart, latestStart));
     const end = Math.min(cue.start + cue.duration, start + 2.1);
     if (end - start < 0.35) continue;
     const fade = Math.min(240, Math.round((end - start) * 220));

@@ -281,3 +281,137 @@ test("a cleaner source replaces a heavily clipped one when enough sound is avail
   assert.ok(result.audioSelections.every((selection) => selection.asset.path !== clips[2].asset.path));
   assert.equal(result.audioSelections.at(-1)?.asset.path, clips[3].asset.path);
 });
+
+const silenceChoiceFixtures = () => [1, 2, 3].map((number) => recording(number, {
+  asset: { ...recording(number).asset, duration: number === 1 ? 120 : 30 },
+  start: 9, end: 21,
+}));
+
+test("a longer near-silent recording does not displace audible performance sound", () => {
+  const clips = silenceChoiceFixtures();
+  const brief = interpretCreativeBrief({ description: "Energetic recap", separatePicture: true,
+    soundMomentCount: 2, pictureSourceCount: 3, targetSeconds: 12 }, clips,
+  { aspect: "portrait913", reduceRumble: false });
+  const byPath = { [clips[0].asset.path]: bins(0.0005, 240),
+    [clips[1].asset.path]: bins(0.1, 60), [clips[2].asset.path]: bins(0.2, 60) };
+  const result = planAudioStory(clips, brief, byPath);
+  assert.equal(result.audioSelections.length, 2);
+  assert.equal(total(result.audioSelections), 12);
+  assert.ok(result.audioSelections.every((selection) => selection.asset.path !== clips[0].asset.path),
+    "a near-silent recording must not win simply because it is longer");
+  assert.equal(result.clips.filter((clip) => clip.included).length, 3,
+    "the quiet recording can still contribute picture");
+});
+
+test("quiet sound remains available when needed for the chosen length", () => {
+  const clips = silenceChoiceFixtures();
+  const brief = interpretCreativeBrief({ description: "Recap", separatePicture: true,
+    soundMomentCount: 2, pictureSourceCount: 3, targetSeconds: 80 }, clips,
+  { aspect: "portrait913", reduceRumble: false });
+  const result = planAudioStory(clips, brief, { [clips[0].asset.path]: bins(0.0005, 240),
+    [clips[1].asset.path]: bins(0.1, 60), [clips[2].asset.path]: bins(0.2, 60) });
+  assert.equal(result.audioSelections.length, 2);
+  assert.ok(Math.abs(total(result.audioSelections) - 80) < 0.05);
+  assert.ok(result.audioSelections.some((selection) => selection.asset.path === clips[0].asset.path),
+    "the requested length is preserved when audible alternatives cannot fill it");
+});
+
+test("a kept quiet moment stays exactly marked while other sound avoids silence", () => {
+  const clips = silenceChoiceFixtures();
+  clips[0] = { ...clips[0], start: 50, end: 55, locked: true, selectionSource: "manual" };
+  const brief = interpretCreativeBrief({ description: "Energetic recap", separatePicture: true,
+    soundMomentCount: 3, pictureSourceCount: 3, targetSeconds: 12 }, clips,
+  { aspect: "portrait913", reduceRumble: false });
+  const result = planAudioStory(clips, brief, { [clips[0].asset.path]: bins(0.0005, 240),
+    [clips[1].asset.path]: bins(0.1, 60), [clips[2].asset.path]: bins(0.2, 60) });
+  const quiet = result.audioSelections.filter((selection) => selection.asset.path === clips[0].asset.path);
+  assert.equal(quiet.length, 1);
+  assert.deepEqual([quiet[0].start, quiet[0].end, quiet[0].locked], [50, 55, true]);
+  assert.equal(total(result.audioSelections), 12);
+});
+
+test("a clean, shorter, stronger recording can supply the measured ending", () => {
+  const durations = [60, 60, 60, 40];
+  const levels = [0.1, 0.2, 0.25, 0.7];
+  const clips = durations.map((seconds, index) => recording(index + 1, {
+    asset: { ...recording(index + 1).asset, duration: seconds }, start: 0, end: 12,
+  }));
+  const brief = interpretCreativeBrief({ description: prompt, targetSeconds: 24 }, clips,
+    { aspect: "landscape", reduceRumble: false });
+  const byPath = Object.fromEntries(clips.map((clip, index) =>
+    [clip.asset.path, bins(levels[index], durations[index] * 2)]));
+  const result = planAudioStory(clips, brief, byPath);
+  assert.equal(result.audioSelections.length, 3);
+  assert.ok(Math.abs(total(result.audioSelections) - 24) < 1e-6);
+  assert.equal(result.audioSelections.at(-1)?.asset.path, clips[3].asset.path,
+    "the strongest clean feasible source should not be omitted solely because it is shorter");
+  assert.equal(new Set(result.audioSelections.map((selection) => selection.asset.path)).size, 3);
+});
+
+test("a measured crescendo uses audible contrast when several clean sources are available", () => {
+  const levels = [0.187, 0.211, 0.221, 0.252, 0.255, 0.266];
+  const clips = levels.map((_, index) => recording(index + 1));
+  const brief = interpretCreativeBrief({ description: prompt, targetSeconds: 60 }, clips,
+    { aspect: "landscape", reduceRumble: false });
+  const byPath = Object.fromEntries(clips.map((clip, index) =>
+    [clip.asset.path, bins(levels[index])]));
+  const result = planAudioStory(clips, brief, byPath);
+  const chosen = result.audioSelections.map((selection) =>
+    byPath[selection.asset.path][0].rms);
+  assert.equal(chosen.length, 3);
+  assert.ok(Math.abs(total(result.audioSelections) - 60) < 1e-6);
+  assert.equal(chosen[2], 0.266);
+  assert.ok(chosen[0] >= 0.15 && chosen[0] < chosen[1] && chosen[1] < chosen[2]);
+  assert.ok(chosen[2] / chosen[0] >= 1.25, "measured rise should be perceptible in the edit plan");
+});
+
+test("several songs favors distinct user labels without inventing song detection", () => {
+  const clips = [recording(1, { label: "Song A" }), recording(2, { label: "Song A" }),
+    recording(3, { label: "Song A" }), recording(4, { label: "Song B" })];
+  const brief = interpretCreativeBrief({ description: `${prompt} Include several songs.`, targetSeconds: 24 }, clips,
+    { aspect: "landscape", reduceRumble: false });
+  const byPath = Object.fromEntries(clips.map((clip) => [clip.asset.path, bins(0.2)]));
+  const result = planAudioStory(clips, brief, byPath);
+  const labels = result.audioSelections.map((selection) => clips.find((clip) =>
+    clip.asset.path === selection.asset.path)?.label);
+  assert.equal(result.audioSelections.length, 3);
+  assert.deepEqual(new Set(labels), new Set(["Song A", "Song B"]));
+  assert.ok(Math.abs(total(result.audioSelections) - 24) < 1e-6);
+  assert.match(brief.limitations.join(" "), /labels|mark or name/i);
+});
+
+test("a loud short source is skipped when it cannot fit the requested length", () => {
+  const durations = [15, 15, 15, 2];
+  const clips = durations.map((seconds, index) => recording(index + 1, {
+    asset: { ...recording(index + 1).asset, duration: seconds }, start: 0, end: Math.min(12, seconds),
+  }));
+  const brief = interpretCreativeBrief({ description: prompt, targetSeconds: 45 }, clips,
+    { aspect: "landscape", reduceRumble: false });
+  const byPath = Object.fromEntries(clips.map((clip, index) =>
+    [clip.asset.path, bins(index === 3 ? 0.8 : 0.2, durations[index] * 2)]));
+  const result = planAudioStory(clips, brief, byPath);
+  assert.equal(result.audioSelections.length, 3);
+  assert.equal(total(result.audioSelections), 45);
+  assert.ok(result.audioSelections.every((selection) => selection.asset.path !== clips[3].asset.path));
+});
+
+test("a short ending gap does not consume the only source that can fill an earlier gap", () => {
+  const durations = [40, 5, 10, 40, 10];
+  const clips = durations.map((seconds, index) => recording(index + 1, {
+    asset: { ...recording(index + 1).asset, duration: seconds,
+      hasAudio: index === 1 || index > 2 }, start: 0, end: seconds,
+    ...(index > 2 ? { included: false } : {}),
+    ...(index === 1 ? { locked: true, selectionSource: "manual" as const } : {}),
+  }));
+  const brief = interpretCreativeBrief({ description: prompt, targetSeconds: 55,
+    pictureSourceCount: 3 }, clips,
+    { aspect: "landscape", reduceRumble: false });
+  const byPath = Object.fromEntries(clips.map((clip, index) =>
+    [clip.asset.path, bins(index === 3 ? 0.8 : 0.2, durations[index] * 2)]));
+  const result = planAudioStory(clips, brief, byPath);
+  assert.equal(result.audioSelections.length, 3);
+  assert.equal(total(result.audioSelections), 55);
+  assert.deepEqual([result.audioSelections[1].asset.path, result.audioSelections[1].start,
+    result.audioSelections[1].end, result.audioSelections[1].locked],
+  [clips[1].asset.path, 0, 5, true]);
+});

@@ -34,13 +34,22 @@ test("overlay timing, margins and user text are safe without inventing extra foo
   assert.throws(() => assFilter("relative.ass"), /full path/);
 });
 
+test("a short named opening shot is not hidden behind the event title", () => {
+  const script = buildOverlayAss({ eventTitle: "Live tonight", labels: [
+    { text: "First song", start: 0, duration: 1.5 },
+    { text: "Second song", start: 1.5, duration: 4 },
+  ], width: 720, height: 1040, style: "vivid" })!;
+  assert.match(script, /0:00:00\.00,0:00:01\.50,Label[^\n]*First song/);
+  assert.match(script, /0:00:02\.40,0:00:04\.50,Label[^\n]*Second song/);
+});
+
 test("bundled FFmpeg renders readable Unicode overlays on a playable portrait video", async () => {
   const folder = await mkdtemp(path.join(tmpdir(), "vibe overlay test "));
   try {
     const scriptPath = path.join(folder, "event title's.ass");
     const output = path.join(folder, "title.mp4");
     const script = buildOverlayAss({ eventTitle: "Olivia's Night: ¡Qué noche! 🎵",
-      labels: [{ text: "The first song", start: 0, duration: 3 }],
+      labels: [{ text: "The first song", start: 0, duration: 1.5 }],
       width: 720, height: 1040, style: "cinematic" })!;
     await writeFile(scriptPath, script, "utf8");
     assert.equal(await readFile(scriptPath, "utf8"), script);
@@ -57,5 +66,12 @@ test("bundled FFmpeg renders readable Unicode overlays on a playable portrait vi
       if (pixels[pixel] > 150 && pixels[pixel + 1] > 130 && pixels[pixel + 2] > 120) bright++;
     }
     assert.ok(bright > 100, `Expected legible title pixels, found ${bright}`);
+    const lowerPixels = await run(["-v", "error", "-ss", "0.8", "-i", output,
+      "-frames:v", "1", "-vf", "crop=500:190:20:650", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]);
+    let labelBright = 0;
+    for (let i = 0; i < lowerPixels.length; i += 3) {
+      if (lowerPixels[i] > 150 && lowerPixels[i + 1] > 130 && lowerPixels[i + 2] > 120) labelBright++;
+    }
+    assert.ok(labelBright > 100, `Expected readable named first moment, found ${labelBright}`);
   } finally { await rm(folder, { recursive: true, force: true }); }
 });

@@ -113,7 +113,7 @@ function createWindow() {
         await win.webContents.executeJavaScript(`document.querySelector('button[aria-label^="Back five seconds"]').click()`);
         await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && v.currentTime < 0.2 })()`, "back button");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Suggest a moment').click()`);
-        await waitFor(`document.body.innerText.includes('Suggested for stronger sound energy')`, "sound-based suggestion");
+        await waitFor(`document.querySelector('.status')?.textContent.includes('Favored a sustained musical phrase') && Array.from(document.querySelectorAll('button')).some(b => b.textContent === 'Suggest a moment' && !b.disabled)`, "performance-focused sound suggestion");
         await win.webContents.executeJavaScript(`document.querySelector('video').currentTime = 1`);
         await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && Math.abs(v.currentTime - 1) < 0.15 })()`, "mark position");
         await win.webContents.executeJavaScript(`Array.from(document.querySelector('.clips article').querySelectorAll('button')).find(b => b.textContent === 'Set start here').click()`);

@@ -48,7 +48,7 @@ jobs:
           $process = Start-Process -FilePath "$env:RUNNER_TEMP\compass-package\Concert Compass-win32-x64\Concert Compass.exe" -PassThru -WindowStyle Hidden -RedirectStandardOutput "$env:RUNNER_TEMP\compass-stdout.log" -RedirectStandardError "$env:RUNNER_TEMP\compass-stderr.log"
           $finished = $process.WaitForExit(170000)
           $stages = @(Get-Content "$env:RUNNER_TEMP\compass-stages.log" -ErrorAction SilentlyContinue)
-          $failure = $stages | Where-Object { $_ -match '^desktop smoke test failed:' } | Select-Object -Last 1
+          $failure = $stages | Where-Object { $_ -match 'desktop smoke test failed:' } | Select-Object -Last 1
           $diagnosis = if ($failure) { $failure } elseif ($stages.Count) { $stages[-1] } else { 'no desktop stage recorded' }
           $diagnosis = $diagnosis.Substring(0, [Math]::Min(170, $diagnosis.Length)) -replace '[\r\n|]', ' '
           "diagnosis=$diagnosis" | Add-Content -Path $env:GITHUB_OUTPUT

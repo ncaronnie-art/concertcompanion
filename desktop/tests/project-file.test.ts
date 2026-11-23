@@ -34,6 +34,22 @@ test("project round trip retains selected ranges, locks, exclusions, brief and f
   assert.equal(normalized.version, 2, "older projects reopen in the current project format");
   assert.equal(normalized.audioSelections, null);
   assert.equal(normalized.briefDirty, false);
+  assert.equal(normalized.briefInput.tempoArc, undefined, "older projects do not acquire a new music direction");
+});
+
+test("saved music direction retains explicit duration and count instead of receiving fresh defaults", () => {
+  for (const tempoArc of [true, false]) {
+    const saved = parseProjectSnapshot({ ...project, briefDirty: true,
+      briefInput: { ...project.briefInput, tempoArc, targetSeconds: 72, soundMomentCount: 4 } });
+    const reopened = parseProjectSnapshot(JSON.parse(JSON.stringify(saved)));
+    assert.equal(reopened.briefInput.tempoArc, tempoArc);
+    assert.equal(reopened.briefInput.targetSeconds, 72);
+    assert.equal(reopened.briefInput.soundMomentCount, 4);
+    assert.deepEqual(reopened.clips, saved.clips);
+    assert.deepEqual(reopened.options, saved.options);
+  }
+  assert.throws(() => parseProjectSnapshot({ ...project,
+    briefInput: { ...project.briefInput, tempoArc: "yes" } }), /invalid creative brief/);
 });
 
 test("malformed projects cannot replace validated selection or export settings", () => {

@@ -8,6 +8,7 @@ export type SoundtrackIntent = {
   buildEnding: boolean;
   separatePicture: boolean;
   cleanupRequested: boolean;
+  tempoArc?: boolean;
 };
 export type CreativeClip = RenderSelection & {
   included: boolean;
@@ -15,6 +16,7 @@ export type CreativeClip = RenderSelection & {
   locked: boolean;
   orderLocked?: boolean;
   excludedByUser: boolean;
+  soundExcludedByUser?: boolean;
   label?: string;
 };
 
@@ -33,6 +35,7 @@ export type CreativeBriefInput = {
   highlightFocus?: "balanced" | "performance";
   separatePicture?: boolean;
   soundMomentCount?: number;
+  tempoArc?: boolean;
   pictureSourceCount?: number;
   customVibe?: string;
 };
@@ -42,7 +45,7 @@ export type BriefConflict = {
     "intact-vs-marked" | "intact-vs-soundtrack" | "insufficient-footage" | "no-marked-sections" |
     "audio-story-no-sound" | "audio-story-picture-variety" | "audio-story-picture-count" |
     "audio-story-all-picture-protected" | "audio-story-picture-mode" | "audio-story-locked-count" |
-    "audio-story-silent-lock" | "audio-story-insufficient-audio" | "audio-story-short-target";
+    "audio-story-silent-lock" | "audio-story-insufficient-audio" | "audio-story-short-target" | "audio-story-picture-only-lock";
   message: string;
   requestedSeconds?: number;
   availableSeconds?: number;
@@ -81,6 +84,7 @@ function validateClips(clips: CreativeClip[]) {
       clip.end > clip.asset.duration + 0.05 || duration(clip) < 0.1 ||
       !["manual", "suggested"].includes(clip.selectionSource) ||
       typeof clip.included !== "boolean" || typeof clip.locked !== "boolean" || typeof clip.excludedByUser !== "boolean" ||
+      (clip.soundExcludedByUser !== undefined && typeof clip.soundExcludedByUser !== "boolean") ||
       (clip.label !== undefined && (typeof clip.label !== "string" || clip.label.length > 100))) {
       throw new Error(`Invalid section for ${clip.asset?.name || "a recording"}.`);
     }
@@ -109,6 +113,13 @@ function parsedType(text: string): VideoType | undefined {
 
 function asksForWholePerformance(text: string): boolean {
   return /\b(?:keep|leave) (?:this|the) (?:song|performance) (?:fully )?intact\b|\b(?:full|entire|whole) (?:song|performance)\b|\bkeep (?:this|the) (?:song|performance) whole\b/i.test(text);
+}
+
+// A starting choice for a new wizard only. Saved projects and explicit length
+// controls do not call this helper, so reopening never replaces their timing.
+export function freshWizardTargetSeconds(description: string): number | null {
+  return parseSeconds(description) ?? (asksForWholePerformance(description) ||
+    parsedSelection(description) === "use-my-sections" ? null : 90);
 }
 
 function parsedVibe(text: string): Vibe | undefined {
@@ -147,8 +158,10 @@ function parsedSoundMomentCount(text: string, soundMomentOverride?: number): num
 }
 
 function parsedSoundtrackIntent(text: string, cleanupRequested: boolean,
-  separatePictureOverride?: boolean, soundMomentOverride?: number): SoundtrackIntent | null {
+  separatePictureOverride?: boolean, soundMomentOverride?: number, tempoArcOverride?: boolean): SoundtrackIntent | null {
   const requestedCount = parsedSoundMomentCount(text, soundMomentOverride);
+  const tempoArc = tempoArcOverride ?? (/\b(?:slow(?:er)?|gentle|ballad)\b.{0,100}\b(?:upbeat|up[ -]tempo|fast(?:er)?|lively)\b|\b(?:build|progress)\b.{0,35}\btempo\b/i.test(text) &&
+    !/\b(?:no|without|don't|do not)\b.{0,25}\b(?:tempo (?:arc|build)|slow[ -]to[ -]upbeat)\b/i.test(text));
   const buildEnding = /\bcrescendo\b|\bbuild(?:ing|s)?\s+(?:up\s+)?(?:to|toward|into)\s+(?:a\s+)?(?:strong|big|loud|energetic|climax)|\b(?:stronger|strongest|louder|loudest|bigger|biggest|more energetic)\s+(?:ending|finish|finale)|\bend(?:ing)?\s+(?:on|with)\s+(?:the\s+)?(?:strongest|loudest|biggest|most energetic|a build)|\bbuild(?:ing)?\s+(?:up\s+)?(?:at|in)\s+the\s+end/i.test(text);
   const visualBeforeSources = /\b(?:video|footage|shots?|visuals?)\b.{0,90}\b(?:multiple|several|different|various)\s+(?:(?:video|visual)\s+)?(?:clips?|recordings?|videos?|shots?)\b/i.test(text);
   const sourcesBeforeVisual = /\b(?:multiple|several|different|various)\s+(?:(?:video|visual)\s+)?(?:clips?|recordings?|videos?|shots?)\b.{0,60}\b(?:video|footage|visuals?|shots?)\b/i.test(text);
@@ -161,9 +174,10 @@ function parsedSoundtrackIntent(text: string, cleanupRequested: boolean,
   const bRollWithSound = /\b(?:b-roll|cutaways?)\b.{0,60}\b(?:over|on top|soundtrack|audio|sound)\b/i.test(text);
   const separatePicture = separatePictureOverride ??
     ((multiplePictures && (requestedCount !== null || layeredWithSound)) || bRollWithSound);
-  if (requestedCount === null && !buildEnding && !separatePicture) return null;
-  return { segmentCount: requestedCount ?? (buildEnding || separatePicture ? 3 : 1),
-    buildEnding, separatePicture, cleanupRequested };
+  if (requestedCount === null && !buildEnding && !separatePicture && !tempoArc) return null;
+  return { segmentCount: requestedCount ?? (buildEnding || separatePicture || tempoArc ? 3 : 1),
+    buildEnding, separatePicture, cleanupRequested,
+    ...(tempoArcOverride === undefined && !tempoArc ? {} : { tempoArc }) };
 }
 
 function parsedPictureSourceCount(text: string): number | null {
@@ -204,7 +218,8 @@ function supportedLimits(text: string, type: VideoType, vibe: Vibe, customVibe: 
   if (cleanupRequested) notes.push(rumbleEnabled ?
     "Sound cleanup here means reducing very low rumble. It cannot remove crowd voices, repair clipping, or fully denoise music." :
     "Low-rumble reduction is off by your choice. Full sound cleaning is not available; crowd voices, clipping, and music noise are not removed.");
-  if (soundtrackIntent?.buildEnding) notes.push("The ending is ordered by measured sound energy, not recognition of a musical crescendo. Listen before exporting.");
+  if (soundtrackIntent?.tempoArc) notes.push("The plan aims for slower music first and an upbeat finish using reliable rhythm measurements. If the recordings cannot support that progression, the first-cut notes will say so; song speed stays unchanged.");
+  else if (soundtrackIntent?.buildEnding) notes.push("The ending is ordered by measured sound energy, not recognition of a musical crescendo. Listen before exporting.");
   if (/\b(filters?|visual effects?|special effects?|animation)\b/i.test(text)) notes.push("Natural, vivid, cinematic, and warm looks, dissolves, and occasional glide transitions are available. Custom animation and generated effects are not supported.");
   if (vibe === "custom") notes.push(`${customVibe.trim() ? "That custom vibe" : "A custom vibe"} cannot be translated reliably yet; this cut starts with natural color and straightforward cuts.`);
   return [...new Set(notes)];
@@ -213,6 +228,7 @@ function supportedLimits(text: string, type: VideoType, vibe: Vibe, customVibe: 
 export function interpretCreativeBrief(input: CreativeBriefInput, clips: CreativeClip[], current: ExportOptions): CreativeBrief {
   validateClips(clips);
   if (input.beatSync !== undefined && typeof input.beatSync !== "boolean" ||
+    input.tempoArc !== undefined && typeof input.tempoArc !== "boolean" ||
     input.highlightFocus !== undefined && !["balanced", "performance"].includes(input.highlightFocus)) {
     throw new Error("Choose valid music and highlight preferences.");
   }
@@ -228,7 +244,7 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
     throw new Error("Choose a supported picture transition.");
   }
   const cleanupRequested = requestsCleanup(description);
-  const requestedSoundtrack = parsedSoundtrackIntent(description, cleanupRequested, input.separatePicture, input.soundMomentCount);
+  const requestedSoundtrack = parsedSoundtrackIntent(description, cleanupRequested, input.separatePicture, input.soundMomentCount, input.tempoArc);
   const videoType = input.videoType ?? parsedType(description) ?? "highlight";
   const requestedVibe = input.vibe ?? parsedVibe(description);
   const vibe = requestedVibe ?? "clean-live";
@@ -334,12 +350,14 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
     conflict = { kind: "audio-story-picture-mode", message: "A picture recording count needs a separate picture-over-sound edit. Turn that on, or clear the picture count." };
   }
   if (!conflict && soundtrackIntent) {
-    const audioClips = eligible.filter((clip) => clip.asset.hasAudio);
+    const audioClips = eligible.filter((clip) => clip.asset.hasAudio && !clip.soundExcludedByUser);
     const locked = markedClips;
     const requiredSeconds = targetSeconds ?? total(clips);
     const audioSeconds = audioClips.reduce((sum, clip) => sum + clip.asset.duration, 0);
-    if (!audioClips.length) {
-      conflict = { kind: "audio-story-no-sound", message: "These recordings have no sound for a soundtrack. Add a recording with audio or use the standard edit." };
+    if (locked.some(clip => clip.soundExcludedByUser)) {
+      conflict = { kind: "audio-story-picture-only-lock", message: "A kept section also has its sound excluded. Allow its sound, or unlock the section before making the separate soundtrack." };
+    } else if (!audioClips.length) {
+      conflict = { kind: "audio-story-no-sound", message: "No recordings are available for the soundtrack. Allow sound from a picture-only recording, add a recording with audio, or use the standard edit." };
     } else if (soundtrackIntent.separatePicture && pictureSourceCount !== null &&
       (pictureSourceCount > eligible.length || pictureSourceCount < locked.length)) {
       conflict = { kind: "audio-story-picture-count", message: pictureSourceCount > eligible.length ?
@@ -379,20 +397,25 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   const variety = /\b(several|multiple|different|many) songs?\b/i.test(description) ? labeledSongs > 1 ? " · your labeled songs" : " · several recordings" : "";
   const naturalSeconds = keepWholePerformance && oneSongChoice ? oneSongChoice.asset.duration :
     selectionMode === "use-my-sections" || videoType === "one-song" && markedClips.length ? protectedSeconds : total(clips);
-  const soundSummary = soundtrackIntent ? ` · ${soundtrackIntent.segmentCount} audio moments${cleanupRequested ? options.reduceRumble ? " with low-rumble reduction" : " with low-rumble reduction off" : ""}${soundtrackIntent.buildEnding ? " · aiming for a sound-energy build toward the strongest measured ending" : ""}${soundtrackIntent.separatePicture ? ` · picture from ${pictureSourceCount} recording${pictureSourceCount === 1 ? "" : "s"} over the soundtrack` : ""}` : "";
+  const equalSoundSeconds = soundtrackIntent?.tempoArc && targetSeconds !== null && !markedClips.length ? targetSeconds / soundtrackIntent.segmentCount : null;
+  const arcSummary = soundtrackIntent?.tempoArc ? soundtrackIntent.segmentCount === 3 ?
+    " · aiming for a slow opening, mid-tempo middle, upbeat finale" : " · aiming for slower music first and an upbeat finish" :
+    soundtrackIntent?.buildEnding ? " · aiming for a sound-energy build toward the strongest measured ending" : "";
+  const soundSummary = soundtrackIntent ? ` · ${soundtrackIntent.segmentCount} audio moments${equalSoundSeconds === null ? "" : ` · ${time(equalSoundSeconds)} each where source length allows`}${cleanupRequested ? options.reduceRumble ? " with low-rumble reduction" : " with low-rumble reduction off" : ""}${arcSummary}${soundtrackIntent.separatePicture ? ` · picture from ${pictureSourceCount} recording${pictureSourceCount === 1 ? "" : "s"} over the soundtrack` : ""}` : "";
   const shape = aspect === "landscape" ? "horizontal 16:9" : aspect === "vertical" ? "tall 9:16" : "portrait 9:13";
   const graphics = `${eventTitle ? ` · opening title “${eventTitle}”` : ""}${options.showClipLabels && !soundtrackIntent?.separatePicture && clips.some((clip) => clip.label?.trim()) ? " · your named moments on video" : ""}`;
   const joins = ({ cut: "direct cuts", fade: "soft joins", dissolve: "dissolves", smoothslide: "dissolves with occasional glides" })[options.transition ?? "cut"];
   const soundJoins = options.audioTransition === "crossfade" ? ` · sound overlaps up to ${options.audioCrossfadeSeconds ?? 2}s where spare sound is available` : "";
-  const musicSummary = `${options.beatSync && soundtrackIntent ? " · follow clear beats where possible" : ""}${options.highlightFocus === "performance" && !keepWholePerformance && selectionMode !== "use-my-sections" ? " · favor sustained performance phrases" : ""}`;
+  const musicSummary = `${options.beatSync && soundtrackIntent ? " · follow clear beats where possible" : ""}${options.highlightFocus === "performance" && !keepWholePerformance && selectionMode !== "use-my-sections" ? " · favor clearer performance sound" : ""}`;
   const summary = `${time(targetSeconds ?? naturalSeconds)} ${typeLabel[videoType]}${variety} · ${vibe === "clean-live" ? "clean/live" : vibe} pacing · ${options.finish} look · ${joins} · ${shape} · ${preserved}${graphics}${soundSummary}${soundJoins}${musicSummary}.`;
   const limitations = supportedLimits(description, videoType, vibe, customVibe, labeledSongs, cleanupRequested, options.reduceRumble, soundtrackIntent);
   if (options.beatSync) limitations.push(soundtrackIntent?.separatePicture ?
     "Confident beats can guide picture timing and align compatible song transitions. Uncertain or different tempos keep their existing blend; song speed and protected moments stay unchanged." :
     "Independent picture timing needs a separate soundtrack. This edit keeps the original performance and sound together.");
-  if (options.highlightFocus === "performance") limitations.push("Performance preference favors sustained musical phrases over noisy bursts. It cannot identify the singer, recognize a big vocal moment, or remove crowd voices.");
+  if (options.highlightFocus === "performance") limitations.push("Local singing estimates help avoid speech, cheering, and instrumental lead-ins when available. They cannot identify the singer, distinguish the artist from a singing crowd, verify a big vocal moment, or remove crowd voices. Listen before keeping a suggestion.");
   if (keepWholePerformance && !intactSoundtrackConflict && requestedSoundtrack?.buildEnding) limitations.push("Keeping the performance intact preserves its original sound and order; the app will not rearrange it to create a stronger ending.");
   if (soundtrackIntent?.buildEnding && markedClips.length) limitations.push("Your marked sections keep their place and original sound; they may limit how steadily the energy rises.");
+  if (soundtrackIntent?.tempoArc && markedClips.length) limitations.push("Your marked sections keep their length, place, and original sound. Those choices take priority over equal sound moments or a tempo progression.");
   if (vibe === "energetic" && eligible.length < 2) limitations.push("Quicker cuts need multiple recordings; this cut keeps the available footage continuous.");
   return { description, videoType, vibe, selectionMode, keepWholePerformance, soundtrackIntent, pictureSourceCount, targetSeconds, aspect, customVibe, summary, limitations, conflict, options };
 }

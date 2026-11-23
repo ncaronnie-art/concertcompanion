@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  interpretCreativeBrief, makeFirstCut, refineCut,
+  interpretCreativeBrief, makeFirstCut, refineCut, freshWizardTargetSeconds,
   type CreativeBrief, type CreativeBriefInput, type CreativeClip,
   type Refinement, type SelectionMode, type Vibe, type VideoType,
 } from "../shared/creative-brief";
@@ -10,8 +10,13 @@ import type { AudioBin } from "../shared/suggestions";
 
 type Chosen = CreativeClip & { previewUrl: string };
 type UndoState = { clips: Chosen[]; options: ExportOptions; audioSelections: AudioSelection[] | null; briefInput: CreativeBriefInput; briefDirty: boolean;
-  stage: "describe" | "review" | "cut"; reviewBrief: CreativeBrief | null };
+  stage: "describe" | "review" | "cut"; reviewBrief: CreativeBrief | null;
+  lengthText: string; lengthFollowsDescription: boolean };
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+const lengthClock = (seconds: number) => {
+  const rounded = Math.round(seconds * 1000) / 1000;
+  return `${Math.floor(rounded / 60)}:${rounded % 60 < 10 ? "0" : ""}${(rounded % 60).toFixed(3).replace(/\.?0+$/, "")}`;
+};
 const videoTypes: { value: VideoType; label: string }[] = [
   { value: "highlight", label: "Highlights" }, { value: "one-song", label: "One song" },
   { value: "recap", label: "Whole-night recap" }, { value: "compilation", label: "Compilation" },
@@ -48,7 +53,7 @@ const hasSideCrop = (aspect: ExportOptions["aspect"], asset: MediaAsset, framing
 function parseLength(value: string): number | undefined {
   const text = value.trim();
   if (!text) return undefined;
-  const mmss = /^(\d{1,3}):([0-5]\d)$/.exec(text);
+  const mmss = /^(\d{1,4}):([0-5]\d(?:\.\d+)?)$/.exec(text);
   if (mmss) return Number(mmss[1]) * 60 + Number(mmss[2]);
   if (/^\d+(?:\.\d+)?$/.test(text)) return Number(text) * 60;
   return Number.NaN;
@@ -101,11 +106,12 @@ export function App() {
   const [highlightFocus, setHighlightFocus] = useState<NonNullable<ExportOptions["highlightFocus"]>>("performance");
   const [eventTitle, setEventTitle] = useState("");
   const [showClipLabels, setShowClipLabels] = useState(false);
-  const [briefInput, setBriefInput] = useState<CreativeBriefInput>({ description: "", separatePicture: true });
+  const [briefInput, setBriefInput] = useState<CreativeBriefInput>({ description: "", separatePicture: true, tempoArc: true });
   const [soundCountDraft, setSoundCountDraft] = useState<string | null>(null);
   const [pictureCountDraft, setPictureCountDraft] = useState<string | null>(null);
   const [briefDirty, setBriefDirty] = useState(false);
-  const [lengthText, setLengthText] = useState("");
+  const [lengthText, setLengthText] = useState("1:30");
+  const [lengthFollowsDescription, setLengthFollowsDescription] = useState(true);
   const [reviewBrief, setReviewBrief] = useState<CreativeBrief | null>(null);
   const [stage, setStage] = useState<"describe" | "review" | "cut">("describe");
   const [undoStack, setUndoStack] = useState<UndoState[]>([]);
@@ -128,7 +134,7 @@ export function App() {
   const storyProtectedMismatch = audioSelections !== null && !protectedPictureMatchesSoundtrack(clips, audioSelections);
   const storyExcludedSound = audioSelections?.some((sound) => {
     const source = clips.find((clip) => clip.asset.path === sound.asset.path);
-    return !source || source.excludedByUser;
+    return !source || source.excludedByUser || source.soundExcludedByUser;
   }) ?? false;
   const storyNeedsRebuild = storyLengthMismatch || storyProtectedMismatch || storyExcludedSound;
   const storyRebuildMessage = storyExcludedSound ? "A soundtrack recording is missing or was excluded. Review your plan to choose new sound." :
@@ -147,7 +153,7 @@ export function App() {
   const guidedCutPending = briefInput.separatePicture === true && audioSelections === null;
 
   function remember() {
-    setUndoStack((old) => [...old.slice(-24), { clips, options, audioSelections, briefInput, briefDirty, stage, reviewBrief }]);
+    setUndoStack((old) => [...old.slice(-24), { clips, options, audioSelections, briefInput, briefDirty, stage, reviewBrief, lengthText, lengthFollowsDescription }]);
   }
   function applyOptions(next: ExportOptions) {
     setAspect(next.aspect); setReduceRumble(next.reduceRumble);
@@ -163,6 +169,19 @@ export function App() {
     if (stage === "review") { setReviewBrief(null); setStage("describe"); }
   }
   function changeBrief(patch: Partial<CreativeBriefInput>) {
+    if (patch.description !== undefined && lengthFollowsDescription) {
+      const seconds = freshWizardTargetSeconds(patch.description);
+      setLengthText(seconds === null ? "" : lengthClock(seconds));
+    }
+    if (patch.targetSeconds !== undefined) {
+      setLengthText(patch.targetSeconds === null ? "" : lengthClock(patch.targetSeconds));
+      setLengthFollowsDescription(false);
+    } else if (patch.selectionMode === "use-my-sections" && lengthFollowsDescription) {
+      setLengthText(""); setLengthFollowsDescription(false);
+    }
+    if ("separatePicture" in patch && patch.separatePicture !== true && lengthFollowsDescription) {
+      setLengthText(""); setLengthFollowsDescription(false);
+    }
     setBriefInput((old) => ({ ...old, ...patch }));
     setBriefDirty(true);
     setReviewBrief(null); setStage("describe");
@@ -170,7 +189,9 @@ export function App() {
   }
   function editSectionsManually() {
     if (guidedCutPending) {
-      setBriefInput((old) => ({ ...old, separatePicture: false, soundMomentCount: undefined, pictureSourceCount: undefined }));
+      setBriefInput((old) => ({ ...old, separatePicture: false, soundMomentCount: undefined, pictureSourceCount: undefined, tempoArc: false }));
+      if (lengthFollowsDescription) setLengthText("");
+      setLengthFollowsDescription(false);
       setBriefDirty(false); setReviewBrief(null); setStage("describe");
       setMessage("Manual editor ready. The joined video keeps the sound from each recording. Choose sections below, then export; your originals stay untouched.");
     }
@@ -184,6 +205,12 @@ export function App() {
       ...clip, ...patch,
       ...(markManual ? { selectionSource: "manual" as const, locked: true } : {}),
     } : clip));
+  }
+  function changeSoundAvailability(index: number, pictureOnly: boolean) {
+    changeClip(index, { soundExcludedByUser: pictureOnly });
+    setBriefDirty(true);
+    setMessage(pictureOnly ? "The picture stays available; this recording’s sound will be left out. Review your plan to update the soundtrack." :
+      "This recording’s sound is available again. Review your plan to update the soundtrack.");
   }
   function changeFocus(index: number, focus: number) {
     if (!focusDragging.current) { changeClip(index, { focus }); return; }
@@ -218,6 +245,7 @@ export function App() {
     setClips(previous.clips);
     setAudioSelections(previous.audioSelections);
     setBriefInput(previous.briefInput);
+    setLengthText(previous.lengthText); setLengthFollowsDescription(previous.lengthFollowsDescription);
     setBriefDirty(previous.briefDirty);
     setStage(previous.stage); setReviewBrief(previous.reviewBrief);
     applyOptions(previous.options);
@@ -302,7 +330,8 @@ export function App() {
       setBriefDirty(savedBriefDirty);
       applyOptions(result.snapshot.options);
       setBriefInput(result.snapshot.briefInput);
-      setLengthText(result.snapshot.briefInput.targetSeconds ? clock(result.snapshot.briefInput.targetSeconds) : "");
+      setLengthText(result.snapshot.briefInput.targetSeconds ? lengthClock(result.snapshot.briefInput.targetSeconds) : "");
+      setLengthFollowsDescription(false);
       setReviewBrief(null); setStoryError(null); setStage(restoredAudio && !savedBriefDirty ? "cut" : "describe");
       setDraftUrl(null); setDraftSignature(null); audioSuggestions.current.clear(); audioBins.current = {};
       setMessage(savedBriefDirty ?
@@ -336,7 +365,7 @@ export function App() {
         if (reviewBrief.conflict) throw new Error(reviewBrief.conflict.message);
         const binsByPath: Record<string, AudioBin[]> = {};
         for (const clip of candidates) {
-          if (clip.excludedByUser || !clip.asset.hasAudio) continue;
+          if (clip.excludedByUser || clip.soundExcludedByUser || !clip.asset.hasAudio) continue;
           const key = audioBinKey(clip.asset.path, reviewBrief.options.reduceRumble);
           if (!audioBins.current[key]) {
             setMessage(`Checking sound in ${clip.asset.name}…`);
@@ -370,7 +399,7 @@ export function App() {
       // Store that confirmed choice so preview/export also work after reopening.
       if (reviewBrief.keepWholePerformance && !reviewBrief.soundtrackIntent) {
         setBriefInput((old) => ({ ...old, separatePicture: false,
-          soundMomentCount: undefined, pictureSourceCount: undefined }));
+          soundMomentCount: undefined, pictureSourceCount: undefined, tempoArc: false }));
       }
       applyOptions(result.options);
       setStage("cut"); setMessage(`First cut ready: ${clock(result.plannedSeconds)}. ${result.notes.join(" ")} Watch the first cut, adjust anything, then export.`);
@@ -513,29 +542,29 @@ export function App() {
       <section className="brief" aria-label="What are we making?">
         <div className="section-heading"><div><p className="eyebrow">YOUR VIDEO, YOUR FEELING</p><h2>What are we making?</h2><p>Tell us what you want. Your marked moments and video settings are already part of this plan.</p></div><button disabled={busy || !undoStack.length} onClick={undo}>Undo</button></div>
         {stage !== "review" ? <>
-          <label className="brief-description">Describe your video<textarea disabled={busy} value={briefInput.description} onChange={(event) => changeBrief({ description: event.target.value })} placeholder="Use three sound moments, reduce low rumble, build to a strong ending, and show footage from several recordings." rows={3} /></label>
+          <label className="brief-description">Describe your video<textarea disabled={busy} value={briefInput.description} onFocus={remember} onChange={(event) => changeBrief({ description: event.target.value })} placeholder="A 90-second recap: slower music first, mid-tempo in the middle, an upbeat finale, and picture from several recordings." rows={3} /></label>
           <label className="video-title-field">Video title <span>(optional; shown briefly at the start)</span><input disabled={busy} aria-label="Video title (optional)" maxLength={80} value={eventTitle} placeholder="For example, a concert or night to remember" onFocus={remember} onChange={(event) => { setEventTitle(event.target.value); setBriefInput((old) => ({ ...old, eventTitle: event.target.value })); }} /></label>
           <div className="brief-quick-choice">
-            <label className="brief-picture-toggle"><input type="checkbox" disabled={busy} checked={briefInput.separatePicture === true} onChange={(event) => changeBrief(event.target.checked ? { separatePicture: true } : { separatePicture: undefined, soundMomentCount: undefined, pictureSourceCount: undefined })} /> Use separate soundtrack and picture</label>
+            <label className="brief-picture-toggle"><input type="checkbox" disabled={busy} checked={briefInput.separatePicture === true} onChange={(event) => changeBrief(event.target.checked ? { separatePicture: true } : { separatePicture: undefined, soundMomentCount: undefined, pictureSourceCount: undefined, tempoArc: false })} /> Use separate soundtrack and picture</label>
             <p>Play sound moments over footage from your recordings. Kept sections retain their own picture and sound.</p>
             {briefInput.separatePicture === true && <><div className="brief-counts">
-              <div className="count-field"><label>Sound moments <small>Separate parts of the soundtrack</small><input type="number" min="1" max="12" step="1" disabled={busy} aria-label="Number of sound moments" value={soundCountDraft ?? briefInput.soundMomentCount ?? suggestedSoundCount} onFocus={(event) => setSoundCountDraft(event.currentTarget.value)} onChange={(event) => { const raw = event.currentTarget.value; setSoundCountDraft(raw); const count = Number(raw); if (raw === "") changeBrief({ soundMomentCount: undefined }); else if (Number.isInteger(count) && count >= 1 && count <= 12) changeBrief({ soundMomentCount: count }); }} onBlur={(event) => { const count = Number(event.currentTarget.value); if (event.currentTarget.value && Number.isFinite(count) && (!Number.isInteger(count) || count < 1 || count > 12)) changeBrief({ soundMomentCount: Math.max(1, Math.min(12, Math.round(count))) }); setSoundCountDraft(null); }} /></label>{briefInput.soundMomentCount !== undefined && <button type="button" disabled={busy} onClick={() => { setSoundCountDraft(null); changeBrief({ soundMomentCount: undefined }); }}>Use suggested</button>}</div>
-              <div className="count-field"><label>Videos to show <small>Distinct imported recordings, not repeated shots</small><input type="number" min="1" max={Math.max(1, availableRecordings)} step="1" disabled={busy} aria-label="Number of videos to show" value={pictureCountDraft ?? briefInput.pictureSourceCount ?? suggestedPictureCount} onFocus={(event) => setPictureCountDraft(event.currentTarget.value)} onChange={(event) => { const raw = event.currentTarget.value; setPictureCountDraft(raw); const count = Number(raw); if (raw === "") changeBrief({ pictureSourceCount: undefined }); else if (Number.isInteger(count) && count >= 1 && count <= availableRecordings) changeBrief({ pictureSourceCount: count }); }} onBlur={(event) => { const count = Number(event.currentTarget.value); if (event.currentTarget.value && Number.isFinite(count) && (!Number.isInteger(count) || count < 1 || count > availableRecordings)) changeBrief({ pictureSourceCount: Math.max(1, Math.min(availableRecordings, Math.round(count))) }); setPictureCountDraft(null); }} /></label>{briefInput.pictureSourceCount !== undefined && <button type="button" disabled={busy} onClick={() => { setPictureCountDraft(null); changeBrief({ pictureSourceCount: undefined }); }}>Use suggested</button>}</div>
-            </div><p className="brief-count-help">These shown numbers are the starting choices. Your description can set a sound count until you change its number.</p>{availableRecordings < 2 && <p className="brief-count-help">Only one recording is available. Use it, or import another for more picture variety.</p>}</>}
+              <div className="count-field"><label>Sound moments <small>Separate parts of the soundtrack</small><input type="number" min="1" max="12" step="1" disabled={busy} aria-label="Number of sound moments" value={soundCountDraft ?? briefInput.soundMomentCount ?? suggestedSoundCount} onFocus={(event) => { remember(); setSoundCountDraft(event.currentTarget.value); }} onChange={(event) => { const raw = event.currentTarget.value; setSoundCountDraft(raw); const count = Number(raw); if (raw === "") changeBrief({ soundMomentCount: undefined }); else if (Number.isInteger(count) && count >= 1 && count <= 12) changeBrief({ soundMomentCount: count }); }} onBlur={(event) => { const count = Number(event.currentTarget.value); if (event.currentTarget.value && Number.isFinite(count) && (!Number.isInteger(count) || count < 1 || count > 12)) changeBrief({ soundMomentCount: Math.max(1, Math.min(12, Math.round(count))) }); setSoundCountDraft(null); }} /></label>{briefInput.soundMomentCount !== undefined && <button type="button" disabled={busy} onClick={() => { remember(); setSoundCountDraft(null); changeBrief({ soundMomentCount: undefined }); }}>Use suggested</button>}</div>
+              <div className="count-field"><label>Videos to show <small>Distinct imported recordings, not repeated shots</small><input type="number" min="1" max={Math.max(1, availableRecordings)} step="1" disabled={busy} aria-label="Number of videos to show" value={pictureCountDraft ?? briefInput.pictureSourceCount ?? suggestedPictureCount} onFocus={(event) => { remember(); setPictureCountDraft(event.currentTarget.value); }} onChange={(event) => { const raw = event.currentTarget.value; setPictureCountDraft(raw); const count = Number(raw); if (raw === "") changeBrief({ pictureSourceCount: undefined }); else if (Number.isInteger(count) && count >= 1 && count <= availableRecordings) changeBrief({ pictureSourceCount: count }); }} onBlur={(event) => { const count = Number(event.currentTarget.value); if (event.currentTarget.value && Number.isFinite(count) && (!Number.isInteger(count) || count < 1 || count > availableRecordings)) changeBrief({ pictureSourceCount: Math.max(1, Math.min(availableRecordings, Math.round(count))) }); setPictureCountDraft(null); }} /></label>{briefInput.pictureSourceCount !== undefined && <button type="button" disabled={busy} onClick={() => { remember(); setPictureCountDraft(null); changeBrief({ pictureSourceCount: undefined }); }}>Use suggested</button>}</div>
+            </div><p className="brief-count-help">New videos start at 1:30 with three sound moments of 0:30 each, where recordings allow. Your description can set a different length or count until you change those controls.</p><label><input aria-label="Build from slower to upbeat" type="checkbox" disabled={busy} checked={briefInput.tempoArc === true} onChange={(event) => { remember(); changeBrief({ tempoArc: event.target.checked }); }} /> Build from slower to upbeat</label><p className="brief-count-help">Aim for a slow opening, a mid-tempo middle, and an upbeat finale. Kept sections come first; the first cut will explain if reliable rhythm or suitable footage is missing.</p>{availableRecordings < 2 && <p className="brief-count-help">Only one recording is available. Use it, or import another for more picture variety.</p>}</>}
           </div>
           <details className="fine-tune"><summary>Fine-tune the plan <span>optional</span></summary><div className="choice-grid">
             <fieldset><legend>Video type</legend><div className="choices">{videoTypes.map(({ value, label }) => <button type="button" key={value} aria-pressed={briefInput.videoType === value} disabled={busy} onClick={() => changeBrief({ videoType: briefInput.videoType === value ? undefined : value })}>{label}</button>)}</div></fieldset>
             <fieldset><legend>Vibe</legend><div className="choices">{vibes.map(({ value, label }) => <button type="button" key={value} aria-pressed={briefInput.vibe === value} disabled={busy} onClick={() => changeBrief({ vibe: briefInput.vibe === value ? undefined : value })}>{label}</button>)}</div>{briefInput.vibe === "custom" && <><input aria-label="Custom vibe" disabled={busy} placeholder="Describe your custom vibe" value={briefInput.customVibe ?? ""} onChange={(event) => changeBrief({ customVibe: event.target.value })} /><p className="helper">If we cannot match it with the current tools, the plan will tell you before editing.</p></>}</fieldset>
           </div>
           <fieldset><legend>Which moments?</legend><div className="choices">{modes.map(({ value, label }) => <button type="button" key={value} aria-pressed={briefInput.selectionMode === value} disabled={busy} onClick={() => changeBrief({ selectionMode: briefInput.selectionMode === value ? undefined : value })}>{label}</button>)}</div><p className="helper">Want a section kept exactly? Use “Keep this section” on its recording below.</p></fieldset></details>
-          <div className="brief-bottom"><label>Length <span>(optional; minutes or m:ss)</span><input disabled={busy} aria-label="Target length" value={lengthText} onChange={(event) => { setLengthText(event.target.value); setBriefDirty(true); setReviewBrief(null); setMessage("Your new length is saved here. Review the plan and make a first cut before exporting it."); }} placeholder={`Current edit ${clock(totalSeconds)}`} /></label><div className="brief-buttons"><button disabled={busy} onClick={editSectionsManually}>Edit sections myself (original sound)</button><button className="primary" disabled={busy} onClick={reviewPlan}>Review my plan</button></div></div>
+          <div className="brief-bottom"><label>Length <span>(minutes or m:ss; blank lets the plan choose)</span><input disabled={busy} aria-label="Target length" value={lengthText} onFocus={remember} onChange={(event) => { setLengthText(event.target.value); setLengthFollowsDescription(false); setBriefDirty(true); setReviewBrief(null); setMessage("Your new length is saved here. Review the plan and make a first cut before exporting it."); }} placeholder={`Current edit ${clock(totalSeconds)}`} /></label><div className="brief-buttons"><button disabled={busy} onClick={editSectionsManually}>Edit sections myself (original sound)</button><button className="primary" disabled={busy} onClick={reviewPlan}>Review my plan</button></div></div>
         </> : reviewBrief && <div className="brief-review"><p className="eyebrow">HERE’S YOUR PLAN</p><h3>{reviewBrief.summary}</h3>
           {reviewBrief.soundtrackIntent ? <>
             <div className="story-plan">
-              <div><strong>Soundtrack</strong><p>{reviewBrief.soundtrackIntent.segmentCount} separate sound moments from your recordings{reviewBrief.soundtrackIntent.buildEnding ? ", aiming for a stronger-sounding ending where your kept sections allow" : ""}. {reviewBrief.options.reduceRumble ? "Low-rumble reduction will be on." : "Original live sound stays."}</p></div>
+              <div><strong>Soundtrack</strong><p>{reviewBrief.soundtrackIntent.segmentCount} separate sound moments from your recordings{reviewBrief.soundtrackIntent.tempoArc ? ", aiming to move from slower music to an upbeat finale" : reviewBrief.soundtrackIntent.buildEnding ? ", aiming for a stronger-sounding ending where your kept sections allow" : ""}. {reviewBrief.options.reduceRumble ? "Low-rumble reduction will be on." : "Original live sound stays."}</p></div>
               <div><strong>Picture</strong><p>{reviewBrief.soundtrackIntent.separatePicture ? `${reviewBrief.pictureSourceCount ?? suggestedPictureCount} imported ${(reviewBrief.pictureSourceCount ?? suggestedPictureCount) === 1 ? "recording" : "recordings"} will provide picture over that soundtrack. Sound from picture-only sections will not be mixed in.` : "Your selected picture will play over the separate soundtrack; source sound from other shots will not be mixed in."} {clips.some((clip) => clip.included && (clip.locked || clip.selectionSource === "manual")) ? "Your kept sections retain their picture and original sound." : "You can change picture suggestions after the first cut."}</p></div>
             </div>
-            <p className="story-caution">Sound energy is a starting point, and recordings can differ in volume. Listen to the assembled preview before exporting.</p>
+            <p className="story-caution">{reviewBrief.soundtrackIntent.tempoArc ? "Tempo is assessed from reliable rhythm, not volume alone. The app cannot verify who is singing; listen to each choice before exporting." : "Recordings can differ in volume. The app cannot verify who is singing; listen to the assembled preview before exporting."}</p>
           </> : <p>{reviewBrief.selectionMode === "use-my-sections" ? "Only the sections you marked will be used." : reviewBrief.keepWholePerformance ? "We’ll keep the chosen performance continuous. Your timing remains yours to decide." : "We’ll suggest moments from unprotected recordings, then fit them to your length. You can change any suggestion."}</p>}
           <p>Look: {reviewBrief.options.finish ?? "natural"} · Picture transitions: {pictureTransitionName(reviewBrief.options.transition)} · Sound transitions: {soundTransitionName(reviewBrief.options)}. Kept sections retain their timing and original sound.</p>
           {reviewBrief.limitations.map((item) => <p className="limit" key={item}>{item}</p>)}
@@ -593,7 +622,7 @@ export function App() {
             onChange={(event) => changeAudioCrossfade(Number(event.target.value))} />
         </div>}<p>{audioTransition === "crossfade" ? "Blends nearby source audio where there is room, without changing kept moments." : "Keeps each recording’s sound separate at the join."} Listen to the assembled preview to check the song changes.</p></div>
         <div><b>Music-led timing</b><label><input aria-label="Follow the beat" disabled={busy} type="checkbox" checked={beatSync} onChange={(event) => changeMusicPreferences({ beatSync: event.target.checked })} /> Follow the beat</label><p>With a separate soundtrack, aligns song changes and picture cuts to clear, compatible beats without changing song speed. Uncertain rhythm keeps the existing timing; your kept sections stay protected.</p></div>
-        <div><b>Highlight choices</b><label><input aria-label="Favor the performance" disabled={busy} type="checkbox" checked={highlightFocus === "performance"} onChange={(event) => changeMusicPreferences({ highlightFocus: event.target.checked ? "performance" : "balanced" })} /> Favor the performance</label><p>Favors sustained musical phrases over bursts of crowd noise. It cannot identify the singer.</p></div>
+        <div><b>Highlight choices</b><label><input aria-label="Favor the performance" disabled={busy} type="checkbox" checked={highlightFocus === "performance"} onChange={(event) => changeMusicPreferences({ highlightFocus: event.target.checked ? "performance" : "balanced" })} /> Favor the performance</label><p>Looks for likely singing and favors it over speech, cheering, and instrumental lead-ins. It works on this PC; it cannot tell the artist from a singing crowd or guarantee a big vocal moment.</p></div>
         <div><b>Finishing look</b><div className="clip-actions">{(["natural", "vivid", "cinematic", "warm"] as const).map((look) => <button key={look} disabled={busy} aria-pressed={finish === look} onClick={() => { remember(); setFinish(look); invalidateReview(); }}>{look}</button>)}</div><p>Subtle color treatment; it does not detect scenes or moods.</p></div>
         <div><b>Optional picture clarity</b><label><input aria-label="Gentle picture clarity" disabled={busy} type="checkbox" checked={enhance} onChange={(event) => { remember(); setEnhance(event.target.checked); invalidateReview(); }} /> Gentle cleanup and sharpening</label><p>Light grain reduction and sharpening. It cannot restore missing detail; compare the preview before keeping it.</p></div>
         <label><input disabled={busy} type="checkbox" checked={reduceRumble} onChange={(event) => { remember(); setReduceRumble(event.target.checked); setBriefInput((old) => ({ ...old, reduceRumble: event.target.checked })); invalidateReview(); if (audioSelections) { setBriefDirty(true); setMessage("Low-rumble processing changes how sound moments are chosen. Review your plan and make a new first cut before exporting."); } }} /> Reduce low rumble <small>Gently lowers very low bass. It does not remove crowd voices.</small></label>
@@ -602,6 +631,10 @@ export function App() {
       <section className="clips" id="clip-editor" aria-label="Clip editor">{clips.map((clip, index) => <article className={!clip.included || clip.excludedByUser ? "off" : ""} key={clip.asset.path}>
         <div className="clip-title"><label><input type="checkbox" disabled={busy} checked={clip.included && !clip.excludedByUser} onChange={(event) => changeClip(index, { included: event.target.checked, excludedByUser: !event.target.checked }, event.target.checked)} /> Include</label><h2>{index + 1}. {clip.asset.name}</h2>{(!clip.included || clip.excludedByUser) && <span className="excluded-badge">Excluded from video</span>}<p>{clock(clip.asset.duration)} · {audioSelections ? "Picture source; finished sound follows the soundtrack" : clip.asset.hasAudio ? "Original audio" : "Silent video"}</p><label className="moment-label">Song or moment name <input disabled={busy} value={clip.label ?? ""} maxLength={100} placeholder="Optional, supplied by you" onChange={(event) => changeClip(index, { label: event.target.value })} /></label><div className="clip-actions"><button disabled={busy || index === 0} aria-label={`Move ${clip.asset.name} earlier`} onClick={() => move(index, -1)}>↑ Earlier</button><button disabled={busy || index === clips.length - 1} aria-label={`Move ${clip.asset.name} later`} onClick={() => move(index, 1)}>↓ Later</button></div></div>
         <div className="preview">
+          {(briefInput.separatePicture || audioSelections) && clip.asset.hasAudio && <label><input type="checkbox"
+            aria-label={`Use picture only from ${clip.asset.name}`} checked={clip.soundExcludedByUser ?? false}
+            disabled={busy || (!clip.soundExcludedByUser && (clip.locked || clip.selectionSource === "manual"))}
+            onChange={(event) => changeSoundAvailability(index, event.target.checked)} /> Picture only · skip this recording’s sound</label>}
           <p className="preview-label">{showsCropGuide(aspect, clip.asset, clip.framing, quality) ? "Framing guide with original sound" : "Source preview with original sound"} · selected part is {clock(clip.start)}–{clock(clip.end)}</p>
           <div className={showsCropGuide(aspect, clip.asset, clip.framing, quality) ? "preview-screen crop-preview" : "preview-screen"} style={showsCropGuide(aspect, clip.asset, clip.framing, quality) ? { aspectRatio: aspect === "landscape" ? "16 / 9" : aspect === "vertical" ? "9 / 16" : "9 / 13" } : undefined}>
             <video style={showsCropGuide(aspect, clip.asset, clip.framing, quality) ? { objectPosition: `${Math.round((clip.focus ?? 0.5) * 100)}% center` } : undefined} ref={(element) => { if (element) players.current.set(clip.asset.path, element); else players.current.delete(clip.asset.path); }} onTimeUpdate={(event) => { const time = event.currentTarget.currentTime; setPositions((old) => ({ ...old, [clip.asset.path]: time })); }} controls preload="auto" crossOrigin="anonymous" src={clip.previewUrl} aria-label={`Preview ${clip.asset.name}`} />
@@ -617,7 +650,7 @@ export function App() {
             <div className="focus-scale"><span>Left</span><span>Center</span><span>Right</span></div>
             <p>Play the crop guide above, then aim toward the stage, performer, or crowd. Automatic starts in the center; it does not identify people or scenes.</p>
           </div> : <p>{clip.framing === "fit" ? "The whole original frame stays visible over a soft background. Watch the first cut to check the finished look." : showsCropGuide(aspect, clip.asset, clip.framing, quality) ? "This shape fills the frame; it may crop the top and bottom. Watch the first cut to check the finished look." : "Automatic fills similar shapes and uses a soft background for very different shapes. Watch the first cut to check the finished look."}</p>}
-        </div><div className="trim-heading"><div><b>{clip.locked ? "Kept by you" : clip.selectionSource === "manual" ? "Selected by you" : "Suggested section"}</b><p>Pause the preview where you want to start or end.</p></div><label><input type="checkbox" disabled={busy} checked={clip.locked} onChange={(event) => changeClip(index, { locked: event.target.checked, selectionSource: event.target.checked ? "manual" : "suggested" })} /> Keep this section</label></div><div className="clip-actions"><button disabled={busy} onClick={() => mark(index, "start")}>Set start here</button><button disabled={busy} onClick={() => mark(index, "end")}>Set end here</button><button disabled={busy} onClick={() => changeClip(index, { start: 0, end: clip.asset.duration }, true)}>Use whole clip</button><button disabled={busy || clip.locked} onClick={() => suggest(index)}>Suggest a moment</button></div><p>Suggestions use sound energy, not song or performer recognition.</p><label>Start (seconds) <input disabled={busy} aria-label={`${clip.asset.name} start`} type="number" min="0" max={clip.asset.duration} step="0.1" value={Math.round(clip.start * 100) / 100} onChange={(event) => changeClip(index, { start: Math.max(0, Math.min(Number(event.target.value), clip.end - 0.1)) }, true)} /></label><label>End (seconds) <input disabled={busy} aria-label={`${clip.asset.name} end`} type="number" min="0.1" max={clip.asset.duration} step="0.1" value={Math.round(clip.end * 100) / 100} onChange={(event) => changeClip(index, { end: Math.min(clip.asset.duration, Math.max(Number(event.target.value), clip.start + 0.1)) }, true)} /></label></div>
+        </div><div className="trim-heading"><div><b>{clip.locked ? "Kept by you" : clip.selectionSource === "manual" ? "Selected by you" : "Suggested section"}</b><p>Pause the preview where you want to start or end.</p></div><label><input type="checkbox" disabled={busy} checked={clip.locked} onChange={(event) => changeClip(index, { locked: event.target.checked, selectionSource: event.target.checked ? "manual" : "suggested" })} /> Keep this section</label></div><div className="clip-actions"><button disabled={busy} onClick={() => mark(index, "start")}>Set start here</button><button disabled={busy} onClick={() => mark(index, "end")}>Set end here</button><button disabled={busy} onClick={() => changeClip(index, { start: 0, end: clip.asset.duration }, true)}>Use whole clip</button><button disabled={busy || clip.locked} onClick={() => suggest(index)}>Suggest a moment</button></div><p>Suggestions use sound measurements and, when available, local singing estimates. Song and performer identities are not recognized.</p><label>Start (seconds) <input disabled={busy} aria-label={`${clip.asset.name} start`} type="number" min="0" max={clip.asset.duration} step="0.1" value={Math.round(clip.start * 100) / 100} onChange={(event) => changeClip(index, { start: Math.max(0, Math.min(Number(event.target.value), clip.end - 0.1)) }, true)} /></label><label>End (seconds) <input disabled={busy} aria-label={`${clip.asset.name} end`} type="number" min="0.1" max={clip.asset.duration} step="0.1" value={Math.round(clip.end * 100) / 100} onChange={(event) => changeClip(index, { end: Math.min(clip.asset.duration, Math.max(Number(event.target.value), clip.start + 0.1)) }, true)} /></label></div>
         {stage === "cut" && <div className="clip-actions refine-actions">{!audioSelections && <button disabled={busy || clip.excludedByUser || clip.locked} onClick={() => refine({ kind: "more-from-clip", path: clip.asset.path })}>More from this clip</button>}<button disabled={busy} onClick={() => refine({ kind: "keep-section", path: clip.asset.path })}>Keep that section</button><button disabled={busy || clip.excludedByUser || clip.locked} onClick={() => refine({ kind: "choose-another", path: clip.asset.path })}>Choose something else</button></div>}
         <p className="note">Selected range: {clock(clip.start)}–{clock(clip.end)} ({(clip.end - clip.start).toFixed(1)} seconds){clip.label ? ` · ${clip.label} (named by you)` : ""}</p>
       </article>)}</section>

@@ -39,6 +39,7 @@ function readClip(value: unknown): CreativeClip {
     value.end - value.start < 0.1 || value.end > asset.duration + 0.05 ||
     typeof value.included !== "boolean" || typeof value.locked !== "boolean" ||
     typeof value.excludedByUser !== "boolean" ||
+    (value.soundExcludedByUser !== undefined && typeof value.soundExcludedByUser !== "boolean") ||
     (value.orderLocked !== undefined && typeof value.orderLocked !== "boolean") ||
     !oneOf(value.selectionSource, ["suggested", "manual"] as const) ||
     (value.included && value.excludedByUser) ||
@@ -49,6 +50,7 @@ function readClip(value: unknown): CreativeClip {
   }
   return { asset, start: value.start, end: value.end, included: value.included,
     locked: value.locked, excludedByUser: value.excludedByUser,
+    ...(value.soundExcludedByUser === undefined ? {} : { soundExcludedByUser: value.soundExcludedByUser }),
     selectionSource: value.selectionSource,
     ...(value.orderLocked === undefined ? {} : { orderLocked: value.orderLocked }),
     ...(value.framing === undefined ? {} : { framing: value.framing }),
@@ -99,6 +101,7 @@ function readBrief(value: unknown): CreativeBriefInput {
     (value.eventTitle !== undefined && (!isString(value.eventTitle, 80) || /[\r\n\x00-\x1f]/.test(value.eventTitle))) ||
     (value.showClipLabels !== undefined && typeof value.showClipLabels !== "boolean") ||
     (value.separatePicture !== undefined && typeof value.separatePicture !== "boolean") ||
+    (value.tempoArc !== undefined && typeof value.tempoArc !== "boolean") ||
     (value.soundMomentCount !== undefined && (!isNumber(value.soundMomentCount) ||
       !Number.isInteger(value.soundMomentCount) || value.soundMomentCount < 1 || value.soundMomentCount > 12)) ||
     (value.pictureSourceCount !== undefined && (!isNumber(value.pictureSourceCount) ||
@@ -119,6 +122,7 @@ function readBrief(value: unknown): CreativeBriefInput {
     ...(value.eventTitle === undefined ? {} : { eventTitle: value.eventTitle }),
     ...(value.showClipLabels === undefined ? {} : { showClipLabels: value.showClipLabels }),
     ...(value.separatePicture === undefined ? {} : { separatePicture: value.separatePicture }),
+    ...(value.tempoArc === undefined ? {} : { tempoArc: value.tempoArc }),
     ...(value.soundMomentCount === undefined ? {} : { soundMomentCount: value.soundMomentCount }),
     ...(value.pictureSourceCount === undefined ? {} : { pictureSourceCount: value.pictureSourceCount }),
     ...(value.customVibe === undefined ? {} : { customVibe: value.customVibe }) };

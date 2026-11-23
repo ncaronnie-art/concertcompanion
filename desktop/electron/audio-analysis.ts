@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import type { AudioBin } from "../src/shared/suggestions.js";
 import { MusicAnalyzer } from "../src/shared/music-analysis.js";
+import { AUDIO_EVENTS_FALLBACK, measureAudioEvents } from "./audio-events.js";
 
-export function measureAudio(binary: string, source: string, reduceRumble = false, signal?: AbortSignal): Promise<AudioBin[]> {
+function measureSignal(binary: string, source: string, reduceRumble = false, signal?: AbortSignal): Promise<AudioBin[]> {
   return new Promise((resolve, reject) => {
     const args = ["-v", "error", "-nostdin", "-i", source, "-map", "0:a:0", "-vn"];
     // Match the export filter before calculating the bins used to rank the soundtrack.
@@ -30,4 +31,18 @@ export function measureAudio(binary: string, source: string, reduceRumble = fals
       resolve(bins.map((bin, index) => ({ ...bin, ...features[index] })));
     });
   });
+}
+
+export async function measureAudio(binary: string, source: string, reduceRumble = false, signal?: AbortSignal): Promise<AudioBin[]> {
+  const bins = await measureSignal(binary, source, reduceRumble, signal);
+  signal?.throwIfAborted();
+  try {
+    const events = await measureAudioEvents(binary, source, signal);
+    return bins.map((bin, index) => ({ ...bin, ...(events[index] ?? { eventStatus: "unmeasured" as const, eventCoverage: 0 }) }));
+  } catch (error) {
+    // Cancellation is a user action, never a successful fallback analysis.
+    signal?.throwIfAborted();
+    return bins.map((bin, index) => ({ ...bin, eventStatus: "unavailable", eventCoverage: 0,
+      ...(index === 0 ? { eventFailure: AUDIO_EVENTS_FALLBACK } : {}) }));
+  }
 }

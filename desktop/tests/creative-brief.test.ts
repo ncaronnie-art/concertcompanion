@@ -1,11 +1,58 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { interpretCreativeBrief, makeFirstCut, refineCut, type CreativeClip } from "../src/shared/creative-brief.ts";
+import { interpretCreativeBrief, makeFirstCut, refineCut, freshWizardTargetSeconds, type CreativeClip } from "../src/shared/creative-brief.ts";
 
 const options = { aspect: "vertical" as const, reduceRumble: true };
 const recording = (number: number, extra: Partial<CreativeClip> = {}): CreativeClip => ({
   asset: { path: `C:\\recording-${number}.mov`, name: `Recording ${number}`, duration: 90, width: 1920, height: 1080, hasAudio: true },
   start: 39, end: 51, included: true, selectionSource: "suggested", locked: false, excludedByUser: false, ...extra,
+});
+
+test("fresh wizard starts with a ninety-second three-part music direction without a loudness promise", () => {
+  const clips = [recording(1), recording(2), recording(3)];
+  const brief = interpretCreativeBrief({ description: "", separatePicture: true, tempoArc: true,
+    targetSeconds: freshWizardTargetSeconds("") }, clips, options);
+  assert.equal(brief.targetSeconds, 90);
+  assert.equal(brief.soundtrackIntent?.segmentCount, 3);
+  assert.equal(brief.soundtrackIntent?.tempoArc, true);
+  assert.equal(brief.soundtrackIntent?.buildEnding, false);
+  assert.match(brief.summary, /0:30 each/);
+  assert.match(brief.summary, /slow opening, mid-tempo middle, upbeat finale/);
+  assert.doesNotMatch(brief.summary, /sound-energy build|strongest measured ending/);
+  assert.match(brief.limitations.join(" "), /cannot support that progression/);
+});
+
+test("fresh default duration yields to prompt lengths and intact or marked-only requests", () => {
+  assert.equal(freshWizardTargetSeconds("Make a two-minute recap"), 120);
+  assert.equal(freshWizardTargetSeconds("A 45-second recap"), 45);
+  assert.equal(freshWizardTargetSeconds("Keep the full performance intact"), null);
+  assert.equal(freshWizardTargetSeconds("Use only my selected sections"), null);
+  const intact = interpretCreativeBrief({ description: "Keep the full performance intact", separatePicture: true,
+    tempoArc: true, targetSeconds: freshWizardTargetSeconds("Keep the full performance intact") }, [recording(1)], options);
+  assert.equal(intact.keepWholePerformance, true);
+  assert.equal(intact.targetSeconds, null);
+  assert.equal(intact.soundtrackIntent, null);
+  const custom = interpretCreativeBrief({ description: "Three sound moments, slow music first and an upbeat finish",
+    separatePicture: true, tempoArc: false, targetSeconds: 72, soundMomentCount: 4 },
+  [recording(1), recording(2), recording(3), recording(4)], options);
+  assert.equal(custom.targetSeconds, 72);
+  assert.equal(custom.soundtrackIntent?.segmentCount, 4);
+  assert.equal(custom.soundtrackIntent?.tempoArc, false);
+});
+
+test("tempo language shares the setting while legacy projects and marked moments keep their choices", () => {
+  const clips = [recording(1), recording(2), recording(3)];
+  const fromWords = interpretCreativeBrief({ description: "Three sound moments: a slow opening, mid-tempo middle, upbeat finale" }, clips, options);
+  assert.equal(fromWords.soundtrackIntent?.tempoArc, true);
+  const legacy = interpretCreativeBrief({ description: "Three sound moments", targetSeconds: 36 }, clips, options);
+  assert.equal(legacy.targetSeconds, 36);
+  assert.equal(legacy.soundtrackIntent?.tempoArc, undefined);
+  const marked = interpretCreativeBrief({ description: "Keep my marked section", separatePicture: true,
+    targetSeconds: 90, tempoArc: true }, [{ ...clips[0], locked: true, selectionSource: "manual" }, clips[1], clips[2]], options);
+  assert.doesNotMatch(marked.summary, /0:30 each/);
+  assert.match(marked.limitations.join(" "), /marked sections keep their length/);
+  assert.deepEqual([clips[0].start, clips[0].end], [39, 51]);
+  assert.throws(() => interpretCreativeBrief({ description: "", tempoArc: "yes" as unknown as boolean }, clips, options), /valid music/);
 });
 
 test("portrait 9:13 stays the default while explicit shapes remain available", () => {

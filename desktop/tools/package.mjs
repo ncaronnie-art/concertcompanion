@@ -2,12 +2,14 @@ import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { verifyAudioResources } from "./prepare-audio-model.mjs";
 
 const project = process.cwd();
 const staging = await mkdtemp(path.join(tmpdir(), "compass-package-"));
 const destination = process.argv[2];
 if (!destination) throw new Error("Provide an output directory.");
-for (const directory of ["dist", "dist-electron"]) await cp(path.join(project, directory), path.join(staging, directory), { recursive: true });
+await verifyAudioResources();
+for (const directory of ["dist", "dist-electron", "resources"]) await cp(path.join(project, directory), path.join(staging, directory), { recursive: true });
 await mkdir(path.join(staging, "node_modules"));
 for (const dependency of ["ffmpeg-static", "ffprobe-static"]) await cp(path.join(project, "node_modules", dependency), path.join(staging, "node_modules", dependency), { recursive: true });
 const manifest = JSON.parse(await readFile(path.join(project, "package.json"), "utf8"));

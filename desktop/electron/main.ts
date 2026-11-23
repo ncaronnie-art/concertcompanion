@@ -80,7 +80,8 @@ function createWindow() {
         const freshDefaults = await finishingSmokeState(win);
         if (!freshDefaults.phone || !freshDefaults.high || !freshDefaults.dissolve || !freshDefaults.crossfade ||
           freshDefaults.overlap !== 2 || freshDefaults.enhance !== false || freshDefaults.title !== "" ||
-          freshDefaults.labels !== false || !freshDefaults.fill || !freshDefaults.beatSync || !freshDefaults.performance) {
+          freshDefaults.labels !== false || !freshDefaults.fill || !freshDefaults.beatSync || !freshDefaults.performance ||
+          freshDefaults.targetLength !== "1:30" || !freshDefaults.tempoArc) {
           throw new Error(`Fresh phone finishing defaults were wrong: ${JSON.stringify(freshDefaults)}`);
         }
         smokeStage("fresh phone finishing defaults ready");
@@ -95,6 +96,13 @@ function createWindow() {
         const picture = await win.webContents.executeJavaScript(`(() => { try { const v=document.querySelector('video'), c=document.createElement('canvas'); c.width=8; c.height=8; c.getContext('2d').drawImage(v,0,0,8,8); return Array.from(c.getContext('2d').getImageData(0,0,8,8).data).some((n,i)=>i%4!==3 && n>20) } catch(e) { return String(e) } })()`);
         if (typeof picture === "string") throw new Error(`Picture inspection failed: ${picture}`);
         if (!picture) throw new Error("Preview has no visible picture");
+        const eventModelReady = await win.webContents.executeJavaScript(`(async () => {
+          const asset = await window.concertCompass.probe(${JSON.stringify(process.env.COMPASS_SMOKE_INPUT)});
+          const bins = await window.concertCompass.analyzeAudio(asset, false);
+          return bins.some(bin => ['singingScore', 'musicScore', 'crowdScore', 'speechScore'].every(key => Number.isFinite(bin[key]) && bin[key] >= 0 && bin[key] <= 1));
+        })()`);
+        if (!eventModelReady) throw new Error("The packaged local sound classifier did not produce validated event scores.");
+        smokeStage("local sound classifier ready");
         if (smokeStory) {
           await runSoundStorySmoke(win, waitFor);
           smokeStage("story smoke passed");
@@ -113,7 +121,7 @@ function createWindow() {
         await win.webContents.executeJavaScript(`document.querySelector('button[aria-label^="Back five seconds"]').click()`);
         await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && v.currentTime < 0.2 })()`, "back button");
         await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Suggest a moment').click()`);
-        await waitFor(`document.querySelector('.status')?.textContent.includes('Favored a sustained musical phrase') && Array.from(document.querySelectorAll('button')).some(b => b.textContent === 'Suggest a moment' && !b.disabled)`, "performance-focused sound suggestion");
+        await waitFor(`document.querySelector('.status')?.textContent.includes('Listen to confirm') && Array.from(document.querySelectorAll('button')).some(b => b.textContent === 'Suggest a moment' && !b.disabled)`, "performance-focused sound suggestion");
         await win.webContents.executeJavaScript(`document.querySelector('video').currentTime = 1`);
         await waitFor(`(() => { const v = document.querySelector('video'); return !v.seeking && Math.abs(v.currentTime - 1) < 0.15 })()`, "mark position");
         await win.webContents.executeJavaScript(`Array.from(document.querySelector('.clips article').querySelectorAll('button')).find(b => b.textContent === 'Set start here').click()`);
@@ -259,6 +267,8 @@ async function finishingSmokeState(win: BrowserWindow) {
       enhance: document.querySelector('input[aria-label="Gentle picture clarity"]')?.checked,
       beatSync: document.querySelector('input[aria-label="Follow the beat"]')?.checked,
       performance: document.querySelector('input[aria-label="Favor the performance"]')?.checked,
+      targetLength: document.querySelector('input[aria-label="Target length"]')?.value,
+      tempoArc: document.querySelector('input[aria-label="Build from slower to upbeat"]')?.checked,
       title: document.querySelector('input[aria-label="Video title (optional)"]')?.value,
       labels: document.querySelector('input[aria-label="Show my named moments on video"]')?.checked,
       fill: articles.length > 0 && articles.every(article => Array.from(article.querySelectorAll('.frame-choice button')).find(b => b.textContent === 'Fill screen')?.getAttribute('aria-pressed') === 'true'),
@@ -335,15 +345,22 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
   const defaults = await win.webContents.executeJavaScript(`(() => ({
     separatePicture: document.querySelector('.brief-quick-choice input[type=checkbox]')?.checked,
     sound: document.querySelector('input[aria-label="Number of sound moments"]')?.value,
+    targetLength: document.querySelector('input[aria-label="Target length"]')?.value,
+    tempoArc: document.querySelector('input[aria-label="Build from slower to upbeat"]')?.checked,
     picture: document.querySelector('input[aria-label="Number of videos to show"]')?.value,
     exportReady: !document.querySelector('.toolbar-actions button.primary')?.disabled,
     guidedMessage: document.querySelector('.toolbar .pending-badge')?.textContent
   }))()`);
   if (defaults.separatePicture !== true || defaults.sound !== "3" || defaults.picture !== "3" ||
+    defaults.targetLength !== "1:30" || defaults.tempoArc !== true ||
     defaults.exportReady || !defaults.guidedMessage?.includes("Make a first cut")) {
     throw new Error(`Guided soundtrack defaults were wrong after importing three videos: ${JSON.stringify(defaults)}`);
   }
   smokeStage("story guided defaults ready");
+  await win.webContents.executeJavaScript(`document.querySelector('input[aria-label^="Use picture only from"]').click()`);
+  await waitFor(`document.querySelector('input[aria-label^="Use picture only from"]')?.checked === true && document.querySelector('.clips article .clip-title input')?.checked === true`, "picture-only sound exclusion");
+  await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.brief button')).find(b => b.textContent === 'Undo').click()`);
+  await waitFor(`document.querySelector('input[aria-label^="Use picture only from"]')?.checked === false && document.querySelector('input[aria-label="Target length"]')?.value === '1:30'`, "sound exclusion undo preserves picture and length");
   await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('input[aria-label="Video title (optional)"]'); if (!input) throw new Error('Sound-led video title control was missing'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(input, 'Three-part night'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await waitFor(`document.querySelector('input[aria-label="Video title (optional)"]')?.value === 'Three-part night'`, "sound-led event title");
   const description = "Make a six-second recap with three sound moments. Reduce low rumble, aim for a stronger ending, and show footage from several videos over that soundtrack.";
@@ -352,7 +369,7 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
   await waitFor(`(() => { const plan = document.querySelector('.brief-review .story-plan'); return plan && plan.innerText.includes('Low-rumble reduction will be on.') })()`, "sound-led brief");
   const review = await win.webContents.executeJavaScript(`(() => ({ labels: Array.from(document.querySelectorAll('.brief-review .story-plan strong')).map(x => x.textContent), summary: document.querySelector('.brief-review h3').textContent, conflict: !!document.querySelector('.brief-review .conflict'), ready: !Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Make my first cut').disabled }))()`);
   if (review.labels.join() !== "Soundtrack,Picture" || !review.summary.includes("3 audio moments") ||
-    !review.summary.includes("strongest measured ending") || !review.summary.includes("picture from 3 recordings") ||
+    !review.summary.includes("upbeat finale") || !review.summary.includes("picture from 3 recordings") ||
     review.conflict || !review.ready) throw new Error(`Plain-language sound-led brief was wrong: ${JSON.stringify(review)}`);
   smokeStage("story plain-language brief reviewed");
 
@@ -368,7 +385,7 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
   await waitFor(`(() => { const plan = document.querySelector('.brief-review .story-plan'); return plan && plan.innerText.includes('Low-rumble reduction will be on.') })()`, "explicit sound-led brief");
   const overrideReview = await win.webContents.executeJavaScript(`(() => ({ labels: Array.from(document.querySelectorAll('.brief-review .story-plan strong')).map(x => x.textContent), summary: document.querySelector('.brief-review h3').textContent, ready: !Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Make my first cut').disabled }))()`);
   if (overrideReview.labels.join() !== "Soundtrack,Picture" || !overrideReview.summary.includes("3 audio moments") ||
-    !overrideReview.summary.includes("strongest measured ending") || !overrideReview.summary.includes("picture from 2 recordings") || !overrideReview.ready) {
+    !overrideReview.summary.includes("upbeat finale") || !overrideReview.summary.includes("picture from 2 recordings") || !overrideReview.ready) {
     throw new Error(`Explicit soundtrack and picture counts were not applied: ${JSON.stringify(overrideReview)}`);
   }
   smokeStage("story brief reviewed");
@@ -406,6 +423,7 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
   if (saved.version !== 2 || saved.audioSelections?.length !== 3 || saved.options?.aspect !== "portrait913" || saved.options?.reduceRumble !== true ||
     saved.options?.eventTitle !== "Three-part night" || saved.options?.showClipLabels !== false ||
     saved.briefInput?.separatePicture !== true || saved.briefInput?.soundMomentCount !== 3 ||
+    saved.briefInput?.targetSeconds !== 6 || saved.briefInput?.tempoArc !== true ||
     saved.briefInput?.pictureSourceCount !== 2 || !saved.briefInput?.description.includes("three sound moments")) {
     throw new Error("Saved project lost the explicit soundtrack or picture counts, brief, or sound moments.");
   }
@@ -416,6 +434,10 @@ async function runSoundStorySmoke(win: BrowserWindow, waitFor: (expression: stri
   if (!restored.description.includes("three sound moments") || restored.soundCount !== "3" || restored.pictureCount !== "2" ||
     !restored.toolbar.includes("3 sound moments") || restored.soundMoments !== 3 || restored.previewAction !== "Watch first cut" || restored.staleDraft || !restored.exportReady || restored.title !== "Three-part night" || restored.labelsEnabled) {
     throw new Error(`Reopened project lost its soundtrack: ${JSON.stringify(restored)}`);
+  }
+  const reopenedBriefControls = await win.webContents.executeJavaScript(`(() => ({ length: document.querySelector('input[aria-label="Target length"]')?.value, tempoArc: document.querySelector('input[aria-label="Build from slower to upbeat"]')?.checked }))()`);
+  if (reopenedBriefControls.length !== "0:06" || reopenedBriefControls.tempoArc !== true) {
+    throw new Error(`Reopened soundtrack lost its custom length or music progression: ${JSON.stringify(reopenedBriefControls)}`);
   }
   smokeStage("story project reopened");
 

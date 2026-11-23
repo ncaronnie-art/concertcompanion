@@ -1,5 +1,10 @@
 node_modules
 
+# Downloaded local sound classifier and same-version CPU WebAssembly runtime.
+# Preparation verifies public archive hashes; personal media is never included.
+/desktop/resources/audio-events/
+/desktop/.model-cache/
+
 .env
 .env.local
 .DS_Store

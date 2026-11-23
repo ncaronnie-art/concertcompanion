@@ -1,7 +1,7 @@
 name: Concert Compass Windows prototype verification
 on:
   push:
-    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story', 'native/vibe-capsule-visual-finish', 'native/vibe-capsule-desktop-quality', 'native/vibe-capsule-smooth-reels', 'native/vibe-capsule-music-led']
+    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story', 'native/vibe-capsule-visual-finish', 'native/vibe-capsule-desktop-quality', 'native/vibe-capsule-smooth-reels', 'native/vibe-capsule-music-led', 'native/vibe-capsule-three-act-audio']
 permissions:
   contents: read
 jobs:
@@ -88,6 +88,11 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'fresh phone finishing defaults ready' -SimpleMatch -Quiet -ErrorAction SilentlyContinue)) { throw 'Fresh phone shape, quality, transitions, or text defaults were not confirmed.' }
+      - name: Check bundled local sound classifier
+        if: always() && steps.desktop_smoke.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'local sound classifier ready' -SimpleMatch -Quiet -ErrorAction SilentlyContinue)) { throw 'The packaged local audio model did not return validated singing, music, crowd and speech scores.' }
       - name: Check creative brief and first cut
         if: always()
         shell: pwsh

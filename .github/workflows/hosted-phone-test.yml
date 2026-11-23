@@ -29,4 +29,4 @@ jobs:
       - name: Build phone editor and native video tools
         run: npm run build:hosted
       - name: Verify hosted jobs, storage, protected previews and local-phone regression
-        run: node --import tsx --test tests/cloud-server.test.ts tests/cloud-storage-adapter.test.ts tests/cloud-retention.test.ts tests/phone-client.test.ts tests/mobile-server.test.ts
+        run: node --import tsx --test tests/cloud-server.test.ts tests/cloud-storage-adapter.test.ts tests/cloud-runtime-config.test.ts tests/cloud-retention.test.ts tests/phone-client.test.ts tests/mobile-server.test.ts

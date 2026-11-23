@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { PhoneJobTimeout, waitForPhoneJob, type PhoneJob } from "../src/renderer/phone-jobs.ts";
-import { phoneRequest, rememberPhoneKey, verifyPhoneConnection, hostedPhoneTest, remotePhoneTest, validatePhoneFiles, validatePhoneEdit, phoneLimitSummary, readPhoneUpload, type PhoneHealth } from "../src/renderer/browser-bridge.ts";
+import { phoneRequest, rememberPhoneKey, verifyPhoneConnection, hostedPhoneTest, remotePhoneTest, validatePhoneFiles, validatePhoneEdit, phoneLimitSummary, readPhoneUpload, installBrowserBridge, pairPhone, type PhoneHealth } from "../src/renderer/browser-bridge.ts";
 import { App } from "../src/renderer/App.tsx";
 
 const health: PhoneHealth = { ready: true, connectionMode: "hosted-test", limits: {
@@ -89,6 +89,37 @@ test("hosted edit limits accept eight picture sections and three sound moments w
   assert.throws(() => validatePhoneEdit(6, 2, smaller), /5 picture sections/);
   assert.throws(() => validatePhoneEdit(5, 3, smaller), /2 separate sound moments/);
   assert.match(phoneLimitSummary(smaller), /5 picture sections and 2 separate sound moments/);
+});
+
+test("idle bridge sends no status requests before verification or in hosted mode, while paired local and remote progress still works", async (context) => {
+  const original = { fetch: globalThis.fetch, window: globalThis.window, document: globalThis.document, location: globalThis.location };
+  context.after(() => { Object.assign(globalThis, original); });
+  let tick!: () => Promise<void>;
+  globalThis.window = { setInterval: (callback: () => Promise<void>) => { tick = callback; return 1; } } as unknown as Window & typeof globalThis;
+  globalThis.document = { hidden: false } as Document;
+  globalThis.location = { hash: "", protocol: "https:" } as Location;
+  const calls: string[] = [], progress: number[] = [];
+  let mode: PhoneHealth["connectionMode"] = "hosted-test";
+  globalThis.fetch = async (input) => {
+    const route = String(input); calls.push(route);
+    return new Response(JSON.stringify(route === "/api/health" ? { ...health, connectionMode: mode } :
+      route === "/api/pair" ? { token: "paired-key".repeat(7) } : { busy: true, progress: .4 }));
+  };
+  rememberPhoneKey("test-key".repeat(8));
+  installBrowserBridge(); window.concertCompass.onProgress((value) => progress.push(value));
+  await tick(); await tick();
+  assert.deepEqual(calls, [], "having a stored key does not authorize background polling before health succeeds");
+  await verifyPhoneConnection(); calls.length = 0;
+  await tick(); await tick();
+  assert.deepEqual(calls, [], "hosted progress uses jobs and upload events, not idle status requests");
+  mode = "local-network";
+  await pairPhone("123456");
+  assert.deepEqual(calls, ["/api/pair", "/api/health"], "newly paired local sessions verify their connection too");
+  calls.length = 0; await tick();
+  assert.deepEqual(calls, ["/api/status"]); assert.deepEqual(progress, [.4]);
+  mode = "protected-remote";
+  await verifyPhoneConnection(); calls.length = 0; await tick();
+  assert.deepEqual(calls, ["/api/status"]); assert.deepEqual(progress, [.4, .4]);
 });
 
 test("authenticated hosted health produces truthful upload and storage copy without PC instructions", async (context) => {

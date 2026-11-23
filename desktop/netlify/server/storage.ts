@@ -7,10 +7,12 @@ import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { pipeline } from "node:stream/promises";
 import type { CloudStorage } from "../../mobile/cloud-storage.js";
+import { DEFAULT_STORAGE_NAMESPACE } from "./runtime-config.js";
 
 // The store is private: only authenticated server routes return media to a browser.
 // Strong reads keep project saves and the quota registry consistent across restarts.
-export function netlifyStorage(store: Store = getStore({ name: "vibe-phone-test-v1", consistency: "strong" })): CloudStorage {
+export function netlifyStorage(providedStore?: Store, namespace = DEFAULT_STORAGE_NAMESPACE): CloudStorage {
+  const store = providedStore ?? getStore({ name: namespace, consistency: "strong" });
   return {
     readJson: (key) => store.get(key, { type: "json", consistency: "strong" }),
     async writeJson(key, value) { await store.setJSON(key, value); },

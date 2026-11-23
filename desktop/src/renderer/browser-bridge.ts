@@ -115,6 +115,8 @@ export function installBrowserBridge() {
   jobProgress = progress;
   const activity = (value: string) => activityListeners.forEach((callback) => callback(value));
   window.setInterval(async () => {
+    // Hosted jobs report their own progress; an idle page must not keep waking the server.
+    if (!connection?.ready || connection.connectionMode === "hosted-test") return;
     if (!phoneKey() || polling || uploading || waitingForJob || document.hidden) return;
     polling = true;
     try { const status = await request<{ progress: number; busy: boolean }>("status"); if (status.busy) progress(status.progress); }
@@ -184,4 +186,5 @@ export async function pairPhone(code: string) {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Check the code on your computer.");
   rememberPhoneKey(data.token);
+  await verifyPhoneConnection();
 }

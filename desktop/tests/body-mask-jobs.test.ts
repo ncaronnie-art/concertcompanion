@@ -19,6 +19,15 @@ test("body pass strips caller-controlled mask paths and off does no model work",
   assert.equal(withoutBodyMaskPaths([source])[0].start, 2);
 });
 
+test("skipping neon on every recording still prepares the unchanged clean edit without model work", async () => {
+  const sections = [{ ...shot(), locked: true, bodyOutlineDisabled: true }], before = JSON.stringify(sections);
+  const result = await prepareRenderBodyMasks("ffmpeg", sections, { aspect: "vertical", reduceRumble: true, bodyOutline: "electric" }, "unused", {
+    worker: async () => { throw Error("A skipped recording must not start model work"); },
+  });
+  assert.equal(JSON.stringify(sections), before); assert.deepEqual(result.selections, sections);
+  assert.equal(result.usable, 0); assert.match(result.note!, /clean footage/);
+});
+
 test("mask preparation covers actual transition handles while preserving approved sections and subject", async () => {
   const sections = [{ ...shot(), subject: { x: .4, y: .5 } }, { ...shot("second.mov"), start: 8, end: 12 }];
   const before = JSON.stringify(sections), requests: { start: number; end: number; subject?: unknown }[] = [];

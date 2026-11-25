@@ -43,6 +43,8 @@ export async function prepareRenderBodyMasks(ffmpeg: string, selections: RenderS
   // Both looks are selective accents. Continuous tracing is not offered until
   // its long-motion quality and resource use have been validated.
   const activity = planBodyTraceActivity(safe, options);
+  if (!activity.ranges.size) return { selections: safe, usable: 0,
+    note: "No performer-neon accents are selected. Your video continues with clean footage." };
   const worker: BodyMaskWorker = job.worker ?? (await import("./body-segmentation.js")).prepareBodyMask;
   const result: RenderSelection[] = [];
   let usable = 0;

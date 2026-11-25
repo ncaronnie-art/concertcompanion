@@ -1,5 +1,6 @@
 import type { CreativeBriefInput, CreativeClip } from "./creative-brief.js";
 import type { AudioSelection, ExportOptions, MediaAsset } from "./render-plan.js";
+import { parseManualSubject, parseTrackingPlan, parseVisualAnalysis } from "./visual-settings.js";
 
 export type ProjectSnapshot = {
   version: 2;
@@ -25,11 +26,13 @@ function readAsset(value: unknown): MediaAsset {
     !isNumber(value.duration) || value.duration < 0.1 ||
     !isNumber(value.width) || value.width < 1 ||
     !isNumber(value.height) || value.height < 1 ||
+    (value.colorTransfer !== undefined && !isString(value.colorTransfer, 80)) ||
     (value.audioDuration !== undefined && (!isNumber(value.audioDuration) || value.audioDuration <= 0 || value.audioDuration > value.duration + 0.25)) ||
     typeof value.hasAudio !== "boolean") throw new Error("The project contains an invalid video.");
   return { path: value.path, name: value.name, duration: value.duration,
     width: value.width, height: value.height, hasAudio: value.hasAudio,
-    ...(value.audioDuration === undefined ? {} : { audioDuration: value.audioDuration }) };
+    ...(value.audioDuration === undefined ? {} : { audioDuration: value.audioDuration }),
+    ...(value.colorTransfer === undefined ? {} : { colorTransfer: value.colorTransfer }) };
 }
 
 function readClip(value: unknown): CreativeClip {
@@ -55,6 +58,9 @@ function readClip(value: unknown): CreativeClip {
     ...(value.orderLocked === undefined ? {} : { orderLocked: value.orderLocked }),
     ...(value.framing === undefined ? {} : { framing: value.framing }),
     ...(value.focus === undefined ? {} : { focus: value.focus }),
+    ...(value.subject === undefined ? {} : { subject: parseManualSubject(value.subject) }),
+    ...(value.visualAnalysis === undefined ? {} : { visualAnalysis: parseVisualAnalysis(value.visualAnalysis) }),
+    ...(value.tracking === undefined ? {} : { tracking: parseTrackingPlan(value.tracking) }),
     ...(value.label === undefined ? {} : { label: value.label }) };
 }
 
@@ -65,6 +71,10 @@ function readOptions(value: unknown): ExportOptions {
     (value.transition !== undefined && !oneOf(value.transition, ["cut", "fade", "dissolve", "smoothslide"] as const)) ||
     (value.quality !== undefined && !oneOf(value.quality, ["standard", "high"] as const)) ||
     (value.enhance !== undefined && typeof value.enhance !== "boolean") ||
+    (value.effects !== undefined && !oneOf(value.effects, ["none", "subtle", "neon-pop", "full-y2k"] as const)) ||
+    (value.videoEnhancement !== undefined && !oneOf(value.videoEnhancement, ["original", "clean", "enhanced", "maximum"] as const)) ||
+    (value.smartFraming !== undefined && !oneOf(value.smartFraming, ["off", "balanced", "follow-performer", "group-performance"] as const)) ||
+    (value.reducedFlash !== undefined && typeof value.reducedFlash !== "boolean") ||
     (value.audioTransition !== undefined && !oneOf(value.audioTransition, ["cut", "crossfade"] as const)) ||
     (value.audioCrossfadeSeconds !== undefined && (!isNumber(value.audioCrossfadeSeconds) || value.audioCrossfadeSeconds < 0.1 || value.audioCrossfadeSeconds > 5)) ||
     (value.beatSync !== undefined && typeof value.beatSync !== "boolean") ||
@@ -78,6 +88,10 @@ function readOptions(value: unknown): ExportOptions {
     ...(value.transition === undefined ? {} : { transition: value.transition }),
     ...(value.quality === undefined ? {} : { quality: value.quality }),
     ...(value.enhance === undefined ? {} : { enhance: value.enhance }),
+    ...(value.effects === undefined ? {} : { effects: value.effects }),
+    ...(value.videoEnhancement === undefined ? {} : { videoEnhancement: value.videoEnhancement }),
+    ...(value.smartFraming === undefined ? {} : { smartFraming: value.smartFraming }),
+    ...(value.reducedFlash === undefined ? {} : { reducedFlash: value.reducedFlash }),
     ...(value.audioTransition === undefined ? {} : { audioTransition: value.audioTransition }),
     ...(value.audioCrossfadeSeconds === undefined ? {} : { audioCrossfadeSeconds: value.audioCrossfadeSeconds }),
     ...(value.beatSync === undefined ? {} : { beatSync: value.beatSync }),

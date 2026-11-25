@@ -1,10 +1,15 @@
 import { assFilter } from "./visual-design.js";
 import { planSourceCrossfades } from "./audio-crossfade.js";
+import { buildVisualEffects, validateVisualFinishOptions, type VisualEffectCue, type VisualFinishOptions } from "./visual-effects.js";
+import type { ManualSubject, SmartFraming, TrackingPlan, VisualAnalysis } from "./visual-tracking.js";
+import { hdrToSdrFilter } from "./video-color.js";
 
-export type MediaAsset = { path: string; name: string; duration: number; width: number; height: number; hasAudio: boolean; audioDuration?: number };
-export type RenderSelection = { asset: MediaAsset; start: number; end: number; locked?: boolean; selectionSource?: "suggested" | "manual"; framing?: "fill" | "fit"; focus?: number; label?: string };
+export type MediaAsset = { path: string; name: string; duration: number; width: number; height: number; hasAudio: boolean; audioDuration?: number; colorTransfer?: string };
+export type RenderSelection = { asset: MediaAsset; start: number; end: number; locked?: boolean; selectionSource?: "suggested" | "manual"; framing?: "fill" | "fit"; focus?: number; label?: string;
+  subject?: ManualSubject; visualAnalysis?: VisualAnalysis; tracking?: TrackingPlan; visualCues?: VisualEffectCue[] };
 export type AudioSelection = { asset: MediaAsset; start: number; end: number; locked?: boolean };
-export type ExportOptions = {
+export type ExportOptions = VisualFinishOptions & {
+  smartFraming?: SmartFraming;
   aspect: "portrait913" | "vertical" | "landscape";
   reduceRumble: boolean;
   finish?: "natural" | "vivid" | "cinematic" | "warm";
@@ -29,14 +34,21 @@ const looks: Record<NonNullable<ExportOptions["finish"]>, string> = {
 
 function appendVideoFilters(filters: string[], selection: RenderSelection, index: number, fileInput: number,
   width: number, height: number, aspect: ExportOptions["aspect"], look: string, videoFades: string, options?: ExportOptions): void {
-  const smoothing = options?.enhance ? "hqdn3d=1:1:2:2," : "";
-  const clarity = options?.enhance ? ",unsharp=5:5:0.25:3:3:0" : "";
+  const legacySmoothing = options?.enhance && !options.videoEnhancement ? "hqdn3d=1:1:2:2," : "";
+  const clarity = options?.enhance && !options.videoEnhancement ? ",unsharp=5:5:0.25:3:3:0" : "";
   const scaling = options?.quality === "high" ? ":flags=lanczos" : "";
   const sourceRatio = selection.asset.width / selection.asset.height;
   const outputRatio = width / height;
   const strongMismatch = Number.isFinite(sourceRatio) && sourceRatio > 0 &&
     Math.max(sourceRatio / outputRatio, outputRatio / sourceRatio) >= 1.45;
-  const frameMode = selection.framing ?? (aspect === "portrait913" ? "fill" : strongMismatch ? "fit" : "fill");
+  const tracking = options?.smartFraming && options.smartFraming !== "off" ? selection.tracking : undefined;
+  const frameMode = tracking?.suggestedFraming ?? selection.framing ?? (aspect === "portrait913" ? "fill" : strongMismatch ? "fit" : "fill");
+  const hdr = hdrToSdrFilter(selection.asset.colorTransfer);
+  const resizeRatio = frameMode === "fit" ? Math.min(width / selection.asset.width, height / selection.asset.height) : Math.max(width / selection.asset.width, height / selection.asset.height);
+  // Float HDR conversion only needs pixels retained by this output. Never
+  // downsample a full-detail crop or enlarge before tone mapping.
+  const preScale = hdr && resizeRatio < 0.999 ? `scale=${Math.max(2, Math.floor(selection.asset.width * resizeRatio / 2) * 2)}:${Math.max(2, Math.floor(selection.asset.height * resizeRatio / 2) * 2)}:flags=lanczos,` : "";
+  const smoothing = (hdr ? "fps=30," : "") + preScale + hdr + legacySmoothing;
   if (frameMode === "fit") {
     // Blur at quarter resolution before enlarging; the source itself stays fully visible on top.
     const backgroundWidth = Math.round(width / 8) * 2;
@@ -49,11 +61,49 @@ function appendVideoFilters(filters: string[], selection: RenderSelection, index
     // A fixed focal position avoids distracting pans. FFmpeg and the source preview use the
     // same percentage of the excess horizontal width; portrait sources still crop vertically.
     const focus = fixed(selection.focus ?? 0.5);
-    filters.push(`[${fileInput}:v]${smoothing}scale=${width}:${height}:force_original_aspect_ratio=increase${scaling},crop=${width}:${height}:(iw-ow)*${focus}:(ih-oh)/2,fps=30,setsar=1,format=yuv420p${look}${clarity}${videoFades}[v${index}]`);
+    const crop = tracking?.keyframes.length ? `'${trackingExpression(tracking, "x", selection.start, selection.end)}':'${trackingExpression(tracking, "y", selection.start, selection.end)}'` : `(iw-ow)*${focus}:(ih-oh)/2`;
+    filters.push(`[${fileInput}:v]${smoothing}scale=${width}:${height}:force_original_aspect_ratio=increase${scaling},crop=${width}:${height}:${crop},fps=30,setsar=1,format=yuv420p${look}${clarity}${videoFades}[v${index}]`);
+  }
+  if (options?.effects && options.effects !== "none" || options?.videoEnhancement && options.videoEnhancement !== "original") {
+    const frames = selection.visualAnalysis?.frames.filter(f => f.time >= selection.start && f.time <= selection.end) ?? [];
+    const average = (key: "luma" | "motion" | "sharpness") => Math.min(1, Math.max(0, frames.reduce((sum, frame) => sum + frame[key], 0) / frames.length));
+    const last = filters.length - 1;
+    filters[last] = filters[last].replace(`[v${index}]`, `[visualbase${index}]`);
+    const duration = selection.end - selection.start;
+    const finish = buildVisualEffects(`visualbase${index}`, `v${index}`, width, height, options ?? {}, {
+      duration, namespace: `finish${index}`, pixelFormat: videoFades.includes("yuv444p") ? "yuv444p" : "yuv420p",
+      cues: selection.visualCues?.filter(c => c.seconds >= selection.start && c.seconds <= selection.end)
+        .map(c => ({ ...c, seconds: c.seconds - selection.start })),
+      ...(frames.length ? { metrics: { luma: average("luma"), motion: average("motion"), sharpness: average("sharpness") } } : {}),
+    });
+    filters.push(...finish.filters);
   }
 }
 
+// Crop positions are normalized source coordinates, sampled from the smoothed
+// tracker. Linear interpolation produces a pan rather than detector jumps.
+function trackingExpression(plan: TrackingPlan, axis: "x" | "y", start: number, end: number): string {
+  const before = [...plan.keyframes].reverse().find(k => k.time < start);
+  const after = plan.keyframes.find(k => k.time > end);
+  const all = [...(before ? [before] : []), ...plan.keyframes.filter(k => k.time >= start && k.time <= end), ...(after ? [after] : [])];
+  if (all.some(k => !Number.isFinite(k.time) || !Number.isFinite(k[axis]) || k[axis] < 0 || k[axis] > 1)) throw new Error("Invalid tracked crop.");
+  if (!all.length) return axis === "x" ? "(iw-ow)/2" : "(ih-oh)/2";
+  const stride = Math.max(1, Math.ceil(all.length / 64));
+  const keys = all.filter((_, i) => i % stride === 0 || i === all.length - 1);
+  let expression = fixed(keys.at(-1)![axis]);
+  for (let i = keys.length - 2; i >= 0; i--) {
+    const a = keys[i], b = keys[i + 1];
+    if (b.time <= a.time) throw new Error("Tracked crop times must increase.");
+    const from = a.time - start, to = b.time - start;
+    const blend = `${fixed(a[axis])}+(${fixed(b[axis] - a[axis])})*clip((t-${fixed(from)})/${fixed(to - from)},0,1)`;
+    expression = `if(lt(t,${fixed(to)}),${blend},${expression})`;
+  }
+  return axis === "x" ? `clip(iw*(${expression}),0,iw-ow)` : `clip(ih*(${expression}),0,ih-oh)`;
+}
+
 function outputSettings(options: ExportOptions, profile: "export" | "draft", sources?: MediaAsset[]) {
+  validateVisualFinishOptions(options);
+  if (options.smartFraming !== undefined && !["off", "balanced", "follow-performer", "group-performance"].includes(options.smartFraming)) throw new Error("Choose valid smart framing.");
   if (!["export", "draft"].includes(profile)) throw new Error("Choose a valid render profile.");
   if (!options || !["portrait913", "vertical", "landscape"].includes(options.aspect) || typeof options.reduceRumble !== "boolean"
     || (options.finish !== undefined && !["natural", "vivid", "cinematic", "warm"].includes(options.finish))
@@ -83,7 +133,7 @@ export function renderDimensions(options: ExportOptions, profile: "export" | "dr
 }
 
 function appendEncoding(args: string[], filters: string[], output: string, profile: "export" | "draft", options?: ExportOptions) {
-  args.push("-filter_complex", filters.join(";"), "-map", "[vout]", "-map", "[aout]", "-c:v", "libx264", "-preset", profile === "draft" ? "ultrafast" : "medium", "-crf", profile === "draft" ? "30" : options?.quality === "high" ? "17" : "20", "-movflags", "+faststart", "-c:a", "aac", "-b:a", profile === "draft" ? "96k" : options?.quality === "high" ? "256k" : "192k", "-progress", "pipe:1", "-nostats", output);
+  args.push("-filter_complex", filters.join(";"), "-map", "[vout]", "-map", "[aout]", "-map_metadata", "-1", "-map_chapters", "-1", "-c:v", "libx264", "-preset", profile === "draft" ? "ultrafast" : "medium", "-crf", profile === "draft" ? "30" : options?.quality === "high" ? "17" : "20", "-movflags", "+faststart", "-c:a", "aac", "-b:a", profile === "draft" ? "96k" : options?.quality === "high" ? "256k" : "192k", "-progress", "pipe:1", "-nostats", output);
 }
 
 export function suggestedRange(asset: MediaAsset, maxSeconds = 12): Pick<RenderSelection, "start" | "end"> {

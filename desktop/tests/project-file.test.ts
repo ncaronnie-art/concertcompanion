@@ -37,6 +37,26 @@ test("project round trip retains selected ranges, locks, exclusions, brief and f
   assert.equal(normalized.briefInput.tempoArc, undefined, "older projects do not acquire a new music direction");
 });
 
+test("visual direction, detected frames, subject lock and HDR metadata survive project reopening", () => {
+  const clip = { ...project.clips[0], subject: { x: .4, y: .5 },
+    asset: { ...project.clips[0].asset, colorTransfer: "arib-std-b67" },
+    visualAnalysis: { version: 1, width: 1920, height: 1080, start: 0, end: 60, sampleFps: 2,
+      detector: "local person detector", limitations: ["No artist identity"], toneMapped: true, sourceColorTransfer: "arib-std-b67",
+      frames: [{ time: 10, people: [{ x: .3, y: .2, width: .1, height: .5, confidence: .9 }], luma: .4, motion: .1, sharpness: .5, overexposed: .01 }] },
+    tracking: { version: 1, subjectLocked: true, coverage: 1, suggestedFraming: "fill", notes: [],
+      keyframes: [{ time: 10, x: .2, y: 0, width: .316, height: 1, confidence: .9, status: "tracking" }] } };
+  const source = { ...project, clips: [clip], options: { ...project.options, smartFraming: "follow-performer", effects: "full-y2k", videoEnhancement: "clean", reducedFlash: true } };
+  const parsed = parseProjectSnapshot(JSON.parse(JSON.stringify(source)));
+  assert.deepEqual(parseProjectSnapshot(JSON.parse(JSON.stringify(parsed))), parsed);
+  assert.equal(parsed.options.effects, "full-y2k"); assert.equal(parsed.options.videoEnhancement, "clean");
+  assert.equal(parsed.options.smartFraming, "follow-performer"); assert.equal(parsed.options.reducedFlash, true);
+  assert.equal(parsed.clips[0].asset.colorTransfer, "arib-std-b67");
+  assert.equal(parsed.clips[0].tracking?.subjectLocked, true);
+  assert.deepEqual(parsed.clips[0].subject, { x: .4, y: .5 });
+  assert.equal(parsed.clips[0].locked, true); assert.equal(parsed.clips[0].start, 10); assert.equal(parsed.clips[0].end, 24);
+  assert.throws(() => parseProjectSnapshot({ ...source, clips: [{ ...clip, subject: { x: "movie=bad", y: .5 } }] }), /subject/i);
+});
+
 test("saved music direction retains explicit duration and count instead of receiving fresh defaults", () => {
   for (const tempoArc of [true, false]) {
     const saved = parseProjectSnapshot({ ...project, briefDirty: true,

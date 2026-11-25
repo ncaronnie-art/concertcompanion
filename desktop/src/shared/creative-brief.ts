@@ -213,14 +213,14 @@ function supportedLimits(text: string, type: VideoType, vibe: Vibe, customVibe: 
   const notes: string[] = [];
   if (type === "one-song" || /\b(several|multiple|different|many) songs?\b/i.test(text)) notes.push(labeledSongs > 1 ? "Song names come from your labels; the app has not detected or verified them." : "Songs are not identified automatically. The cut can use different recordings; mark or name song sections yourself if needed.");
   if (/\b(lyrics?|captions?|subtitles?|logo|title card)\b/i.test(text)) notes.push("Opening event titles and your named moments are supported. Lyrics, automatic captions, logos, and full-screen title cards are not available yet.");
-  if (/\b(slow.motion|speed ramp|stabiliz|camera tracking|face tracking)\b/i.test(text)) notes.push("Speed changes, stabilization, and tracking are not available yet.");
-  if (/\b(?:auto(?:matic(?:ally)?)?|find|follow|track|center|focus|crop|frame)\b[^.!?\n]{0,55}\b(?:performer|singer|stage|crowd|face)\b|\b(?:performer|singer|stage|crowd|face)\b[^.!?\n]{0,55}\b(?:auto(?:matic(?:ally)?)?|follow|track|center|focus|crop|frame)\b/i.test(text)) notes.push("Portrait cropping starts centered; it cannot identify or follow a performer, stage, or crowd. Use Aim the crop on each recording to place the picture where you want it.");
+  if (/\b(slow.motion|speed ramp|stabiliz|face tracking)\b/i.test(text)) notes.push("Speed changes, stabilization, and face recognition are not available. Smart framing uses sampled people and continuity, with a wider fallback when uncertain.");
+  if (/\b(?:auto(?:matic(?:ally)?)?|find|follow|track|center|focus|crop|frame)\b[^.!?\n]{0,55}\b(?:performer|singer|stage|crowd|face)\b|\b(?:performer|singer|stage|crowd|face)\b[^.!?\n]{0,55}\b(?:auto(?:matic(?:ally)?)?|follow|track|center|focus|crop|frame)\b/i.test(text)) notes.push("Analyze visuals to plan smart framing, or choose a performer point for a closer check. It does not recognize artist identity; distant performers, screens and crowds can confuse tracking. Watch the assembled preview and use manual framing when needed.");
   if (cleanupRequested) notes.push(rumbleEnabled ?
     "Sound cleanup here means reducing very low rumble. It cannot remove crowd voices, repair clipping, or fully denoise music." :
     "Low-rumble reduction is off by your choice. Full sound cleaning is not available; crowd voices, clipping, and music noise are not removed.");
   if (soundtrackIntent?.tempoArc) notes.push("The plan aims for slower music first and an upbeat finish using reliable rhythm measurements. If the recordings cannot support that progression, the first-cut notes will say so; song speed stays unchanged.");
   else if (soundtrackIntent?.buildEnding) notes.push("The ending is ordered by measured sound energy, not recognition of a musical crescendo. Listen before exporting.");
-  if (/\b(filters?|visual effects?|special effects?|animation)\b/i.test(text)) notes.push("Natural, vivid, cinematic, and warm looks, dissolves, and occasional glide transitions are available. Custom animation and generated effects are not supported.");
+  if (/\b(filters?|visual effects?|special effects?|animation|neon|y2k)\b/i.test(text)) notes.push("Subtle glow, Neon Pop, and Full Y2K add controlled bloom, light trails and starbursts. Confident music timing guides accents where available; others use editorial timing. Silhouette outlines, generated stage content and custom animations are not supported.");
   if (vibe === "custom") notes.push(`${customVibe.trim() ? "That custom vibe" : "A custom vibe"} cannot be translated reliably yet; this cut starts with natural color and straightforward cuts.`);
   return [...new Set(notes)];
 }
@@ -280,6 +280,17 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   const options: ExportOptions = { ...current, aspect, ...style,
     reduceRumble: input.reduceRumble ?? (cleanupRequested ? true : current.reduceRumble),
     eventTitle, showClipLabels: noText || soundtrackIntent?.separatePicture ? false : input.showClipLabels ?? current.showClipLabels ?? false };
+  // Creative wording maps only to supported settings; no generated commands.
+  const noEffects = /\b(?:no|without|(?:don't|do not)\s+(?:add|use))\s+(?:any\s+)?(?:visual effects?|special effects?|effects?|graphics|neon|y2k|holographic|overlays?)\b/i.test(description);
+  if (noEffects) options.effects = "none";
+  else if (/\b(?:y2k|holographic)\b/i.test(description)) options.effects = "full-y2k";
+  else if (/\bneon(?: pop)?\b/i.test(description)) options.effects = "neon-pop";
+  else if (/\bsubtle (?:glow|bloom|effects?)\b/i.test(description)) options.effects = "subtle";
+  if (/\b(?:reduced? flash|gentler? effects?|fewer flashes)\b/i.test(description)) options.reducedFlash = true;
+  if (/\b(?:don't|do not|never)\s+(?:follow|track|automatically crop)\b/i.test(description)) options.smartFraming = "off";
+  else if (/\b(?:group performance|keep (?:the )?group (?:in frame|together))\b/i.test(description)) options.smartFraming = "group-performance";
+  else if (/\b(?:follow|track)\s+(?:the\s+)?(?:performer|singer)\b/i.test(description)) options.smartFraming = "follow-performer";
+  if (/\b(?:enhance (?:the )?(?:picture|video)|enhanced video)\b/i.test(description)) { options.videoEnhancement = "enhanced"; options.enhance = false; }
   const noBeat = /\b(?:no|without|don't|do not)\s+(?:(?:use|add|apply)\s+)?beat[- ]?(?:matching|sync(?:ing)?|alignment)\b/i.test(description);
   const asksBeat = /\bbeat[- ]?(?:match(?:ing)?|sync(?:ing)?|align(?:ment)?)\b|\b(?:cuts?|pictures?|video)\b.{0,30}\b(?:follow|to|on) (?:the )?(?:music|beat|rhythm)\b/i.test(description);
   const noPerformance = /\b(?:don't|do not|never)\s+(?:favor|prefer|prioritize)\s+(?:the )?(?:performance|vocals?|singer|artist)\b|\bfavor (?:the )?crowd\b/i.test(description);
@@ -407,7 +418,9 @@ export function interpretCreativeBrief(input: CreativeBriefInput, clips: Creativ
   const joins = ({ cut: "direct cuts", fade: "soft joins", dissolve: "dissolves", smoothslide: "dissolves with occasional glides" })[options.transition ?? "cut"];
   const soundJoins = options.audioTransition === "crossfade" ? ` · sound overlaps up to ${options.audioCrossfadeSeconds ?? 2}s where spare sound is available` : "";
   const musicSummary = `${options.beatSync && soundtrackIntent ? " · follow clear beats where possible" : ""}${options.highlightFocus === "performance" && !keepWholePerformance && selectionMode !== "use-my-sections" ? " · favor clearer performance sound" : ""}`;
-  const summary = `${time(targetSeconds ?? naturalSeconds)} ${typeLabel[videoType]}${variety} · ${vibe === "clean-live" ? "clean/live" : vibe} pacing · ${options.finish} look · ${joins} · ${shape} · ${preserved}${graphics}${soundSummary}${soundJoins}${musicSummary}.`;
+  const effectName = { none: "", subtle: "subtle glow", "neon-pop": "Neon Pop", "full-y2k": "Full Y2K" }[options.effects ?? "none"];
+  const visualSummary = `${effectName ? ` · ${effectName} accents` : ""}${options.videoEnhancement && options.videoEnhancement !== "original" ? ` · ${options.videoEnhancement} picture` : ""}${options.smartFraming && options.smartFraming !== "off" ? ` · ${options.smartFraming === "follow-performer" ? "performer" : options.smartFraming === "group-performance" ? "group" : "balanced"} framing after visual analysis` : ""}`;
+  const summary = `${time(targetSeconds ?? naturalSeconds)} ${typeLabel[videoType]}${variety} · ${vibe === "clean-live" ? "clean/live" : vibe} pacing · ${options.finish} look · ${joins} · ${shape} · ${preserved}${graphics}${soundSummary}${soundJoins}${musicSummary}${visualSummary}.`;
   const limitations = supportedLimits(description, videoType, vibe, customVibe, labeledSongs, cleanupRequested, options.reduceRumble, soundtrackIntent);
   if (options.beatSync) limitations.push(soundtrackIntent?.separatePicture ?
     "Confident beats can guide picture timing and align compatible song transitions. Uncertain or different tempos keep their existing blend; song speed and protected moments stay unchanged." :

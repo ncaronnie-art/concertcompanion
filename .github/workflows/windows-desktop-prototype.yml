@@ -1,14 +1,14 @@
 name: Concert Compass Windows prototype verification
 on:
   push:
-    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story', 'native/vibe-capsule-visual-finish', 'native/vibe-capsule-desktop-quality', 'native/vibe-capsule-smooth-reels', 'native/vibe-capsule-music-led', 'native/vibe-capsule-three-act-audio', 'native/vibe-capsule-crowd-check']
+    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story', 'native/vibe-capsule-visual-finish', 'native/vibe-capsule-desktop-quality', 'native/vibe-capsule-smooth-reels', 'native/vibe-capsule-music-led', 'native/vibe-capsule-three-act-audio', 'native/vibe-capsule-crowd-check', 'native/vibe-capsule-y2k-visuals']
 permissions:
   contents: read
 jobs:
   windows-test:
     if: github.event.repository.private == false
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: desktop
@@ -46,7 +46,7 @@ jobs:
           & '.\node_modules\ffmpeg-static\ffmpeg.exe' -hide_banner -loglevel error -y -f lavfi -i 'color=blue:size=320x240:rate=30:duration=3' -f lavfi -i 'sine=frequency=660:sample_rate=48000:duration=3' -vf 'drawbox=x=45:y=0:w=230:h=240:color=red:t=fill' -c:v libx264 -c:a aac $env:COMPASS_SMOKE_SECOND
           if ($LASTEXITCODE -ne 0) { throw 'Second synthetic fixture generation failed.' }
           $process = Start-Process -FilePath "$env:RUNNER_TEMP\compass-package\Concert Compass-win32-x64\Concert Compass.exe" -PassThru -WindowStyle Hidden -RedirectStandardOutput "$env:RUNNER_TEMP\compass-stdout.log" -RedirectStandardError "$env:RUNNER_TEMP\compass-stderr.log"
-          $finished = $process.WaitForExit(170000)
+          $finished = $process.WaitForExit(330000)
           $stages = @(Get-Content "$env:RUNNER_TEMP\compass-stages.log" -ErrorAction SilentlyContinue)
           $failure = $stages | Where-Object { $_ -match 'desktop smoke test failed:' } | Select-Object -Last 1
           $diagnosis = if ($failure) { $failure } elseif ($stages.Count) { $stages[-1] } else { 'no desktop stage recorded' }

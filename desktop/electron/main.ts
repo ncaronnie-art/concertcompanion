@@ -18,17 +18,27 @@ import { commitOutput } from "./output-commit.js";
 import { validateRenderedOutput } from "./output-integrity.js";
 import { displayDimensions } from "./media-orientation.js";
 import { parseProjectSnapshot, type ProjectSnapshot } from "../src/shared/project-file.js";
+import { analyzeVisualMedia } from "./visual-analysis.js";
+import type { VisualAnalysis } from "../src/shared/visual-tracking.js";
+import { hdrToSdrFilter } from "../src/shared/video-color.js";
+import { mapVisualMusicCues } from "../src/shared/visual-cues.js";
+import { runVisualSmoke } from "./visual-smoke.js";
+import { parseManualSubject } from "../src/shared/visual-settings.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.COMPASS_DEV === "1";
 const ffmpegBinary = ffmpegPath as unknown as string;
 const selectedFiles = new Map<string, string>();
 const probedDurations = new Map<string, number>();
+const probedColors = new Map<string, string>();
+const visualAnalyses = new Map<string, VisualAnalysis>();
+let activeVisualAnalysis: AbortController | undefined;
 const previews = new Map<string, string>();
 const drafts = new Map<string, string>();
 const draftKeys = new Map<string, string>();
 const audioBins = new Map<string, AudioBin[]>();
 const pendingAudio = new Map<string, Promise<AudioBin[]>>();
+const audioControllers = new Set<AbortController>();
 let previewDirectory: string | undefined;
 let activeRender: ChildProcess | undefined;
 let cancelRender = false;
@@ -55,7 +65,7 @@ function createWindow() {
   else win.loadFile(path.join(here, "../../dist/index.html"));
   if (smoke) {
     win.webContents.on("console-message", (_event, level, message) => { if (level >= 2) console.error(`Renderer: ${message}`); });
-    const timer = setTimeout(() => { smokeStage("desktop smoke test timed out"); console.error("Desktop smoke test timed out"); app.exit(1); }, 150000);
+    const timer = setTimeout(() => { smokeStage("desktop smoke test timed out"); console.error("Desktop smoke test timed out"); app.exit(1); }, 300000);
     win.webContents.once("did-fail-load", (_event, code, description) => { smokeStage(`page load failed: ${code} ${description}`); console.error(`Page load failed: ${code} ${description}`); clearTimeout(timer); app.exit(1); });
     win.webContents.once("did-finish-load", async () => {
       try {
@@ -85,6 +95,7 @@ function createWindow() {
           throw new Error(`Fresh phone finishing defaults were wrong: ${JSON.stringify(freshDefaults)}`);
         }
         smokeStage("fresh phone finishing defaults ready");
+        await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.visual-studio button')).find(b => b.textContent === 'Off · manual').click()`);
         // Preserve the established pixel, title, duration and cancellation checks
         // under their explicit legacy profile. New blends have separate render tests.
         for (const label of ["Portrait 9:13", "Standard · smaller file", "Straight cut", "Direct join"]) {
@@ -252,6 +263,7 @@ function createWindow() {
         await waitFor(`document.body.innerText.includes('Project opened.') && Array.from(document.querySelectorAll('button')).some(b => b.textContent === 'Export MP4' && !b.disabled)`, "intact project reopen remains exportable");
         smokeStage("intact performance ready after project reopen");
         await runFinishingSettingsSmoke(win, waitFor);
+        await runVisualSmoke(win, waitFor, smokeStage, process.env.COMPASS_SMOKE_PROJECT!);
         smokeStage("smoke passed");
         console.log("Desktop creative brief, protected selection, first cut, refinement, project save/open and MP4 export passed"); clearTimeout(timer); app.exit(0);
       } catch (error) { smokeStage(`desktop smoke test failed: ${error instanceof Error ? error.stack : String(error)}`); console.error("Desktop smoke test failed", error); clearTimeout(timer); app.exit(1); }
@@ -266,7 +278,7 @@ async function finishingSmokeState(win: BrowserWindow) {
     return { phone: pressed('Phone 9:16 · default'), high: pressed('Best available · up to 1080p'),
       dissolve: pressed('Dissolve'), slide: pressed('Smooth slide'), cut: pressed('Straight cut'),
       crossfade: pressed('Blend sound'), overlap: Number(document.querySelector('input[aria-label="Sound overlap seconds"]')?.value),
-      enhance: document.querySelector('input[aria-label="Gentle picture clarity"]')?.checked,
+      enhance: Array.from(document.querySelectorAll('.visual-studio button')).some(b => b.textContent === 'Clean' && b.getAttribute('aria-pressed') === 'true'),
       beatSync: document.querySelector('input[aria-label="Follow the beat"]')?.checked,
       performance: document.querySelector('input[aria-label="Favor the performance"]')?.checked,
       targetLength: document.querySelector('input[aria-label="Target length"]')?.value,
@@ -309,8 +321,8 @@ async function runFinishingSettingsSmoke(win: BrowserWindow, waitFor: (expressio
   });
   await chooseSmokeOption(win, waitFor, "Phone 9:16 · default");
   await chooseSmokeOption(win, waitFor, "Best available · up to 1080p");
-  await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('input[aria-label="Gentle picture clarity"]'); if (!input || input.disabled) throw new Error('Picture clarity control unavailable'); if (!input.checked) input.click(); })()`);
-  await waitFor(`document.querySelector('input[aria-label="Gentle picture clarity"]')?.checked === true`, "picture clarity choice");
+  await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.visual-studio button')).find(b => b.textContent === 'Clean').click()`);
+  await waitFor(`Array.from(document.querySelectorAll('.visual-studio button')).some(b => b.textContent === 'Clean' && b.getAttribute('aria-pressed') === 'true')`, "picture clarity choice");
   await chooseSmokeOption(win, waitFor, "Blend sound");
   await win.webContents.executeJavaScript(`(() => { const input = document.querySelector('input[aria-label="Sound overlap seconds"]'); if (!input) throw new Error('Sound overlap control unavailable'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(input, '1.5'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await waitFor(`document.querySelector('input[aria-label="Sound overlap seconds"]')?.value === '1.5'`, "sound overlap choice");
@@ -326,7 +338,7 @@ async function runFinishingSettingsSmoke(win: BrowserWindow, waitFor: (expressio
   await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Save project').click()`);
   await waitFor(`document.body.innerText.includes('Project saved:')`, "finishing settings save");
   const saved = parseProjectSnapshot(JSON.parse(await readFile(process.env.COMPASS_SMOKE_PROJECT!, "utf8")));
-  if (saved.options.aspect !== "vertical" || saved.options.quality !== "high" || saved.options.enhance !== true ||
+  if (saved.options.aspect !== "vertical" || saved.options.quality !== "high" || saved.options.videoEnhancement !== "clean" ||
     saved.options.audioTransition !== "crossfade" || saved.options.audioCrossfadeSeconds !== 1.5 || saved.options.transition !== "smoothslide" ||
     saved.briefInput.transition !== "smoothslide" || saved.options.beatSync !== true ||
     saved.options.highlightFocus !== "performance" || sections(saved) !== sections(before)) {
@@ -604,7 +616,7 @@ ipcMain.handle("project:open", async () => {
   });
   if (source.canceled || !source.filePaths[0]) return null;
   const projectPath = source.filePaths[0];
-  if ((await stat(projectPath)).size > 1024 * 1024) throw new Error("This project file is too large to open.");
+  if ((await stat(projectPath)).size > 32 * 1024 * 1024) throw new Error("This project file is too large to open.");
   let snapshot: ProjectSnapshot;
   try { snapshot = parseProjectSnapshot(JSON.parse(await readFile(projectPath, "utf8"))); }
   catch (error) { throw new Error(`Could not open this project: ${error instanceof Error ? error.message : String(error)}`); }
@@ -633,7 +645,7 @@ ipcMain.handle("media:preview", async (_event, id: string) => {
   const output = path.join(previewDirectory, `${id}.mp4`);
   try {
     await runPlannedRender(_event, ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", source,
-      "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=480:480:force_original_aspect_ratio=decrease:force_divisible_by=2",
+      "-map", "0:v:0", "-map", "0:a:0?", "-vf", "fps=24,scale=480:480:force_original_aspect_ratio=decrease:force_divisible_by=2," + hdrToSdrFilter(probedColors.get(source)) + "format=yuv420p",
       "-r", "24", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-pix_fmt", "yuv420p",
       "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", output],
       probedDurations.get(source) ?? 1, "Preview stopped. Your recordings are safe.");
@@ -657,8 +669,10 @@ ipcMain.handle("media:probe", async (_event, filePath: string): Promise<MediaAss
   const audioDuration = Number(audio?.duration);
   const asset = { path: filePath, name: path.basename(filePath), duration,
     width: dimensions.width, height: dimensions.height, hasAudio: !!audio,
-    ...(Number.isFinite(audioDuration) && audioDuration > 0 ? { audioDuration: Math.min(duration, audioDuration) } : {}) };
+    ...(Number.isFinite(audioDuration) && audioDuration > 0 ? { audioDuration: Math.min(duration, audioDuration) } : {}),
+    ...(typeof video?.color_transfer === "string" ? { colorTransfer: video.color_transfer } : {}) };
   probedDurations.set(filePath, asset.duration);
+  probedColors.set(filePath, video?.color_transfer ?? "unknown");
   return asset;
 });
 
@@ -671,15 +685,44 @@ function analyzeImportedAudio(asset: MediaAsset, reduceRumble = false): Promise<
   if (cached) return Promise.resolve(cached);
   const pending = pendingAudio.get(key);
   if (pending) return pending;
-  const analysis = measureAudio(ffmpegBinary, asset.path, reduceRumble).then((bins) => {
+  const controller = new AbortController(); audioControllers.add(controller);
+  const analysis = measureAudio(ffmpegBinary, asset.path, reduceRumble, controller.signal).then((bins) => {
     audioBins.set(key, bins);
     return bins;
-  }).finally(() => pendingAudio.delete(key));
+  }).finally(() => { pendingAudio.delete(key); audioControllers.delete(controller); });
   pendingAudio.set(key, analysis);
   return analysis;
 }
 
 ipcMain.handle("media:analyze-audio", (_event, asset: MediaAsset, reduceRumble?: boolean) => analyzeImportedAudio(asset, reduceRumble));
+
+ipcMain.handle("media:analyze-visual", async (event, asset: MediaAsset, range: { start?: number; end?: number; fps?: number; subject?: unknown } = {}) => {
+  if (!asset?.path || ![...selectedFiles.values()].includes(asset.path)) throw new Error("Import this recording first.");
+  if (activeRender || activeVisualAnalysis) throw new Error("Another video is still being prepared.");
+  const start = range.start ?? 0, end = range.end ?? asset.duration, fps = range.fps ?? 2;
+  const subject = parseManualSubject(range.subject);
+  if (![start, end, fps].every(Number.isFinite) || start < 0 || end <= start || end > asset.duration + 0.05 || fps < 0.25 || fps > 4) throw new Error("Choose a valid visual analysis range.");
+  const key = JSON.stringify([asset.path, start, end, fps, subject]);
+  const cached = visualAnalyses.get(key);
+  if (cached) return cached;
+  const controller = new AbortController(); activeVisualAnalysis = controller;
+  try {
+    const analysis = await analyzeVisualMedia(ffmpegBinary, asset.path, { start, end, fps, subject, signal: controller.signal,
+      onProgress: progress => { if (!event.sender.isDestroyed()) event.sender.send("media:progress", progress.fraction); } });
+    visualAnalyses.set(key, analysis);
+    return analysis;
+  } finally { if (activeVisualAnalysis === controller) activeVisualAnalysis = undefined; }
+});
+
+async function addMusicAccents(selections: RenderSelection[], sounds: AudioSelection[] | undefined, options: ExportOptions) {
+  if (!["neon-pop", "full-y2k"].includes(options.effects ?? "")) return selections;
+  const soundtrack = sounds ?? selections;
+  const analyses = new Map<string, AudioBin[]>();
+  for (const selection of soundtrack) {
+    if (selection.asset.hasAudio && !analyses.has(selection.asset.path)) analyses.set(selection.asset.path, await analyzeImportedAudio(selection.asset));
+  }
+  return mapVisualMusicCues(selections, soundtrack, analyses);
+}
 
 ipcMain.handle("media:suggest", async (_event, asset: MediaAsset, highlightFocus: "balanced" | "performance" = "balanced") => {
   if (!["balanced", "performance"].includes(highlightFocus)) throw new Error("Choose a valid highlight preference.");
@@ -707,14 +750,15 @@ async function writeVisualOverlay(directory: string, name: string, selections: R
 }
 
 ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[], options: ExportOptions, audioSelections?: AudioSelection[]) => {
-  if (activeRender) throw new Error("Another video is still being prepared.");
+  if (activeRender || activeVisualAnalysis) throw new Error("Another video is still being prepared.");
   const imported = new Set(selectedFiles.values());
   if (!Array.isArray(selections) || selections.some((selection) => !imported.has(selection?.asset?.path)) ||
     (audioSelections !== undefined && (!Array.isArray(audioSelections) || audioSelections.some((selection) => !imported.has(selection?.asset?.path))))) {
     throw new Error("Choose the videos in the file picker first.");
   }
   const key = JSON.stringify({ sections: selections.map((selection) => ({ path: selection.asset.path, start: selection.start,
-    end: selection.end, framing: selection.framing, focus: selection.focus, locked: selection.locked, label: selection.label })),
+    end: selection.end, framing: selection.framing, focus: selection.focus, locked: selection.locked, label: selection.label,
+    colorTransfer: selection.asset.colorTransfer, subject: selection.subject, tracking: selection.tracking, visualAnalysis: selection.visualAnalysis })),
     audio: audioSelections?.map((selection) => ({ path: selection.asset.path, start: selection.start, end: selection.end, locked: selection.locked })) ?? null,
     options });
   const existing = draftKeys.get(key);
@@ -727,6 +771,7 @@ ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[],
   const output = path.join(previewDirectory, `draft-${id}.mp4`);
   let overlayFile: string | undefined;
   try {
+    selections = await addMusicAccents(selections, audioSelections, options);
     overlayFile = await writeVisualOverlay(previewDirectory, `draft-${id}.ass`, selections, options, "draft", audioSelections !== undefined);
     const { args, totalSeconds } = audioSelections === undefined ? buildRenderCommand(selections, output, options, "draft", overlayFile) :
       buildAudioLedRenderCommand(selections, audioSelections, output, options, "draft", overlayFile);
@@ -745,7 +790,7 @@ ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[],
 });
 
 ipcMain.handle("media:render", async (event, selections: RenderSelection[], options: ExportOptions, audioSelections?: AudioSelection[]) => {
-  if (activeRender) throw new Error("A video is already being exported.");
+  if (activeRender || activeVisualAnalysis) throw new Error("A video is already being prepared.");
   const imported = new Set(selectedFiles.values());
   if (!Array.isArray(selections) || selections.some((selection) => !imported.has(selection?.asset?.path)) ||
     (audioSelections !== undefined && (!Array.isArray(audioSelections) || audioSelections.some((selection) => !imported.has(selection?.asset?.path))))) {
@@ -758,6 +803,7 @@ ipcMain.handle("media:render", async (event, selections: RenderSelection[], opti
   const tempDir = await mkdtemp(path.join(tmpdir(), "concert-compass-export-"));
   const temporaryOutput = path.join(tempDir, `${randomUUID()}.mp4`);
   const { cleanupWarning } = await withTemporaryCleanup(tempDir, async () => {
+  selections = await addMusicAccents(selections, audioSelections, options);
   const overlayFile = await writeVisualOverlay(tempDir, "visual-overlays.ass", selections, options, "export", audioSelections !== undefined);
   const { args, totalSeconds } = audioSelections === undefined ? buildRenderCommand(selections, temporaryOutput, options, "export", overlayFile) :
     buildAudioLedRenderCommand(selections, audioSelections, temporaryOutput, options, "export", overlayFile);
@@ -772,6 +818,8 @@ ipcMain.handle("media:render", async (event, selections: RenderSelection[], opti
 });
 
 ipcMain.handle("media:cancel-render", () => {
+  if (activeVisualAnalysis) { activeVisualAnalysis.abort(); return true; }
+  if (!activeRender && audioControllers.size) { for (const controller of audioControllers) controller.abort(); return true; }
   if (!activeRender) return false;
   cancelRender = true;
   return activeRender.kill();
@@ -791,6 +839,9 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 let cleaning = false;
 app.on("before-quit", (event) => {
+  activeVisualAnalysis?.abort();
+  for (const controller of audioControllers) controller.abort();
+  if (activeRender) { cancelRender = true; activeRender.kill(); }
   if (cleaning || !previewDirectory) return;
   event.preventDefault(); cleaning = true;
   void rm(previewDirectory, { recursive: true, force: true }).catch(() => {}).finally(() => app.quit());

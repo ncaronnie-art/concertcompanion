@@ -1,11 +1,29 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { buildRenderCommand } from "../src/shared/render-plan.js";
 import { interpretCreativeBrief, makeFirstCut, refineCut, freshWizardTargetSeconds, type CreativeClip } from "../src/shared/creative-brief.ts";
 
 const options = { aspect: "vertical" as const, reduceRumble: true };
 const recording = (number: number, extra: Partial<CreativeClip> = {}): CreativeClip => ({
   asset: { path: `C:\\recording-${number}.mov`, name: `Recording ${number}`, duration: 90, width: 1920, height: 1080, hasAudio: true },
   start: 39, end: 51, included: true, selectionSource: "suggested", locked: false, excludedByUser: false, ...extra,
+});
+
+test("neon and performer requests become supported settings and a different render without changing locked sections", () => {
+  const clips = [recording(1, { locked: true, selectionSource: "manual" })];
+  const before = JSON.stringify(clips);
+  const brief = interpretCreativeBrief({ description: "Y2K neon effects, enhance the video, follow the performer. Gentler effects, no added text.", selectionMode: "use-my-sections" }, clips, options);
+  const result = makeFirstCut(clips, brief);
+  assert.equal(result.options.effects, "full-y2k"); assert.equal(result.options.smartFraming, "follow-performer");
+  assert.equal(result.options.videoEnhancement, "enhanced"); assert.equal(result.options.reducedFlash, true);
+  assert.equal(result.options.showClipLabels, false); assert.equal(result.options.eventTitle, "");
+  assert.equal(JSON.stringify(clips), before); assert.equal(result.clips[0].start, 39); assert.equal(result.clips[0].end, 51); assert.equal(result.clips[0].locked, true);
+  const graph = buildRenderCommand(result.clips, "test.mp4", result.options).args.join(" ");
+  const clean = buildRenderCommand(result.clips, "test.mp4", { ...result.options, effects: "none" }).args.join(" ");
+  assert.match(graph, /geq=/); assert.doesNotMatch(clean, /geq=/);
+  assert.match(brief.limitations.join(" "), /Silhouette outlines/);
+  const disabled = interpretCreativeBrief({ description: "Do not use Y2K effects. Don't follow the performer.", selectionMode: "use-my-sections" }, clips, result.options);
+  assert.equal(disabled.options.effects, "none"); assert.equal(disabled.options.smartFraming, "off");
 });
 
 test("fresh wizard starts with a ninety-second three-part music direction without a loudness promise", () => {
@@ -66,7 +84,7 @@ test("portrait 9:13 stays the default while explicit shapes remain available", (
   assert.equal(interpretCreativeBrief({ description: "Use 16:9" }, clips, portrait).aspect, "landscape");
   assert.equal(interpretCreativeBrief({ description: "Use 9:13", aspect: "landscape" }, clips, portrait).aspect, "landscape");
   const subjectRequest = interpretCreativeBrief({ description: "Automatically center the crop on the singer" }, clips, portrait);
-  assert.match(subjectRequest.limitations.join(" "), /cannot identify or follow a performer/);
+  assert.match(subjectRequest.limitations.join(" "), /does not recognize artist identity/);
 });
 
 test("plain brief uses existing manual section, parses a length, and asks before shortening protected footage", () => {

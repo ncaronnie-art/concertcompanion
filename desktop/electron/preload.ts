@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("concertCompass", {
   preview: (id: string) => ipcRenderer.invoke("media:preview", id),
   previewCut: (selections: unknown, options: unknown, audioSelections?: unknown) => ipcRenderer.invoke("media:preview-cut", selections, options, audioSelections),
   analyzeAudio: (asset: unknown, reduceRumble?: boolean) => ipcRenderer.invoke("media:analyze-audio", asset, reduceRumble),
+  analyzeVisual: (asset: unknown, range?: unknown) => ipcRenderer.invoke("media:analyze-visual", asset, range),
   suggest: (asset: unknown, highlightFocus?: "balanced" | "performance") => ipcRenderer.invoke("media:suggest", asset, highlightFocus),
   render: (selections: unknown, options: unknown, audioSelections?: unknown) => ipcRenderer.invoke("media:render", selections, options, audioSelections),
   cancelRender: () => ipcRenderer.invoke("media:cancel-render"),

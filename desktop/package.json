@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "bun run build && concurrently -k \"vite --host 127.0.0.1 --strictPort\" \"wait-on http://127.0.0.1:5173 && cross-env COMPASS_DEV=1 electron .\"",
     "prepare:audio-model": "node tools/prepare-audio-model.mjs",
-    "build": "node tools/prepare-audio-model.mjs && vite build && tsc -p tsconfig.electron.json && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/electron/preload.cjs",
+    "prepare:visual-model": "node tools/prepare-visual-model.mjs",
+    "build": "node tools/prepare-audio-model.mjs && node tools/prepare-visual-model.mjs && vite build && tsc -p tsconfig.electron.json && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/electron/preload.cjs",
     "start": "electron .",
     "package:win": "node tools/package.mjs",
     "test": "tsx --test --test-concurrency=1 tests/**/*.test.ts"

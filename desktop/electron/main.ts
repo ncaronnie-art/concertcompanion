@@ -24,6 +24,7 @@ import { hdrToSdrFilter } from "../src/shared/video-color.js";
 import { mapVisualMusicCues } from "../src/shared/visual-cues.js";
 import { runVisualSmoke } from "./visual-smoke.js";
 import { parseManualSubject } from "../src/shared/visual-settings.js";
+import { withRenderGraphFile } from "./render-graph-file.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.COMPASS_DEV === "1";
@@ -545,25 +546,25 @@ async function assertOutputIsNotOriginal(output: string): Promise<void> {
 function runPlannedRender(event: IpcMainInvokeEvent, args: string[], totalSeconds: number, stoppedMessage: string): Promise<void> {
   if (activeRender) throw new Error("Another video is still being prepared.");
   cancelRender = false;
-  return new Promise<void>((resolve, reject) => {
-    const child = spawn(ffmpegBinary, args, { windowsHide: true });
+  return withRenderGraphFile(args, planned => new Promise<void>((resolve, reject) => {
+    const child = spawn(ffmpegBinary, planned, { windowsHide: true });
     activeRender = child;
-    let stderr = "", progressBuffer = "";
+    let stderr = "", progressBuffer = "", processError: Error | undefined;
     child.stderr.on("data", (data) => (stderr += data));
     child.stdout.on("data", (data) => {
       progressBuffer += data.toString();
       const lines = progressBuffer.split(/\r?\n/); progressBuffer = lines.pop() ?? "";
       for (const line of lines) {
         const match = /^out_time_ms=(\d+)/.exec(line);
-        if (match) event.sender.send("media:progress", Math.min(0.99, Number(match[1]) / 1_000_000 / totalSeconds));
+        if (match && !event.sender.isDestroyed()) event.sender.send("media:progress", Math.min(0.99, Number(match[1]) / 1_000_000 / totalSeconds));
       }
     });
-    child.once("error", (error) => { activeRender = undefined; reject(error); });
+    child.once("error", (error) => { processError = error; });
     child.once("close", (code) => {
       activeRender = undefined;
-      code === 0 && !cancelRender ? resolve() : reject(new Error(cancelRender ? stoppedMessage : stderr || `FFmpeg stopped (${code}).`));
+      code === 0 && !cancelRender && !processError ? resolve() : reject(cancelRender ? new Error(stoppedMessage) : processError ?? new Error(stderr || `FFmpeg stopped (${code}).`));
     });
-  });
+  }));
 }
 
 ipcMain.handle("media:pick", async () => {

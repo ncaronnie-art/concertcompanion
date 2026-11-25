@@ -62,7 +62,7 @@ export async function runVisualSmoke(win: BrowserWindow, waitFor: WaitFor,
   // A real button exposes the same center-point operation to keyboard users;
   // activate it directly here without depending on hidden-window focus.
   await activate("Use center point", ".subject-actions button");
-  await waitFor(`document.querySelector('.status')?.textContent.includes('Your performer point is saved.') && !document.querySelector('.subject-picking')`, "performer choice saved");
+  await waitFor(`document.querySelector('.status')?.textContent.includes('Your performer point is saved') && !document.querySelector('.subject-picking')`, "performer choice saved");
   stage("original-frame performer picker saved");
 
   await activate("Save project");

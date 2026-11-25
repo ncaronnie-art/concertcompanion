@@ -32,7 +32,7 @@ export async function prepareVisualModel(){
   await mkdir(path.dirname(cache),{recursive:true});await writeFile(cache,bytes);
  }
  if(hash(bytes)!==source.sha256||bytes.length!==source.bytes)throw Error('Visual model checksum mismatch.');
- const notice=await readFile(path.join(desktop,'tools','visual-model-notices','NanoDet-Apache-2.0.txt'));
+ const notice=Buffer.from((await readFile(path.join(desktop,'tools','visual-model-notices','NanoDet-Apache-2.0.txt'),'utf8')).replace(/\r\n/g,'\n'),'utf8');
  if(hash(notice)!==noticeHash)throw Error('Visual model license notice checksum mismatch.');
  await prepareAudioModel();
  await mkdir(destination,{recursive:true});await writeFile(path.join(destination,'nanodet.onnx'),bytes);

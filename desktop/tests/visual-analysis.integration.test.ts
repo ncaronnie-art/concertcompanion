@@ -32,7 +32,7 @@ test('visual decoder streams finite display-oriented measurements and preserves 
 test('HLG-tagged synthetic input is tone-mapped before metrics and model samples',async()=>{
  const {folder,source}=await fixture(true);
  try{
-  assert.match(visualDecodeFilters('arib-std-b67',416,234,1),/tonemap=mobius/);
+  assert.match(visualDecodeFilters('arib-std-b67',416,234,1),/tonemap=hable/);
   assert.doesNotMatch(visualDecodeFilters('bt709',416,234,1),/tonemap/);
   const a=await analyzeVisualMedia(ffmpeg!,source,{start:0,end:1,fps:1,model:emptyModel});
   assert.equal(a.sourceColorTransfer,'arib-std-b67');assert.equal(a.toneMapped,true);assert.equal(a.frames.length,1);

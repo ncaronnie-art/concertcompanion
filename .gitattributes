@@ -1,0 +1,2 @@
+# A pinned license notice must have identical bytes on every build platform.
+desktop/tools/visual-model-notices/*.txt text eol=lf

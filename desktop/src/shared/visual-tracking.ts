@@ -6,7 +6,7 @@ export type VisualAnalysis = { version: 1; width: number; height: number; start:
   sampleFps: number; detector: string; frames: VisualFrame[]; limitations: string[];
   sourceColorTransfer?: string; toneMapped?: boolean; analysisRegion?: NormalizedBox };
 export type SmartFraming = "off" | "balanced" | "follow-performer" | "group-performance";
-export type ManualSubject = { x: number; y: number };
+export type ManualSubject = { x: number; y: number; time?: number };
 export type TrackingKeyframe = NormalizedBox & { time: number; confidence: number;
   status: "tracking" | "held" | "searching" | "group" | "off"; subject?: NormalizedBox };
 export type TrackingPlan = { version: 1; keyframes: TrackingKeyframe[]; subjectLocked: boolean;
@@ -50,7 +50,7 @@ function union(boxes: NormalizedBox[]): NormalizedBox {
   const x=Math.min(...boxes.map(b=>b.x)),y=Math.min(...boxes.map(b=>b.y));
   return {x,y,width:Math.max(...boxes.map(b=>b.x+b.width))-x,height:Math.max(...boxes.map(b=>b.y+b.height))-y};
 }
-export function planVisualTracking(analysis: VisualAnalysis, options: { mode?: SmartFraming; subject?: ManualSubject; outputAspect?: number } = {}): TrackingPlan {
+function planTrackingFromStart(analysis: VisualAnalysis, options: { mode?: SmartFraming; subject?: ManualSubject; outputAspect?: number } = {}): TrackingPlan {
   const mode=options.mode??"balanced",aspect=options.outputAspect??9/16;
   if(!["off","balanced","follow-performer","group-performance"].includes(mode)||!Number.isFinite(aspect)||aspect<=0||aspect>4 ||
     ![analysis.width,analysis.height,analysis.start,analysis.end].every(Number.isFinite)||analysis.width<=0||analysis.height<=0||analysis.end<analysis.start) throw Error("Choose valid smart framing settings.");
@@ -121,6 +121,23 @@ export function planVisualTracking(analysis: VisualAnalysis, options: { mode?: S
   if(missed)notes.push("Some sampled frames lost the subject; short gaps hold the prior framing. Review occluded or fast-moving moments.");
   if(needsFit&&mode!=="off")notes.push("A wider composition is recommended where tracking or group framing cannot safely fit the portrait crop.");
   return {version:1,keyframes,subjectLocked:!!options.subject,coverage,suggestedFraming:mode!=="off"&&(needsFit||coverage<.5)?"fit":"fill",notes};
+}
+/** New point choices are anchored to the frame the user actually selected.
+ * Follow the same subject both ways from that frame; old projects keep their
+ * existing forward-only behavior. This does not identify an artist. */
+export function planVisualTracking(analysis: VisualAnalysis, options: { mode?: SmartFraming; subject?: ManualSubject; outputAspect?: number } = {}): TrackingPlan {
+ const time=options.subject?.time;
+ if(time!==undefined&&(!Number.isFinite(time)||time<0))throw Error("Choose a valid performer moment.");
+ if(time===undefined||time<analysis.start||time>analysis.end||!analysis.frames.length||options.mode==="off")return planTrackingFromStart(analysis,options);
+ const subject={x:options.subject!.x,y:options.subject!.y},frames=[...analysis.frames].sort((a,b)=>a.time-b.time);
+ const anchor=[...frames].sort((a,b)=>Math.abs(a.time-time)-Math.abs(b.time-time))[0],at=anchor.time;
+ const forward=planTrackingFromStart({...analysis,start:at,frames:frames.filter(f=>f.time>=at)},{...options,subject});
+ const reverseFrames=frames.filter(f=>f.time<=at).reverse().map(f=>({...f,time:2*at-f.time}));
+ const backward=planTrackingFromStart({...analysis,start:at,end:2*at-analysis.start,frames:reverseFrames},{...options,subject});
+ const keyframes=[...backward.keyframes.map(k=>({...k,time:2*at-k.time})).filter(k=>k.time<at),...forward.keyframes].sort((a,b)=>a.time-b.time);
+ const coverage=keyframes.filter(k=>k.status==="tracking"||k.status==="group").length/keyframes.length;
+ return {version:1,keyframes,subjectLocked:true,coverage,suggestedFraming:forward.suggestedFraming==="fit"||backward.suggestedFraming==="fit"?"fit":"fill",
+  notes:[...new Set([...forward.notes,...backward.notes,"Your performer choice is anchored to the selected source moment."])]};
 }
 export function scoreVisualSegment(analysis: VisualAnalysis, start: number, end: number): number {
   const frames=analysis.frames.filter(f=>f.time>=start&&f.time<=end);if(!frames.length)return 0;

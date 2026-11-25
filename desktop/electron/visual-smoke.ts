@@ -53,8 +53,11 @@ export async function runVisualSmoke(win: BrowserWindow, waitFor: WaitFor,
   stage("packaged local people analysis finished");
 
   await waitFor(`(() => { const v=document.querySelectorAll('.clips article')[${pictureIndex}]?.querySelector('video'); return v && v.readyState >= 2 && v.videoWidth > 0 })()`, "performer picker source picture");
+  const subjectMoment=before.clips[pictureIndex].start+Math.min(.6,(before.clips[pictureIndex].end-before.clips[pictureIndex].start)/2);
+  await evaluate(`(() => { const v=document.querySelectorAll('.clips article')[${pictureIndex}]?.querySelector('video'); v.pause();v.currentTime=${subjectMoment}; })()`);
+  await waitFor(`(() => { const v=document.querySelectorAll('.clips article')[${pictureIndex}]?.querySelector('video'); return v && !v.seeking && Math.abs(v.currentTime-${subjectMoment}) < .075 && v.readyState >= 2 })()`, "performer accent moment in existing section");
   await evaluate(`(() => { const article=document.querySelectorAll('.clips article')[${pictureIndex}], b=Array.from(article.querySelectorAll('button')).find(b => ['Choose performer','Change performer'].includes(b.textContent.trim())); if (!b || b.disabled) throw Error('Performer choice unavailable'); b.click(); })()`);
-  await waitFor(`(() => { const v=document.querySelector('.subject-picking video'); return v && !v.seeking && Math.abs(v.currentTime-${before.clips[pictureIndex].start}) < .075 && v.readyState >= 2 })()`, "uncropped performer choice at selected start");
+  await waitFor(`(() => { const v=document.querySelector('.subject-picking video'); return v && !v.seeking && Math.abs(v.currentTime-${subjectMoment}) < .075 && v.readyState >= 2 })()`, "uncropped performer choice keeps paused moment");
   const picker = await evaluate(`(() => { const frame=document.querySelector('.subject-picking'), v=frame.querySelector('video'), rect=frame.getBoundingClientRect(); return { ratio:rect.width/rect.height, sourceRatio:v.videoWidth/v.videoHeight, objectFit:getComputedStyle(v).objectFit, controls:v.controls }; })()`);
   if (Math.abs(picker.ratio - picker.sourceRatio) > 0.025 || picker.objectFit !== "contain" || picker.controls) {
     throw Error(`Performer picker did not expose the whole original frame: ${JSON.stringify(picker)}`);
@@ -79,8 +82,8 @@ export async function runVisualSmoke(win: BrowserWindow, waitFor: WaitFor,
     }
   }
   const kept = saved.clips[pictureIndex];
-  if (kept.subject?.x !== 0.5 || kept.subject.y !== 0.5 || !kept.tracking?.subjectLocked) {
-    throw Error("Manual performer point was not retained as a protected subject choice.");
+  if (kept.subject?.x !== 0.5 || kept.subject.y !== 0.5 || kept.subject.time===undefined || Math.abs(kept.subject.time-subjectMoment)>.075 || !kept.tracking?.subjectLocked) {
+    throw Error("Manual performer point and paused accent moment were not retained as a protected subject choice.");
   }
   stage("visual analysis and choices saved without changing sections");
   await activate("Open project");
@@ -107,6 +110,7 @@ export async function runVisualSmoke(win: BrowserWindow, waitFor: WaitFor,
   await waitFor(`document.querySelector('.status')?.textContent.includes('Project saved:')`, "visual first-cut save");
   const finalProject = await load();
   if (sections(finalProject) !== expectedSections || !finalProject.clips[pictureIndex].subject ||
+    finalProject.clips[pictureIndex].subject?.time !== kept.subject.time ||
     finalProject.options.effects !== "full-y2k" || finalProject.options.videoEnhancement !== "enhanced") {
     throw Error("Confirming the existing brief changed sections or discarded visual choices.");
   }

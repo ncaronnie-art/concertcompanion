@@ -38,12 +38,15 @@ function readAsset(value: unknown): MediaAsset {
 function readClip(value: unknown): CreativeClip {
   if (!isObject(value)) throw new Error("The project contains an invalid section.");
   const asset = readAsset(value.asset);
+  const subject = parseManualSubject(value.subject);
+  if (subject?.time !== undefined && subject.time > asset.duration + .05) throw new Error(`The selected performer moment is outside ${asset.name}.`);
   if (!isNumber(value.start) || !isNumber(value.end) || value.start < 0 ||
     value.end - value.start < 0.1 || value.end > asset.duration + 0.05 ||
     typeof value.included !== "boolean" || typeof value.locked !== "boolean" ||
     typeof value.excludedByUser !== "boolean" ||
     (value.soundExcludedByUser !== undefined && typeof value.soundExcludedByUser !== "boolean") ||
     (value.orderLocked !== undefined && typeof value.orderLocked !== "boolean") ||
+    (value.bodyOutlineDisabled !== undefined && typeof value.bodyOutlineDisabled !== "boolean") ||
     !oneOf(value.selectionSource, ["suggested", "manual"] as const) ||
     (value.included && value.excludedByUser) ||
     (value.framing !== undefined && !oneOf(value.framing, ["fill", "fit"] as const)) ||
@@ -56,9 +59,10 @@ function readClip(value: unknown): CreativeClip {
     ...(value.soundExcludedByUser === undefined ? {} : { soundExcludedByUser: value.soundExcludedByUser }),
     selectionSource: value.selectionSource,
     ...(value.orderLocked === undefined ? {} : { orderLocked: value.orderLocked }),
+    ...(value.bodyOutlineDisabled === undefined ? {} : { bodyOutlineDisabled: value.bodyOutlineDisabled }),
     ...(value.framing === undefined ? {} : { framing: value.framing }),
     ...(value.focus === undefined ? {} : { focus: value.focus }),
-    ...(value.subject === undefined ? {} : { subject: parseManualSubject(value.subject) }),
+    ...(subject === undefined ? {} : { subject }),
     ...(value.visualAnalysis === undefined ? {} : { visualAnalysis: parseVisualAnalysis(value.visualAnalysis) }),
     ...(value.tracking === undefined ? {} : { tracking: parseTrackingPlan(value.tracking) }),
     ...(value.label === undefined ? {} : { label: value.label }) };
@@ -72,6 +76,7 @@ function readOptions(value: unknown): ExportOptions {
     (value.quality !== undefined && !oneOf(value.quality, ["standard", "high"] as const)) ||
     (value.enhance !== undefined && typeof value.enhance !== "boolean") ||
     (value.effects !== undefined && !oneOf(value.effects, ["none", "subtle", "neon-pop", "full-y2k"] as const)) ||
+    (value.bodyOutline !== undefined && !oneOf(value.bodyOutline, ["off", "subtle", "electric"] as const)) ||
     (value.videoEnhancement !== undefined && !oneOf(value.videoEnhancement, ["original", "clean", "enhanced", "maximum"] as const)) ||
     (value.smartFraming !== undefined && !oneOf(value.smartFraming, ["off", "balanced", "follow-performer", "group-performance"] as const)) ||
     (value.reducedFlash !== undefined && typeof value.reducedFlash !== "boolean") ||
@@ -89,6 +94,7 @@ function readOptions(value: unknown): ExportOptions {
     ...(value.quality === undefined ? {} : { quality: value.quality }),
     ...(value.enhance === undefined ? {} : { enhance: value.enhance }),
     ...(value.effects === undefined ? {} : { effects: value.effects }),
+    ...(value.bodyOutline === undefined ? {} : { bodyOutline: value.bodyOutline }),
     ...(value.videoEnhancement === undefined ? {} : { videoEnhancement: value.videoEnhancement }),
     ...(value.smartFraming === undefined ? {} : { smartFraming: value.smartFraming }),
     ...(value.reducedFlash === undefined ? {} : { reducedFlash: value.reducedFlash }),

@@ -41,7 +41,8 @@ function person(value:unknown,label:string):PersonDetection {
 export function parseManualSubject(value:unknown):ManualSubject|undefined {
  if(value===undefined)return undefined;
  const o=object(value,"Selected subject");
- return {x:number(o.x,"Selected subject horizontal position",0,1),y:number(o.y,"Selected subject vertical position",0,1)};
+ return {x:number(o.x,"Selected subject horizontal position",0,1),y:number(o.y,"Selected subject vertical position",0,1),
+  ...(o.time===undefined?{}:{time:number(o.time,"Selected performer moment",0,MAX_SOURCE_SECONDS)})};
 }
 export function parseVisualAnalysis(value:unknown):VisualAnalysis|undefined {
  if(value===undefined)return undefined;

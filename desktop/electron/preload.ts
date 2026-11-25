@@ -13,4 +13,9 @@ contextBridge.exposeInMainWorld("concertCompass", {
   saveProject: (snapshot: unknown) => ipcRenderer.invoke("project:save", snapshot),
   openProject: () => ipcRenderer.invoke("project:open"),
   onProgress: (callback: (progress: number) => void) => ipcRenderer.on("media:progress", (_event, progress) => callback(progress)),
+  onPhase: (callback: (message: string) => void) => {
+    const listener = (_event: unknown, message: string) => callback(message);
+    ipcRenderer.on("media:phase", listener);
+    return () => ipcRenderer.removeListener("media:phase", listener);
+  },
 });

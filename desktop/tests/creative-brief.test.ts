@@ -21,7 +21,7 @@ test("neon and performer requests become supported settings and a different rend
   const graph = buildRenderCommand(result.clips, "test.mp4", result.options).args.join(" ");
   const clean = buildRenderCommand(result.clips, "test.mp4", { ...result.options, effects: "none" }).args.join(" ");
   assert.match(graph, /geq=/); assert.doesNotMatch(clean, /geq=/);
-  assert.match(brief.limitations.join(" "), /Silhouette outlines/);
+  assert.match(brief.limitations.join(" "), /unclear or obstructed moments stay clean/);
   const disabled = interpretCreativeBrief({ description: "Do not use Y2K effects. Don't follow the performer.", selectionMode: "use-my-sections" }, clips, result.options);
   assert.equal(disabled.options.effects, "none"); assert.equal(disabled.options.smartFraming, "off");
 });

@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { verifyAudioResources } from "./prepare-audio-model.mjs";
 import { verifyVisualResources } from "./prepare-visual-model.mjs";
+import { verifyBodyResources } from "./prepare-body-model.mjs";
 
 const project = process.cwd();
 const staging = await mkdtemp(path.join(tmpdir(), "compass-package-"));
@@ -11,6 +12,7 @@ const destination = process.argv[2];
 if (!destination) throw new Error("Provide an output directory.");
 await verifyAudioResources();
 await verifyVisualResources();
+await verifyBodyResources();
 for (const directory of ["dist", "dist-electron", "resources"]) await cp(path.join(project, directory), path.join(staging, directory), { recursive: true });
 await mkdir(path.join(staging, "node_modules"));
 for (const dependency of ["ffmpeg-static", "ffprobe-static"]) await cp(path.join(project, "node_modules", dependency), path.join(staging, "node_modules", dependency), { recursive: true });

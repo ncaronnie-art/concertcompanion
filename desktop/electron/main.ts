@@ -23,8 +23,10 @@ import type { VisualAnalysis } from "../src/shared/visual-tracking.js";
 import { hdrToSdrFilter } from "../src/shared/video-color.js";
 import { mapVisualMusicCues } from "../src/shared/visual-cues.js";
 import { runVisualSmoke } from "./visual-smoke.js";
+import { runBodyOutlineSmoke } from "./body-outline-smoke.js";
 import { parseManualSubject } from "../src/shared/visual-settings.js";
 import { withRenderGraphFile } from "./render-graph-file.js";
+import { prepareRenderBodyMasks, withoutBodyMaskPaths } from "./body-mask-jobs.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.COMPASS_DEV === "1";
@@ -34,15 +36,21 @@ const probedDurations = new Map<string, number>();
 const probedColors = new Map<string, string>();
 const visualAnalyses = new Map<string, VisualAnalysis>();
 let activeVisualAnalysis: AbortController | undefined;
+let activeBodyAnalysis: AbortController | undefined;
+let activeBodyJob: Promise<unknown> | undefined;
+let bodyMaskDirectory: string | undefined;
 const previews = new Map<string, string>();
 const drafts = new Map<string, string>();
 const draftKeys = new Map<string, string>();
+const draftNotes = new Map<string, string>();
 const audioBins = new Map<string, AudioBin[]>();
 const pendingAudio = new Map<string, Promise<AudioBin[]>>();
 const audioControllers = new Set<AbortController>();
 let previewDirectory: string | undefined;
 let activeRender: ChildProcess | undefined;
 let cancelRender = false;
+let renderPreparing = false;
+let renderCancelEpoch = 0;
 let smokeCancelPending = true;
 const smoke = process.env.COMPASS_SMOKE_TEST === "1";
 const smokeStory = smoke && process.env.COMPASS_SMOKE_STORY === "1";
@@ -66,7 +74,7 @@ function createWindow() {
   else win.loadFile(path.join(here, "../../dist/index.html"));
   if (smoke) {
     win.webContents.on("console-message", (_event, level, message) => { if (level >= 2) console.error(`Renderer: ${message}`); });
-    const timer = setTimeout(() => { smokeStage("desktop smoke test timed out"); console.error("Desktop smoke test timed out"); app.exit(1); }, 300000);
+    const timer = setTimeout(() => { smokeStage("desktop smoke test timed out"); console.error("Desktop smoke test timed out"); app.exit(1); }, 360000);
     win.webContents.once("did-fail-load", (_event, code, description) => { smokeStage(`page load failed: ${code} ${description}`); console.error(`Page load failed: ${code} ${description}`); clearTimeout(timer); app.exit(1); });
     win.webContents.once("did-finish-load", async () => {
       try {
@@ -265,6 +273,7 @@ function createWindow() {
         smokeStage("intact performance ready after project reopen");
         await runFinishingSettingsSmoke(win, waitFor);
         await runVisualSmoke(win, waitFor, smokeStage, process.env.COMPASS_SMOKE_PROJECT!);
+        await runBodyOutlineSmoke(win, waitFor, smokeStage, process.env.COMPASS_SMOKE_PROJECT!);
         smokeStage("smoke passed");
         console.log("Desktop creative brief, protected selection, first cut, refinement, project save/open and MP4 export passed"); clearTimeout(timer); app.exit(0);
       } catch (error) { smokeStage(`desktop smoke test failed: ${error instanceof Error ? error.stack : String(error)}`); console.error("Desktop smoke test failed", error); clearTimeout(timer); app.exit(1); }
@@ -543,10 +552,12 @@ async function assertOutputIsNotOriginal(output: string): Promise<void> {
   }
 }
 
-function runPlannedRender(event: IpcMainInvokeEvent, args: string[], totalSeconds: number, stoppedMessage: string): Promise<void> {
-  if (activeRender) throw new Error("Another video is still being prepared.");
+function runPlannedRender(event: IpcMainInvokeEvent, args: string[], totalSeconds: number, stoppedMessage: string, progressStart = 0, epoch = renderCancelEpoch): Promise<void> {
+  if (activeRender || renderPreparing) throw new Error("Another video is still being prepared.");
+  renderPreparing = true;
   cancelRender = false;
   return withRenderGraphFile(args, planned => new Promise<void>((resolve, reject) => {
+    if (epoch !== renderCancelEpoch) { reject(new Error(stoppedMessage)); return; }
     const child = spawn(ffmpegBinary, planned, { windowsHide: true });
     activeRender = child;
     let stderr = "", progressBuffer = "", processError: Error | undefined;
@@ -556,7 +567,7 @@ function runPlannedRender(event: IpcMainInvokeEvent, args: string[], totalSecond
       const lines = progressBuffer.split(/\r?\n/); progressBuffer = lines.pop() ?? "";
       for (const line of lines) {
         const match = /^out_time_ms=(\d+)/.exec(line);
-        if (match && !event.sender.isDestroyed()) event.sender.send("media:progress", Math.min(0.99, Number(match[1]) / 1_000_000 / totalSeconds));
+        if (match && !event.sender.isDestroyed()) event.sender.send("media:progress", Math.min(0.99, progressStart + (1 - progressStart) * Number(match[1]) / 1_000_000 / totalSeconds));
       }
     });
     child.once("error", (error) => { processError = error; });
@@ -564,7 +575,7 @@ function runPlannedRender(event: IpcMainInvokeEvent, args: string[], totalSecond
       activeRender = undefined;
       code === 0 && !cancelRender && !processError ? resolve() : reject(cancelRender ? new Error(stoppedMessage) : processError ?? new Error(stderr || `FFmpeg stopped (${code}).`));
     });
-  }));
+  })).finally(() => { renderPreparing = false; });
 }
 
 ipcMain.handle("media:pick", async () => {
@@ -699,7 +710,7 @@ ipcMain.handle("media:analyze-audio", (_event, asset: MediaAsset, reduceRumble?:
 
 ipcMain.handle("media:analyze-visual", async (event, asset: MediaAsset, range: { start?: number; end?: number; fps?: number; subject?: unknown } = {}) => {
   if (!asset?.path || ![...selectedFiles.values()].includes(asset.path)) throw new Error("Import this recording first.");
-  if (activeRender || activeVisualAnalysis) throw new Error("Another video is still being prepared.");
+  if (activeRender || renderPreparing || activeVisualAnalysis || activeBodyAnalysis) throw new Error("Another video is still being prepared.");
   const start = range.start ?? 0, end = range.end ?? asset.duration, fps = range.fps ?? 2;
   const subject = parseManualSubject(range.subject);
   if (![start, end, fps].every(Number.isFinite) || start < 0 || end <= start || end > asset.duration + 0.05 || fps < 0.25 || fps > 4) throw new Error("Choose a valid visual analysis range.");
@@ -716,13 +727,32 @@ ipcMain.handle("media:analyze-visual", async (event, asset: MediaAsset, range: {
 });
 
 async function addMusicAccents(selections: RenderSelection[], sounds: AudioSelection[] | undefined, options: ExportOptions) {
-  if (!["neon-pop", "full-y2k"].includes(options.effects ?? "")) return selections;
+  if (!["neon-pop", "full-y2k"].includes(options.effects ?? "") && (!options.bodyOutline || options.bodyOutline === "off")) return selections;
   const soundtrack = sounds ?? selections;
   const analyses = new Map<string, AudioBin[]>();
   for (const selection of soundtrack) {
     if (selection.asset.hasAudio && !analyses.has(selection.asset.path)) analyses.set(selection.asset.path, await analyzeImportedAudio(selection.asset));
   }
   return mapVisualMusicCues(selections, soundtrack, analyses);
+}
+
+async function addPerformerContours(event: IpcMainInvokeEvent, selections: RenderSelection[], options: ExportOptions, stoppedMessage: string) {
+  const safe = withoutBodyMaskPaths(selections);
+  if (!options.bodyOutline || options.bodyOutline === "off") return { selections: safe, note: undefined };
+  bodyMaskDirectory ??= await mkdtemp(path.join(tmpdir(), "vibe-performer-masks-"));
+  const controller = new AbortController(); activeBodyAnalysis = controller;
+  const job = prepareRenderBodyMasks(ffmpegBinary, safe, options, bodyMaskDirectory, { signal: controller.signal,
+    onProgress: (fraction, message) => { if (!event.sender.isDestroyed()) {
+      event.sender.send("media:phase", message); event.sender.send("media:progress", fraction * 0.35);
+    } },
+  });
+  activeBodyJob = job;
+  try { return await job; }
+  catch (error) { if (controller.signal.aborted) throw Error(stoppedMessage); throw error; }
+  finally {
+    if (activeBodyAnalysis === controller) activeBodyAnalysis = undefined;
+    if (activeBodyJob === job) activeBodyJob = undefined;
+  }
 }
 
 ipcMain.handle("media:suggest", async (_event, asset: MediaAsset, highlightFocus: "balanced" | "performance" = "balanced") => {
@@ -751,20 +781,22 @@ async function writeVisualOverlay(directory: string, name: string, selections: R
 }
 
 ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[], options: ExportOptions, audioSelections?: AudioSelection[]) => {
-  if (activeRender || activeVisualAnalysis) throw new Error("Another video is still being prepared.");
+  if (activeRender || renderPreparing || activeVisualAnalysis || activeBodyAnalysis) throw new Error("Another video is still being prepared.");
+  const epoch = renderCancelEpoch;
   const imported = new Set(selectedFiles.values());
   if (!Array.isArray(selections) || selections.some((selection) => !imported.has(selection?.asset?.path)) ||
     (audioSelections !== undefined && (!Array.isArray(audioSelections) || audioSelections.some((selection) => !imported.has(selection?.asset?.path))))) {
     throw new Error("Choose the videos in the file picker first.");
   }
+  selections = withoutBodyMaskPaths(selections);
   const key = JSON.stringify({ sections: selections.map((selection) => ({ path: selection.asset.path, start: selection.start,
     end: selection.end, framing: selection.framing, focus: selection.focus, locked: selection.locked, label: selection.label,
-    colorTransfer: selection.asset.colorTransfer, subject: selection.subject, tracking: selection.tracking, visualAnalysis: selection.visualAnalysis })),
+    colorTransfer: selection.asset.colorTransfer, subject: selection.subject, tracking: selection.tracking, visualAnalysis: selection.visualAnalysis, bodyOutlineDisabled: selection.bodyOutlineDisabled })),
     audio: audioSelections?.map((selection) => ({ path: selection.asset.path, start: selection.start, end: selection.end, locked: selection.locked })) ?? null,
     options });
   const existing = draftKeys.get(key);
   if (existing && drafts.has(existing)) {
-    try { await access(drafts.get(existing)!); return { url: `compass-media://draft/${existing}` }; }
+    try { await access(drafts.get(existing)!); return { url: `compass-media://draft/${existing}`, outlineNote: draftNotes.get(existing) }; }
     catch { draftKeys.delete(key); drafts.delete(existing); }
   }
   previewDirectory ??= await mkdtemp(path.join(tmpdir(), "concert-compass-preview-"));
@@ -773,15 +805,21 @@ ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[],
   let overlayFile: string | undefined;
   try {
     selections = await addMusicAccents(selections, audioSelections, options);
+    if (epoch !== renderCancelEpoch) throw Error("Preview stopped. Your edit is still here.");
+    const contours = await addPerformerContours(event, selections, options, "Preview stopped. Your edit is still here.");
+    selections = contours.selections;
+    if (!event.sender.isDestroyed()) event.sender.send("media:phase", "Building your preview…");
     overlayFile = await writeVisualOverlay(previewDirectory, `draft-${id}.ass`, selections, options, "draft", audioSelections !== undefined);
     const { args, totalSeconds } = audioSelections === undefined ? buildRenderCommand(selections, output, options, "draft", overlayFile) :
       buildAudioLedRenderCommand(selections, audioSelections, output, options, "draft", overlayFile);
-    await runPlannedRender(event, args, totalSeconds, "Preview stopped. Your edit is still here.");
+    await runPlannedRender(event, args, totalSeconds, "Preview stopped. Your edit is still here.", options.bodyOutline && options.bodyOutline !== "off" ? 0.35 : 0, epoch);
     const probe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,duration", "-of", "json", output]));
     validateRenderedOutput(probe, totalSeconds, "preview");
+    if (epoch !== renderCancelEpoch) throw Error("Preview stopped. Your edit is still here.");
     drafts.set(id, output); draftKeys.set(key, id);
+    if (contours.note) draftNotes.set(id, contours.note);
     event.sender.send("media:progress", 1);
-    return { url: `compass-media://draft/${id}` };
+    return { url: `compass-media://draft/${id}`, outlineNote: contours.note };
   } catch (error) {
     await rm(output, { force: true }).catch(() => {});
     throw error;
@@ -791,7 +829,8 @@ ipcMain.handle("media:preview-cut", async (event, selections: RenderSelection[],
 });
 
 ipcMain.handle("media:render", async (event, selections: RenderSelection[], options: ExportOptions, audioSelections?: AudioSelection[]) => {
-  if (activeRender || activeVisualAnalysis) throw new Error("A video is already being prepared.");
+  if (activeRender || renderPreparing || activeVisualAnalysis || activeBodyAnalysis) throw new Error("A video is already being prepared.");
+  const epoch = renderCancelEpoch;
   const imported = new Set(selectedFiles.values());
   if (!Array.isArray(selections) || selections.some((selection) => !imported.has(selection?.asset?.path)) ||
     (audioSelections !== undefined && (!Array.isArray(audioSelections) || audioSelections.some((selection) => !imported.has(selection?.asset?.path))))) {
@@ -800,28 +839,37 @@ ipcMain.handle("media:render", async (event, selections: RenderSelection[], opti
   const destination = smoke ? { canceled: false, filePath: process.env.COMPASS_SMOKE_OUTPUT! } : await dialog.showSaveDialog({ defaultPath: "Concert Compass Reel.mp4", filters: [{ name: "MP4 video", extensions: ["mp4"] }] });
   if (destination.canceled || !destination.filePath) return { cancelled: true };
   const output = path.resolve(destination.filePath);
+  selections = withoutBodyMaskPaths(selections);
   await assertOutputIsNotOriginal(output);
   const tempDir = await mkdtemp(path.join(tmpdir(), "concert-compass-export-"));
   const temporaryOutput = path.join(tempDir, `${randomUUID()}.mp4`);
+  let outlineNote: string | undefined;
   const { cleanupWarning } = await withTemporaryCleanup(tempDir, async () => {
   selections = await addMusicAccents(selections, audioSelections, options);
+  if (epoch !== renderCancelEpoch) throw Error("Export stopped. Your selections are still here.");
+  const contours = await addPerformerContours(event, selections, options, "Export stopped. Your selections are still here.");
+  selections = contours.selections; outlineNote = contours.note;
+  if (!event.sender.isDestroyed()) event.sender.send("media:phase", "Rendering your MP4…");
   const overlayFile = await writeVisualOverlay(tempDir, "visual-overlays.ass", selections, options, "export", audioSelections !== undefined);
   const { args, totalSeconds } = audioSelections === undefined ? buildRenderCommand(selections, temporaryOutput, options, "export", overlayFile) :
     buildAudioLedRenderCommand(selections, audioSelections, temporaryOutput, options, "export", overlayFile);
   if (smoke && smokeCancelPending) { args.splice(2, 0, "-re"); smokeCancelPending = false; }
-  await runPlannedRender(event, args, totalSeconds, "Export stopped. Your selections are still here.");
+  await runPlannedRender(event, args, totalSeconds, "Export stopped. Your selections are still here.", options.bodyOutline && options.bodyOutline !== "off" ? 0.35 : 0, epoch);
   const probe = JSON.parse(await run(ffprobe.path, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,duration", "-of", "json", temporaryOutput]));
   validateRenderedOutput(probe, totalSeconds, "export");
+  if (epoch !== renderCancelEpoch) throw Error("Export stopped. Your selections are still here.");
   await commitOutput(temporaryOutput, output, () => assertOutputIsNotOriginal(output));
   event.sender.send("media:progress", 1);
   }, smoke && process.env.COMPASS_SMOKE_CLEANUP_FAIL === "1" ? async () => { throw new Error("Simulated temporary-folder permission error"); } : undefined);
-  return { cancelled: false, output, cleanupWarning };
+  return { cancelled: false, output, cleanupWarning, outlineNote };
 });
 
 ipcMain.handle("media:cancel-render", () => {
+  renderCancelEpoch++;
+  if (activeBodyAnalysis) { activeBodyAnalysis.abort(); return true; }
   if (activeVisualAnalysis) { activeVisualAnalysis.abort(); return true; }
   if (!activeRender && audioControllers.size) { for (const controller of audioControllers) controller.abort(); return true; }
-  if (!activeRender) return false;
+  if (!activeRender) return renderPreparing;
   cancelRender = true;
   return activeRender.kill();
 });
@@ -840,10 +888,15 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 let cleaning = false;
 app.on("before-quit", (event) => {
+  renderCancelEpoch++;
+  activeBodyAnalysis?.abort();
   activeVisualAnalysis?.abort();
   for (const controller of audioControllers) controller.abort();
   if (activeRender) { cancelRender = true; activeRender.kill(); }
-  if (cleaning || !previewDirectory) return;
+  const directories = [previewDirectory, bodyMaskDirectory].filter((directory): directory is string => !!directory);
+  if (cleaning || !directories.length) return;
   event.preventDefault(); cleaning = true;
-  void rm(previewDirectory, { recursive: true, force: true }).catch(() => {}).finally(() => app.quit());
+  void Promise.allSettled(activeBodyJob ? [activeBodyJob] : [])
+    .then(() => Promise.allSettled(directories.map(directory => rm(directory, { recursive: true, force: true }))))
+    .finally(() => app.quit());
 });

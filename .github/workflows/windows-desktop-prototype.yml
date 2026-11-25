@@ -1,7 +1,7 @@
 name: Concert Compass Windows prototype verification
 on:
   push:
-    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story', 'native/vibe-capsule-visual-finish', 'native/vibe-capsule-desktop-quality', 'native/vibe-capsule-smooth-reels', 'native/vibe-capsule-music-led', 'native/vibe-capsule-three-act-audio', 'native/vibe-capsule-crowd-check', 'native/vibe-capsule-y2k-visuals']
+    branches: ['native/windows-desktop-prototype', 'native/vibe-capsule-polish', 'native/vibe-capsule-audio-story', 'native/vibe-capsule-visual-finish', 'native/vibe-capsule-desktop-quality', 'native/vibe-capsule-smooth-reels', 'native/vibe-capsule-music-led', 'native/vibe-capsule-three-act-audio', 'native/vibe-capsule-crowd-check', 'native/vibe-capsule-y2k-visuals', 'native/vibe-capsule-body-neon']
 permissions:
   contents: read
 jobs:
@@ -46,7 +46,7 @@ jobs:
           & '.\node_modules\ffmpeg-static\ffmpeg.exe' -hide_banner -loglevel error -y -f lavfi -i 'color=blue:size=320x240:rate=30:duration=3' -f lavfi -i 'sine=frequency=660:sample_rate=48000:duration=3' -vf 'drawbox=x=45:y=0:w=230:h=240:color=red:t=fill' -c:v libx264 -c:a aac $env:COMPASS_SMOKE_SECOND
           if ($LASTEXITCODE -ne 0) { throw 'Second synthetic fixture generation failed.' }
           $process = Start-Process -FilePath "$env:RUNNER_TEMP\compass-package\Concert Compass-win32-x64\Concert Compass.exe" -PassThru -WindowStyle Hidden -RedirectStandardOutput "$env:RUNNER_TEMP\compass-stdout.log" -RedirectStandardError "$env:RUNNER_TEMP\compass-stderr.log"
-          $finished = $process.WaitForExit(330000)
+          $finished = $process.WaitForExit(390000)
           $stages = @(Get-Content "$env:RUNNER_TEMP\compass-stages.log" -ErrorAction SilentlyContinue)
           $failure = $stages | Where-Object { $_ -match 'desktop smoke test failed:' } | Select-Object -Last 1
           $diagnosis = if ($failure) { $failure } elseif ($stages.Count) { $stages[-1] } else { 'no desktop stage recorded' }
@@ -144,6 +144,18 @@ jobs:
           foreach ($stage in @('music preferences undo restored', 'finishing controls undo restored', 'finishing controls survived project reopen')) {
             if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern $stage -SimpleMatch -Quiet -ErrorAction SilentlyContinue)) { throw "Finishing settings check did not finish: $stage" }
           }
+      - name: Check performer neon controls preserve the edit
+        if: always() && steps.desktop_smoke.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          foreach ($stage in @('body outline options and undo ready', 'signature settings preserved sections and audio', 'signature project reopened', 'per-recording neon correction saved reopened and undone', 'legacy project kept body neon off')) {
+            if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern $stage -SimpleMatch -Quiet -ErrorAction SilentlyContinue)) { throw "Performer neon UI check did not finish: $stage" }
+          }
+      - name: Check bundled native silhouette model in Electron
+        if: always() && steps.desktop_smoke.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\compass-stages.log" -Pattern 'packaged native silhouette model ready' -SimpleMatch -Quiet -ErrorAction SilentlyContinue)) { throw 'The bundled CPU silhouette model did not run inside packaged Electron.' }
       - name: Open sound-led desktop flow
         id: sound_story
         shell: pwsh

@@ -10,6 +10,7 @@ import type { AudioBin } from "../shared/suggestions";
 import { audibleReviewRanges, buildSoundReview, soundReviewNeedsDecision, soundReviewSignature, type SoundReview } from "../shared/audio-review";
 import { planVisualTracking, scoreVisualSegment, subjectAnalysisRegion, type SmartFraming, type VisualAnalysis } from "../shared/visual-tracking";
 import type { EffectStyle, VideoEnhancement } from "../shared/visual-effects";
+import type { BodyOutlineStyle } from "../shared/body-outline";
 
 type Chosen = CreativeClip & { previewUrl: string };
 type UndoState = { clips: Chosen[]; options: ExportOptions; audioSelections: AudioSelection[] | null; briefInput: CreativeBriefInput; briefDirty: boolean;
@@ -141,6 +142,7 @@ export function App() {
   const [eventTitle, setEventTitle] = useState("");
   const [showClipLabels, setShowClipLabels] = useState(false);
   const [effects, setEffects] = useState<EffectStyle>("none");
+  const [bodyOutline, setBodyOutline] = useState<BodyOutlineStyle>("off");
   const [videoEnhancement, setVideoEnhancement] = useState<VideoEnhancement>("original");
   const [reducedFlash, setReducedFlash] = useState(true);
   const [smartFraming, setSmartFraming] = useState<SmartFraming>("balanced");
@@ -169,6 +171,7 @@ export function App() {
   const visualAnalysisCancelled = useRef(false);
 
   useEffect(() => { window.concertCompass.onProgress(setProgress); }, []);
+  useEffect(() => window.concertCompass.onPhase(setMessage), []);
   useEffect(() => {
     if (stage === "cut") document.getElementById("watch-first-cut")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [stage]);
@@ -189,7 +192,7 @@ export function App() {
     "The picture and soundtrack lengths differ. Review your plan to align them again.";
   const options: ExportOptions = { aspect, reduceRumble, finish, transition, quality, enhance,
     audioTransition, audioCrossfadeSeconds, beatSync, highlightFocus, eventTitle, showClipLabels,
-    effects, videoEnhancement: enhance ? undefined : videoEnhancement, reducedFlash, smartFraming };
+    effects, bodyOutline, videoEnhancement: enhance ? undefined : videoEnhancement, reducedFlash, smartFraming };
   const availableRecordings = clips.filter((clip) => !clip.excludedByUser).length;
   const suggestedPictureCount = Math.min(3, availableRecordings);
   const suggestedSoundCount = (() => {
@@ -197,11 +200,11 @@ export function App() {
     try { return interpretCreativeBrief({ ...briefInput, soundMomentCount: undefined }, clips, options).soundtrackIntent?.segmentCount ?? 3; }
     catch { return 3; }
   })();
-  const visualSignature = useMemo(() => JSON.stringify(selected.map(clip => ({ subject: clip.subject,
+  const visualSignature = useMemo(() => JSON.stringify(selected.map(clip => ({ subject: clip.subject, bodyOutlineDisabled: clip.bodyOutlineDisabled,
     tracking: clip.tracking, visualAnalysis: clip.visualAnalysis }))), [selected]);
   const cutSignature = useMemo(() => JSON.stringify({ clips: selected.map((clip) => ({ path: clip.asset.path, start: clip.start, end: clip.end, locked: clip.locked, framing: clip.framing ?? "auto", focus: clip.focus ?? 0.5, label: clip.label })), visualSignature, audioSelections, options }),
     [selected, visualSignature, audioSelections, aspect, reduceRumble, finish, transition, quality, enhance, audioTransition,
-      audioCrossfadeSeconds, beatSync, highlightFocus, eventTitle, showClipLabels, effects, videoEnhancement, reducedFlash, smartFraming]);
+      audioCrossfadeSeconds, beatSync, highlightFocus, eventTitle, showClipLabels, effects, bodyOutline, videoEnhancement, reducedFlash, smartFraming]);
   const guidedCutPending = briefInput.separatePicture === true && audioSelections === null;
   const currentSoundSignature = soundReviewSignature(selected, audioSelections, options);
   const currentSoundReview = soundReview?.signature === currentSoundSignature ? soundReview : null;
@@ -259,6 +262,7 @@ export function App() {
     setBeatSync(next.beatSync ?? false); setHighlightFocus(next.highlightFocus ?? "balanced");
     setEventTitle(next.eventTitle ?? ""); setShowClipLabels(next.showClipLabels ?? false);
     setEffects(next.effects ?? "none"); setVideoEnhancement(next.videoEnhancement ?? "original");
+    setBodyOutline(next.bodyOutline ?? "off");
     setReducedFlash(next.reducedFlash ?? true); setSmartFraming(next.smartFraming ?? "off");
   }
   function changeClips(next: Chosen[]) {
@@ -326,6 +330,12 @@ export function App() {
     invalidateReview();
     setMessage(value === "off" ? "Manual framing is ready. Your chosen crop and source sections are preserved." :
       "Smart framing uses analyzed people and visual continuity. Analyze visuals, then watch the assembled preview to check the result.");
+  }
+  function applySignatureLook() {
+    remember(); setBodyOutline("electric"); setEffects("full-y2k");
+    setVideoEnhancement("clean"); setEnhance(false); setReducedFlash(true); setQuality("high");
+    invalidateReview();
+    setMessage("Signature look selected: Electric performer neon, Full Y2K, Clean and gentler effects at the best available quality. Your sections, framing, length, color choice and soundtrack stay as they are. Update the preview to review the look.");
   }
   const visualKey = (clip: Chosen) => JSON.stringify([clip.asset.path, clip.asset.duration, clip.asset.width, clip.asset.height,
     ...(clip.subject ? [clip.subject.x, clip.subject.y, clip.start, clip.end] : [])]);
@@ -440,8 +450,9 @@ export function App() {
     const player = players.current.get(clip.asset.path);
     if (!player || !Number.isFinite(player.duration)) { setMessage("Wait for this source preview to load, then choose the performer again."); return; }
     player.pause();
-    seek(clip, clip.start); setChoosingSubject(clip.asset.path);
-    setMessage(`Showing the full original frame at the selected start of ${clip.asset.name}. Click or tap the performer to follow. The point is saved with this recording.`);
+    if (!Number.isFinite(player.currentTime) || player.currentTime < clip.start || player.currentTime > clip.end) seek(clip, clip.start);
+    setChoosingSubject(clip.asset.path);
+    setMessage(`Showing the full original frame of ${clip.asset.name}. Click or tap the performer to follow. This also chooses the moment for a brief neon accent when performer neon is on.`);
   }
   async function chooseSubject(index: number, event: { currentTarget: HTMLVideoElement; clientX: number; clientY: number }) {
     const clip = clips[index]; if (choosingSubject !== clip.asset.path || busy) return;
@@ -456,18 +467,19 @@ export function App() {
   async function saveSubject(index: number, x: number, y: number) {
     const clip = clips[index]; if (!clip || busy || choosingSubject !== clip.asset.path) return;
     const player = players.current.get(clip.asset.path);
-    if (!player || player.seeking || Math.abs(player.currentTime - clip.start) > 0.075) {
-      setMessage("Wait for the preview to reach your section’s start before choosing the performer."); return;
+    if (!player || player.seeking || !Number.isFinite(player.currentTime) || player.currentTime < clip.start - 0.001 || player.currentTime > clip.end + 0.001) {
+      setMessage("Pause within your selected section and wait for its picture to load before choosing the performer."); return;
     }
+    const time = Math.max(clip.start, Math.min(clip.end, player.currentTime));
     setBusy(true); setMessage(`Taking a closer check around your point in ${clip.asset.name}…`);
     try {
-      const chosen = { ...clip, subject: { x, y }, visualAnalysis: undefined };
+      const chosen = { ...clip, subject: { x, y, time }, visualAnalysis: undefined };
       const next = { ...chosen, visualAnalysis: await visualAnalysisFor(chosen) };
       const mode = smartFraming === "off" ? "follow-performer" : smartFraming;
       remember(); if (smartFraming === "off") setSmartFraming(mode);
       setClips(clips.map((current, currentIndex) => refreshTracking(currentIndex === index ? next : current, mode, aspect)));
       invalidateReview(); setChoosingSubject(null);
-      setMessage("Your performer point is saved after a closer check around your point. This does not recognize the artist. Uncertain moments hold the framing instead of jumping to someone else. Watch the assembled preview; check again if you change this section.");
+      setMessage("Your performer point is saved after a closer check around your point. This moment also guides a brief neon accent when performer neon is on. This does not recognize the artist. Uncertain moments hold the framing instead of jumping to someone else. Watch the assembled preview; check again if you change this section.");
     } catch (error) { setMessage(`Could not track that choice: ${error instanceof Error ? error.message : String(error)}. Your earlier edit is unchanged.`); }
     finally { setBusy(false); }
   }
@@ -769,9 +781,9 @@ export function App() {
         return;
       }
       if (confirmedSignature === checked.signature) setAcceptedSoundSignature(checked.signature);
-      setExporting(true); setMessage("Choose where to save your MP4…");
+      setExporting(true); setMessage(bodyOutline === "off" ? "Choose where to save your MP4…" : "Choose where to save your MP4. An extra local pass prepares clear performer silhouettes before the final video…");
       const result = await window.concertCompass.render(selected, options, audioSelections ?? undefined);
-      setMessage(result.cancelled ? "Export cancelled. Your original recordings were not changed." : `Finished MP4: ${result.output}${result.cleanupWarning ? " The video is saved, but a temporary folder could not be removed." : ""}`);
+      setMessage(result.cancelled ? "Export cancelled. Your original recordings were not changed." : `Finished MP4: ${result.output}${result.cleanupWarning ? " The video is saved, but a temporary folder could not be removed." : ""}${result.outlineNote ? ` ${result.outlineNote}` : ""}`);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       setMessage(detail.includes("Export stopped.") ? "Export stopped. Your selections are still here." : `Export failed. Your originals are safe. ${detail}`);
@@ -787,10 +799,11 @@ export function App() {
     try {
       const checked = await checkSelectedSound(selected, audioSelections, options);
       if (!checked) { setMessage("Sound check stopped. Preview has not started; your edit is still here."); return; }
-      setPreviewing(true); setMessage("Preparing a watchable draft with your current sections and look…");
+      setPreviewing(true); setMessage(bodyOutline === "off" ? "Preparing a watchable draft with your current sections and look…" : "Preparing performer neon and your watchable draft… Uncertain silhouettes stay clean.");
       const result = await window.concertCompass.previewCut(selected, options, audioSelections ?? undefined);
       setDraftUrl(result.url); setDraftSignature(signature);
-      setMessage(soundReviewNeedsDecision(checked) ? "Draft preview is ready. The sound check has moments to review below; listen before exporting." : "Draft preview is ready. Watch it through, then adjust or export.");
+      const ready = soundReviewNeedsDecision(checked) ? "Draft preview is ready. The sound check has moments to review below; listen before exporting." : "Draft preview is ready. Watch it through, then adjust or export.";
+      setMessage(`${ready}${result.outlineNote ? ` ${result.outlineNote}` : ""}`);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       setMessage(detail.includes("stopped") || detail.includes("cancel") ? "Preview stopped. Your edit is still here." : `Could not make the preview: ${detail}`);
@@ -902,6 +915,7 @@ export function App() {
       <section className="toolbar"><div><b>{audioSelections ? `${selected.length} videos to show · ${audioSelections.length} sound moments` : `${selected.length} selected`}</b><span>{clock(totalSeconds)} planned output · recordings play from top to bottom</span>{guidedCutPending && <span className="pending-badge">Make a first cut or choose manual editing before export</span>}{briefDirty && <span className="pending-badge">Make your new request before export</span>}{!briefDirty && storyNeedsRebuild && <span className="pending-badge">Rebuild the picture and soundtrack before export</span>}</div><div className="toolbar-actions"><button disabled={busy} onClick={saveProject}>Save project</button><button className="primary" disabled={busy || !selected.length || briefDirty || storyNeedsRebuild || guidedCutPending} onClick={() => exportReel()}>Export MP4</button></div></section>
       <section className="visual-studio" aria-label="Visual direction">
         <div className="visual-studio-heading"><div><p className="eyebrow">THE VISUAL PASS</p><h2>Give the night its look</h2><p>Follow the stage, keep the picture clean, and add a little neon when the music calls for it. Your soundtrack and kept sections stay yours.</p></div><span className="local-badge">On this PC · originals unchanged</span></div>
+        <div className="signature-preset"><div><strong>Vibe Capsule signature</strong><p>Recommended: brief Electric performer contours, a clean picture, and occasional neon accents. Set the visual choices together, then make them yours below.</p></div><button disabled={busy} aria-label="Apply Vibe Capsule signature" onClick={applySignatureLook}>Apply signature look</button></div>
         <div className="visual-controls">
           <fieldset><legend>Smart framing</legend><div className="choices">{([
             ["off", "Off · manual"], ["balanced", "Balanced"], ["follow-performer", "Follow performer"], ["group-performance", "Group performance"],
@@ -909,6 +923,9 @@ export function App() {
           <fieldset><legend>Video enhancement</legend><div className="choices">{([
             ["original", "Original"], ["clean", "Clean"], ["enhanced", "Enhanced"], ["maximum", "Maximum"],
           ] as const).map(([value, label]) => <button key={value} disabled={busy} aria-pressed={videoEnhancement === value && !enhance} onClick={() => { remember(); setVideoEnhancement(value); setEnhance(false); invalidateReview(); }}>{label}</button>)}</div><p>{enhance ? "This saved project uses the earlier gentle cleanup. Choose a level to replace it." : videoEnhancement === "original" ? "Keeps the recorded picture before your chosen color look and effects." : videoEnhancement === "clean" ? "Light, consistent grain cleanup with restrained sharpening." : videoEnhancement === "enhanced" ? "More grain cleanup and measured low-light correction, with gentle sharpening." : "Stronger grain cleanup for difficult footage. Compare with Clean; it cannot recover missing detail or repair faces."}</p></fieldset>
+          <fieldset className="performer-neon"><legend>Performer neon</legend><div className="choices body-outline-choices">{([
+            ["off", "Off"], ["subtle", "Soft"], ["electric", "Electric"],
+          ] as const).map(([value,label]) => <button key={value} disabled={busy} aria-pressed={bodyOutline === value} onClick={() => { remember(); setBodyOutline(value); invalidateReview(); }}>{label}</button>)}</div><p>{bodyOutline === "off" ? "Choose Soft or Electric for a few brief performer outlines. The rest of your video stays clean." : bodyOutline === "subtle" ? "Thin, quiet cyan-and-pink accents around clear performer silhouettes, up to eight across your video. Clear music timing guides them; otherwise a few planned moments are used." : "Recommended. Stronger cyan-and-pink contours with selective motion echoes, about a second each, up to eight across your video. Clear music timing guides them; otherwise a few planned moments are used. The rest stays clean."}</p><p className="visual-limit">Processing happens on this PC. Uncertain moments stay clean. Pause a source preview at a clear moment, then Choose performer below to guide both the subject and its brief neon accent. Check moving arms, clothing and obstructions in your preview. If an outline follows the wrong edge, use Skip performer neon on that recording.</p></fieldset>
           <fieldset><legend>Effects</legend><div className="choices effect-choices">{([
             ["none", "None"], ["subtle", "Subtle glow"], ["neon-pop", "Neon Pop"], ["full-y2k", "Full Y2K"],
           ] as const).map(([value, label]) => <button key={value} disabled={busy} aria-pressed={effects === value} onClick={() => { remember(); setEffects(value); invalidateReview(); }}>{label}</button>)}</div><p>{effects === "none" ? "A clean performance edit, with no added graphics." : effects === "subtle" ? "A soft bloom around bright source lights. No added text." : effects === "neon-pop" ? "Pink, cyan and purple light trails with occasional starbursts. No added text." : "Neon trails, starbursts and a few holographic accents, with clean performance shots between them. No added text."} {effects !== "none" && "Music accents use confident timing when available; otherwise opening and closing accents are used."}</p><label className="reduced-flash"><input disabled={busy} type="checkbox" checked={reducedFlash} onChange={event => { remember(); setReducedFlash(event.target.checked); invalidateReview(); }} /> Gentler effects · fewer, softer accents</label><p className="visual-limit">Concert lights in the original footage may still flash.</p></fieldset>
@@ -960,7 +977,8 @@ export function App() {
             {choosingSubject === clip.asset.path && clip.subject && <span className="subject-point" aria-hidden="true" style={{ left: `${clip.subject.x * 100}%`, top: `${clip.subject.y * 100}%` }} />}
           </div>
           <div className="clip-actions subject-actions">{choosingSubject === clip.asset.path ? <><button disabled={busy} onClick={() => setChoosingSubject(null)}>Cancel performer choice</button><button disabled={busy} onClick={() => void saveSubject(index, 0.5, 0.5)}>Use center point</button></> : <button disabled={busy || clip.excludedByUser} onClick={() => beginSubjectChoice(clip)}>{clip.subject ? "Change performer" : "Choose performer"}</button>}{clip.subject && <button disabled={busy} onClick={() => clearSubject(index)}>Clear performer choice</button>}</div>
-          {choosingSubject === clip.asset.path && <p className="subject-instruction">The source is paused at your section’s start. Click the person to keep in frame, or use the center point. No match means the app holds the picture rather than switching people.</p>}
+          {bodyOutline !== "off" && <label className="skip-performer-neon"><input disabled={busy} type="checkbox" checked={!!clip.bodyOutlineDisabled} onChange={event => changeClip(index, { bodyOutlineDisabled: event.target.checked })} /> Skip performer neon on this recording</label>}
+          {choosingSubject === clip.asset.path && <p className="subject-instruction">Pause at a clear moment within your selected section, then click the person to keep in frame or use the center point. This also chooses the moment for a brief neon accent when performer neon is on. No match means the app holds the picture rather than switching people.</p>}
           <div className="seek"><button disabled={busy} aria-label={`Back five seconds in ${clip.asset.name}`} onClick={() => seek(clip, (positions[clip.asset.path] ?? 0) - 5)}>−5s</button><input disabled={busy} aria-label={`Move through ${clip.asset.name}`} type="range" min="0" max={clip.asset.duration} step="0.1" value={Math.min(clip.asset.duration, positions[clip.asset.path] ?? 0)} onChange={(event) => seek(clip, Number(event.target.value))} /><button disabled={busy} aria-label={`Forward five seconds in ${clip.asset.name}`} onClick={() => seek(clip, (positions[clip.asset.path] ?? 0) + 5)}>+5s</button></div><small>{clock(positions[clip.asset.path] ?? 0)} / {clock(clip.asset.duration)}</small>
         </div>
         <div className="trim"><div className="frame-choice">
